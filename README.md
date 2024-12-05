@@ -1,3 +1,7 @@
+Deprecated
+=====
+Development of `osclientcerts` has moved directly into Firefox itself. This repository is no longer maintained, and only remains out of historical interest.
+
 osclientcerts
 -----
 `osclientcerts` is a PKCS#11 module that will give Firefox the ability to use client authentication certificates stored in OS-specific mechanisms.
