@@ -25,6 +25,10 @@ extern crate sha2;
 extern crate winapi;
 
 use pkcs11::types::*;
+use pkcs11::types::padding::{
+    BlankPaddedString16, BlankPaddedUtf8String16, BlankPaddedUtf8String32,
+    BlankPaddedUtf8String64,
+};
 use std::sync::Mutex;
 
 mod manager;
@@ -136,8 +140,8 @@ extern "C" fn C_GetInfo(pInfo: CK_INFO_PTR) -> CK_RV {
     let mut info = CK_INFO::default();
     info.cryptokiVersion.major = 2;
     info.cryptokiVersion.minor = 2;
-    info.manufacturerID = *MANUFACTURER_ID_BYTES;
-    info.libraryDescription = *LIBRARY_DESCRIPTION_BYTES;
+    info.manufacturerID = BlankPaddedUtf8String32(*MANUFACTURER_ID_BYTES);
+    info.libraryDescription = BlankPaddedUtf8String32(*LIBRARY_DESCRIPTION_BYTES);
     unsafe {
         *pInfo = info;
     }
@@ -186,8 +190,8 @@ extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, pInfo: CK_SLOT_INFO_PTR) -> CK_R
         return CKR_ARGUMENTS_BAD;
     }
     let slot_info = CK_SLOT_INFO {
-        slotDescription: *SLOT_DESCRIPTION_BYTES,
-        manufacturerID: *MANUFACTURER_ID_BYTES,
+        slotDescription: BlankPaddedUtf8String64(*SLOT_DESCRIPTION_BYTES),
+        manufacturerID: BlankPaddedUtf8String32(*MANUFACTURER_ID_BYTES),
         flags: CKF_TOKEN_PRESENT,
         hardwareVersion: CK_VERSION::default(),
         firmwareVersion: CK_VERSION::default(),
@@ -211,10 +215,10 @@ extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, pInfo: CK_TOKEN_INFO_PTR) -> CK
         return CKR_ARGUMENTS_BAD;
     }
     let mut token_info = CK_TOKEN_INFO::default();
-    token_info.label = *TOKEN_LABEL_BYTES;
-    token_info.manufacturerID = *MANUFACTURER_ID_BYTES;
-    token_info.model = *TOKEN_MODEL_BYTES;
-    token_info.serialNumber = *TOKEN_SERIAL_NUMBER_BYTES;
+    token_info.label = BlankPaddedUtf8String32(*TOKEN_LABEL_BYTES);
+    token_info.manufacturerID = BlankPaddedUtf8String32(*MANUFACTURER_ID_BYTES);
+    token_info.model = BlankPaddedUtf8String16(*TOKEN_MODEL_BYTES);
+    token_info.serialNumber = BlankPaddedString16(*TOKEN_SERIAL_NUMBER_BYTES);
     unsafe {
         *pInfo = token_info;
     }
@@ -467,7 +471,7 @@ extern "C" fn C_GetAttributeValue(
         return CKR_DEVICE_ERROR;
     }
     for i in 0..ulCount as usize {
-        let mut attr = unsafe { &mut *pTemplate.offset(i as isize) };
+        let attr = unsafe { &mut *pTemplate.offset(i as isize) };
         // NB: the safety of this array access depends on the length check above
         if let Some(attr_value) = &values[i] {
             if attr.pValue.is_null() {
@@ -1128,7 +1132,7 @@ pub extern "C" fn C_GetFunctionList(ppFunctionList: CK_FUNCTION_LIST_PTR_PTR) ->
         return CKR_ARGUMENTS_BAD;
     }
     unsafe {
-        *ppFunctionList = &mut FUNCTION_LIST;
+        *ppFunctionList = std::ptr::addr_of_mut!(FUNCTION_LIST);
     }
     CKR_OK
 }
