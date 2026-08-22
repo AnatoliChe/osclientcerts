@@ -219,6 +219,9 @@ extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, pInfo: CK_TOKEN_INFO_PTR) -> CK
     token_info.manufacturerID = BlankPaddedUtf8String32(*MANUFACTURER_ID_BYTES);
     token_info.model = BlankPaddedUtf8String16(*TOKEN_MODEL_BYTES);
     token_info.serialNumber = BlankPaddedString16(*TOKEN_SERIAL_NUMBER_BYTES);
+    // Advertise what this token can do so that applications (e.g. NSS) will attempt sign,
+    // encrypt, and decrypt operations.
+    token_info.flags |= CKF_SIGN | CKF_ENCRYPT | CKF_DECRYPT;
     unsafe {
         *pInfo = token_info;
     }
@@ -598,24 +601,110 @@ extern "C" fn C_FindObjectsFinal(hSession: CK_SESSION_HANDLE) -> CK_RV {
     }
 }
 
+/// This gets called to set up an encrypt operation. Only RSA PKCS#1 v1.5 is supported; encryption
+/// uses the public key of the certificate associated with the given object.
 extern "C" fn C_EncryptInit(
-    _hSession: CK_SESSION_HANDLE,
-    _pMechanism: CK_MECHANISM_PTR,
-    _hKey: CK_OBJECT_HANDLE,
+    hSession: CK_SESSION_HANDLE,
+    pMechanism: CK_MECHANISM_PTR,
+    hKey: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    error!("C_EncryptInit: CKR_FUNCTION_NOT_SUPPORTED");
-    CKR_FUNCTION_NOT_SUPPORTED
+    if pMechanism.is_null() {
+        error!("C_EncryptInit: CKR_ARGUMENTS_BAD");
+        return CKR_ARGUMENTS_BAD;
+    }
+    let mechanism = unsafe { *pMechanism };
+    debug!("C_EncryptInit: mechanism is {:?}", mechanism);
+    let mechanism_type = unsafe_packed_field_access!(mechanism.mechanism);
+    if mechanism_type != CKM_RSA_PKCS {
+        error!(
+            "C_EncryptInit: unsupported mechanism: {}",
+            mechanism_type
+        );
+        return CKR_MECHANISM_INVALID;
+    }
+    let parameter_len = unsafe_packed_field_access!(mechanism.ulParameterLen);
+    if parameter_len != 0 || !mechanism.pParameter.is_null() {
+        error!(
+            "C_EncryptInit: unexpected mechanism parameters, len {}",
+            parameter_len
+        );
+        return CKR_ARGUMENTS_BAD;
+    }
+    let mut manager_guard = try_to_get_manager_guard!();
+    let manager = manager_guard_to_manager!(manager_guard);
+    match manager.start_encrypt(hSession, hKey) {
+        Ok(()) => {}
+        Err(()) => {
+            error!("C_EncryptInit: CKR_KEY_HANDLE_INVALID");
+            return CKR_KEY_HANDLE_INVALID;
+        }
+    };
+    debug!("C_EncryptInit: CKR_OK");
+    CKR_OK
 }
 
+/// NSS calls this after `C_EncryptInit`. The module essentially defers to the `ManagerProxy` and
+/// copies out the resulting ciphertext.
 extern "C" fn C_Encrypt(
-    _hSession: CK_SESSION_HANDLE,
-    _pData: CK_BYTE_PTR,
-    _ulDataLen: CK_ULONG,
-    _pEncryptedData: CK_BYTE_PTR,
-    _pulEncryptedDataLen: CK_ULONG_PTR,
+    hSession: CK_SESSION_HANDLE,
+    pData: CK_BYTE_PTR,
+    ulDataLen: CK_ULONG,
+    pEncryptedData: CK_BYTE_PTR,
+    pulEncryptedDataLen: CK_ULONG_PTR,
 ) -> CK_RV {
-    error!("C_Encrypt: CKR_FUNCTION_NOT_SUPPORTED");
-    CKR_FUNCTION_NOT_SUPPORTED
+    debug!(
+        "C_Encrypt: hSession {}, ulDataLen {}, pEncryptedData null? {}",
+        hSession,
+        ulDataLen,
+        pEncryptedData.is_null()
+    );
+    if pData.is_null() || pulEncryptedDataLen.is_null() {
+        error!("C_Encrypt: CKR_ARGUMENTS_BAD");
+        return CKR_ARGUMENTS_BAD;
+    }
+    let data = unsafe { std::slice::from_raw_parts(pData, ulDataLen as usize) };
+    // If pEncryptedData is null, the caller is asking for the length of the ciphertext.
+    if pEncryptedData.is_null() {
+        let mut manager_guard = try_to_get_manager_guard!();
+        let manager = manager_guard_to_manager!(manager_guard);
+        match manager.get_encrypted_length(hSession, data.to_vec()) {
+            Ok(encrypted_length) => {
+                debug!("C_Encrypt: output length = {}", encrypted_length);
+                unsafe {
+                    *pulEncryptedDataLen = encrypted_length as CK_ULONG;
+                }
+            }
+            Err(()) => {
+                error!("C_Encrypt: get_encrypted_length failed");
+                return CKR_GENERAL_ERROR;
+            }
+        }
+    } else {
+        let mut manager_guard = try_to_get_manager_guard!();
+        let manager = manager_guard_to_manager!(manager_guard);
+        let encrypted = match manager.encrypt(hSession, data.to_vec()) {
+            Ok(ciphertext) => ciphertext,
+            Err(()) => {
+                error!("C_Encrypt: encrypt failed");
+                return CKR_GENERAL_ERROR;
+            }
+        };
+        let encrypted_capacity = unsafe { *pulEncryptedDataLen } as usize;
+        if encrypted_capacity < encrypted.len() {
+            unsafe {
+                *pulEncryptedDataLen = encrypted.len() as CK_ULONG;
+            }
+            error!("C_Encrypt: CKR_BUFFER_TOO_SMALL");
+            return CKR_BUFFER_TOO_SMALL;
+        }
+        let ptr: *mut u8 = pEncryptedData as *mut u8;
+        unsafe {
+            std::ptr::copy_nonoverlapping(encrypted.as_ptr(), ptr, encrypted.len());
+            *pulEncryptedDataLen = encrypted.len() as CK_ULONG;
+        }
+    }
+    debug!("C_Encrypt: CKR_OK");
+    CKR_OK
 }
 
 extern "C" fn C_EncryptUpdate(
@@ -639,23 +728,109 @@ extern "C" fn C_EncryptFinal(
 }
 
 extern "C" fn C_DecryptInit(
-    _hSession: CK_SESSION_HANDLE,
-    _pMechanism: CK_MECHANISM_PTR,
-    _hKey: CK_OBJECT_HANDLE,
+    hSession: CK_SESSION_HANDLE,
+    pMechanism: CK_MECHANISM_PTR,
+    hKey: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    error!("C_DecryptInit: CKR_FUNCTION_NOT_SUPPORTED");
-    CKR_FUNCTION_NOT_SUPPORTED
+    if pMechanism.is_null() {
+        error!("C_DecryptInit: CKR_ARGUMENTS_BAD");
+        return CKR_ARGUMENTS_BAD;
+    }
+    let mechanism = unsafe { *pMechanism };
+    debug!("C_DecryptInit: mechanism is {:?}", mechanism);
+    let mechanism_type = unsafe_packed_field_access!(mechanism.mechanism);
+    if mechanism_type != CKM_RSA_PKCS {
+        error!(
+            "C_DecryptInit: unsupported mechanism: {}",
+            mechanism_type
+        );
+        return CKR_MECHANISM_INVALID;
+    }
+    let parameter_len = unsafe_packed_field_access!(mechanism.ulParameterLen);
+    if parameter_len != 0 || !mechanism.pParameter.is_null() {
+        error!(
+            "C_DecryptInit: unexpected mechanism parameters, len {}",
+            parameter_len
+        );
+        return CKR_ARGUMENTS_BAD;
+    }
+    let mut manager_guard = try_to_get_manager_guard!();
+    let manager = manager_guard_to_manager!(manager_guard);
+    match manager.start_decrypt(hSession, hKey) {
+        Ok(()) => {}
+        Err(()) => {
+            error!("C_DecryptInit: CKR_KEY_HANDLE_INVALID");
+            return CKR_KEY_HANDLE_INVALID;
+        }
+    };
+    debug!("C_DecryptInit: CKR_OK");
+    CKR_OK
 }
 
+/// NSS calls this after `C_DecryptInit`. The module essentially defers to the `ManagerProxy` and
+/// copies out the resulting plaintext. This is the entry point for S/MIME message decryption with
+/// non-exportable Windows keys.
 extern "C" fn C_Decrypt(
-    _hSession: CK_SESSION_HANDLE,
-    _pEncryptedData: CK_BYTE_PTR,
-    _ulEncryptedDataLen: CK_ULONG,
-    _pData: CK_BYTE_PTR,
-    _pulDataLen: CK_ULONG_PTR,
+    hSession: CK_SESSION_HANDLE,
+    pEncryptedData: CK_BYTE_PTR,
+    ulEncryptedDataLen: CK_ULONG,
+    pData: CK_BYTE_PTR,
+    pulDataLen: CK_ULONG_PTR,
 ) -> CK_RV {
-    error!("C_Decrypt: CKR_FUNCTION_NOT_SUPPORTED");
-    CKR_FUNCTION_NOT_SUPPORTED
+    debug!(
+        "C_Decrypt: hSession {}, ulEncryptedDataLen {}, pData null? {}",
+        hSession,
+        ulEncryptedDataLen,
+        pData.is_null()
+    );
+    if pEncryptedData.is_null() || pulDataLen.is_null() {
+        error!("C_Decrypt: CKR_ARGUMENTS_BAD");
+        return CKR_ARGUMENTS_BAD;
+    }
+    let encrypted_data =
+        unsafe { std::slice::from_raw_parts(pEncryptedData, ulEncryptedDataLen as usize) };
+    // If pData is null, the caller is asking for the length of the decrypted data.
+    if pData.is_null() {
+        let mut manager_guard = try_to_get_manager_guard!();
+        let manager = manager_guard_to_manager!(manager_guard);
+        match manager.get_decrypted_length(hSession, encrypted_data.to_vec()) {
+            Ok(decrypted_length) => {
+                debug!("C_Decrypt: output length = {}", decrypted_length);
+                unsafe {
+                    *pulDataLen = decrypted_length as CK_ULONG;
+                }
+            }
+            Err(()) => {
+                error!("C_Decrypt: get_decrypted_length failed");
+                return CKR_GENERAL_ERROR;
+            }
+        }
+    } else {
+        let mut manager_guard = try_to_get_manager_guard!();
+        let manager = manager_guard_to_manager!(manager_guard);
+        let decrypted = match manager.decrypt(hSession, encrypted_data.to_vec()) {
+            Ok(plaintext) => plaintext,
+            Err(()) => {
+                error!("C_Decrypt: decrypt failed");
+                return CKR_GENERAL_ERROR;
+            }
+        };
+        let data_capacity = unsafe { *pulDataLen } as usize;
+        if data_capacity < decrypted.len() {
+            unsafe {
+                *pulDataLen = decrypted.len() as CK_ULONG;
+            }
+            error!("C_Decrypt: CKR_BUFFER_TOO_SMALL");
+            return CKR_BUFFER_TOO_SMALL;
+        }
+        let ptr: *mut u8 = pData as *mut u8;
+        unsafe {
+            std::ptr::copy_nonoverlapping(decrypted.as_ptr(), ptr, decrypted.len());
+            *pulDataLen = decrypted.len() as CK_ULONG;
+        }
+    }
+    debug!("C_Decrypt: CKR_OK");
+    CKR_OK
 }
 
 extern "C" fn C_DecryptUpdate(

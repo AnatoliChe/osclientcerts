@@ -40,6 +40,12 @@ enum ManagerArguments {
     ),
     GetSignatureLength(CK_SESSION_HANDLE, Vec<u8>),
     Sign(CK_SESSION_HANDLE, Vec<u8>),
+    StartDecrypt(CK_SESSION_HANDLE, CK_OBJECT_HANDLE),
+    GetDecryptedLength(CK_SESSION_HANDLE, Vec<u8>),
+    Decrypt(CK_SESSION_HANDLE, Vec<u8>),
+    StartEncrypt(CK_SESSION_HANDLE, CK_OBJECT_HANDLE),
+    GetEncryptedLength(CK_SESSION_HANDLE, Vec<u8>),
+    Encrypt(CK_SESSION_HANDLE, Vec<u8>),
     Stop,
 }
 
@@ -57,6 +63,12 @@ enum ManagerReturnValue {
     StartSign(Result<(), ()>),
     GetSignatureLength(Result<usize, ()>),
     Sign(Result<Vec<u8>, ()>),
+    StartDecrypt(Result<(), ()>),
+    GetDecryptedLength(Result<usize, ()>),
+    Decrypt(Result<Vec<u8>, ()>),
+    StartEncrypt(Result<(), ()>),
+    GetEncryptedLength(Result<usize, ()>),
+    Encrypt(Result<Vec<u8>, ()>),
     Stop(Result<(), ()>),
 }
 
@@ -137,6 +149,32 @@ impl ManagerProxy {
                     }
                     ManagerArguments::Sign(session, data) => {
                         ManagerReturnValue::Sign(real_manager.sign(session, &data))
+                    }
+                    ManagerArguments::StartDecrypt(session, key_handle) => {
+                        ManagerReturnValue::StartDecrypt(
+                            real_manager.start_decrypt(session, key_handle),
+                        )
+                    }
+                    ManagerArguments::GetDecryptedLength(session, data) => {
+                        ManagerReturnValue::GetDecryptedLength(
+                            real_manager.get_decrypted_length(session, &data),
+                        )
+                    }
+                    ManagerArguments::Decrypt(session, data) => {
+                        ManagerReturnValue::Decrypt(real_manager.decrypt(session, &data))
+                    }
+                    ManagerArguments::StartEncrypt(session, key_handle) => {
+                        ManagerReturnValue::StartEncrypt(
+                            real_manager.start_encrypt(session, key_handle),
+                        )
+                    }
+                    ManagerArguments::GetEncryptedLength(session, data) => {
+                        ManagerReturnValue::GetEncryptedLength(
+                            real_manager.get_encrypted_length(session, &data),
+                        )
+                    }
+                    ManagerArguments::Encrypt(session, data) => {
+                        ManagerReturnValue::Encrypt(real_manager.encrypt(session, &data))
                     }
                     ManagerArguments::Stop => {
                         debug!("ManagerArguments::Stop received - stopping Manager thread.");
@@ -285,6 +323,70 @@ impl ManagerProxy {
         )
     }
 
+    pub fn start_decrypt(
+        &mut self,
+        session: CK_SESSION_HANDLE,
+        key_handle: CK_OBJECT_HANDLE,
+    ) -> Result<(), ()> {
+        manager_proxy_fn_impl!(
+            self,
+            ManagerArguments::StartDecrypt(session, key_handle),
+            ManagerReturnValue::StartDecrypt
+        )
+    }
+
+    pub fn get_decrypted_length(
+        &self,
+        session: CK_SESSION_HANDLE,
+        data: Vec<u8>,
+    ) -> Result<usize, ()> {
+        manager_proxy_fn_impl!(
+            self,
+            ManagerArguments::GetDecryptedLength(session, data),
+            ManagerReturnValue::GetDecryptedLength
+        )
+    }
+
+    pub fn decrypt(&mut self, session: CK_SESSION_HANDLE, data: Vec<u8>) -> Result<Vec<u8>, ()> {
+        manager_proxy_fn_impl!(
+            self,
+            ManagerArguments::Decrypt(session, data),
+            ManagerReturnValue::Decrypt
+        )
+    }
+
+    pub fn start_encrypt(
+        &mut self,
+        session: CK_SESSION_HANDLE,
+        key_handle: CK_OBJECT_HANDLE,
+    ) -> Result<(), ()> {
+        manager_proxy_fn_impl!(
+            self,
+            ManagerArguments::StartEncrypt(session, key_handle),
+            ManagerReturnValue::StartEncrypt
+        )
+    }
+
+    pub fn get_encrypted_length(
+        &self,
+        session: CK_SESSION_HANDLE,
+        data: Vec<u8>,
+    ) -> Result<usize, ()> {
+        manager_proxy_fn_impl!(
+            self,
+            ManagerArguments::GetEncryptedLength(session, data),
+            ManagerReturnValue::GetEncryptedLength
+        )
+    }
+
+    pub fn encrypt(&mut self, session: CK_SESSION_HANDLE, data: Vec<u8>) -> Result<Vec<u8>, ()> {
+        manager_proxy_fn_impl!(
+            self,
+            ManagerArguments::Encrypt(session, data),
+            ManagerReturnValue::Encrypt
+        )
+    }
+
     pub fn stop(&mut self) -> Result<(), ()> {
         manager_proxy_fn_impl!(self, ManagerArguments::Stop, ManagerReturnValue::Stop)?;
         let thread_handle = match self.thread_handle.take() {
@@ -316,6 +418,11 @@ struct Manager {
     /// A map of sign operations to a pair of the object handle and optionally some params being
     /// used by each one.
     signs: BTreeMap<CK_SESSION_HANDLE, (CK_OBJECT_HANDLE, Option<CK_RSA_PKCS_PSS_PARAMS>)>,
+    /// A map of decrypt operations to the key handle being used by each one.
+    decrypts: BTreeMap<CK_SESSION_HANDLE, CK_OBJECT_HANDLE>,
+    /// A map of encrypt operations to the object handle (certificate or key) being used by each
+    /// one.
+    encrypts: BTreeMap<CK_SESSION_HANDLE, CK_OBJECT_HANDLE>,
     /// A map of object handles to the underlying objects.
     objects: BTreeMap<CK_OBJECT_HANDLE, Object>,
     /// A set of certificate identifiers (not the same as handles).
@@ -338,6 +445,8 @@ impl Manager {
             sessions: BTreeSet::new(),
             searches: BTreeMap::new(),
             signs: BTreeMap::new(),
+            decrypts: BTreeMap::new(),
+            encrypts: BTreeMap::new(),
             objects: BTreeMap::new(),
             cert_ids: BTreeSet::new(),
             key_ids: BTreeSet::new(),
@@ -552,5 +661,100 @@ impl Manager {
             _ => return Err(()),
         };
         key.sign(data, &params)
+    }
+
+    pub fn start_decrypt(
+        &mut self,
+        session: CK_SESSION_HANDLE,
+        key_handle: CK_OBJECT_HANDLE,
+    ) -> Result<(), ()> {
+        if self.decrypts.contains_key(&session) {
+            return Err(());
+        }
+        // Only private keys can be used for decryption.
+        match self.objects.get(&key_handle) {
+            Some(Object::Key(_)) => {}
+            _ => return Err(()),
+        };
+        self.decrypts.insert(session, key_handle);
+        Ok(())
+    }
+
+    pub fn get_decrypted_length(
+        &self,
+        session: CK_SESSION_HANDLE,
+        data: &[u8],
+    ) -> Result<usize, ()> {
+        let key_handle = match self.decrypts.get(&session) {
+            Some(key_handle) => *key_handle,
+            None => return Err(()),
+        };
+        let key = match self.objects.get(&key_handle) {
+            Some(Object::Key(key)) => key,
+            _ => return Err(()),
+        };
+        key.decrypt_length(data)
+    }
+
+    pub fn decrypt(&mut self, session: CK_SESSION_HANDLE, data: &[u8]) -> Result<Vec<u8>, ()> {
+        // Performing the decryption (via C_Decrypt, which is the only way we support) finishes the
+        // decrypt operation, so it needs to be removed here.
+        let key_handle = match self.decrypts.remove(&session) {
+            Some(key_handle) => key_handle,
+            None => return Err(()),
+        };
+        let key = match self.objects.get(&key_handle) {
+            Some(Object::Key(key)) => key,
+            _ => return Err(()),
+        };
+        key.decrypt(data)
+    }
+
+    pub fn start_encrypt(
+        &mut self,
+        session: CK_SESSION_HANDLE,
+        key_handle: CK_OBJECT_HANDLE,
+    ) -> Result<(), ()> {
+        if self.encrypts.contains_key(&session) {
+            return Err(());
+        }
+        // Encryption uses the public key of a certificate; both certificate objects and private
+        // key objects (which know their certificate) are acceptable here.
+        match self.objects.get(&key_handle) {
+            Some(Object::Cert(_)) | Some(Object::Key(_)) => {}
+            _ => return Err(()),
+        };
+        self.encrypts.insert(session, key_handle);
+        Ok(())
+    }
+
+    pub fn get_encrypted_length(
+        &self,
+        session: CK_SESSION_HANDLE,
+        data: &[u8],
+    ) -> Result<usize, ()> {
+        let object_handle = match self.encrypts.get(&session) {
+            Some(object_handle) => *object_handle,
+            None => return Err(()),
+        };
+        match self.objects.get(&object_handle) {
+            Some(Object::Cert(cert)) => cert.encrypt_length(data),
+            Some(Object::Key(key)) => key.encrypt_length(data),
+            _ => Err(()),
+        }
+    }
+
+    pub fn encrypt(&mut self, session: CK_SESSION_HANDLE, data: &[u8]) -> Result<Vec<u8>, ()> {
+        // Performing the encryption (via C_Encrypt, which is the only way we support) finishes the
+        // encrypt operation, so it needs to be removed here.
+        let object_handle = match self.encrypts.remove(&session) {
+            Some(object_handle) => object_handle,
+            None => return Err(()),
+        };
+        match self.objects.get(&object_handle) {
+            Some(Object::Cert(cert)) => cert.encrypt(data),
+            Some(Object::Key(key)) => key.encrypt(data),
+            _ => Err(()),
+        }
     }
 }
