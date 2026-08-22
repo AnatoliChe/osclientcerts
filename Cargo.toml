@@ -26,10 +26,10 @@ version = "0.5"
 
 [target."cfg(target_os = \"windows\")".dependencies.winapi]
 version = "0.3"
-features = ["wincrypt"]
+features = ["wincrypt", "bcrypt"]
 
 [build-dependencies]
-bindgen = {version = "0.51.1", default-features = false} # disable `logging` to reduce code size
+bindgen = "0.72"
 
 [lib]
 crate-type = ["cdylib"]

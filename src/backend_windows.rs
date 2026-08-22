@@ -105,6 +105,38 @@ impl Cert {
         })
     }
 
+    /// Create a temporary certificate context from the DER bytes of this certificate.
+    fn context(&self) -> Result<CertContext, ()> {
+        let cert_context = unsafe {
+            CertCreateCertificateContext(
+                X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+                self.value.as_ptr(),
+                self.value.len().try_into().map_err(|_| ())?,
+            )
+        };
+        if cert_context.is_null() {
+            error!("CertCreateCertificateContext failed");
+            return Err(());
+        }
+        Ok(CertContext(cert_context))
+    }
+
+    /// Determine the length of the ciphertext that would result from encrypting `data` with this
+    /// certificate's public key (RSA PKCS#1 v1.5 padding).
+    pub fn encrypt_length(&self, data: &[u8]) -> Result<usize, ()> {
+        let context = self.context()?;
+        match context.encrypt_internal(data, false) {
+            Ok(dummy_ciphertext) => Ok(dummy_ciphertext.len()),
+            Err(()) => Err(()),
+        }
+    }
+
+    /// Encrypt `data` with this certificate's public key using RSA PKCS#1 v1.5 padding via CNG.
+    pub fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>, ()> {
+        let context = self.context()?;
+        context.encrypt_internal(data, true)
+    }
+
     fn class(&self) -> &[u8] {
         &self.class
     }
@@ -179,6 +211,73 @@ impl CertContext {
     fn new(cert: PCCERT_CONTEXT) -> CertContext {
         CertContext(unsafe { CertDuplicateCertificateContext(cert) })
     }
+
+    /// Encrypt `data` with this certificate's public key using RSA PKCS#1 v1.5 padding via CNG.
+    /// If `do_encrypt` is false, only the length of the ciphertext is determined.
+    fn encrypt_internal(&self, data: &[u8], do_encrypt: bool) -> Result<Vec<u8>, ()> {
+        let key = BCryptPublicKeyHandle::from_cert(self)?;
+        // As with RSA-PKCS1 signing, the padding info does not need a hash algorithm identifier
+        // when encrypting with PKCS#1 v1.5 padding.
+        let mut padding_info = BCRYPT_PKCS1_PADDING_INFO {
+            pszAlgId: std::ptr::null(),
+        };
+        let mut input = data.to_vec();
+        let mut encrypted_len: u32 = 0;
+        // The first call asks CNG for the required output buffer size without performing the
+        // encryption.
+        let status = unsafe {
+            BCryptEncrypt(
+                *key,
+                input.as_mut_ptr(),
+                input.len().try_into().map_err(|_| ())?,
+                &mut padding_info as *mut BCRYPT_PKCS1_PADDING_INFO as *mut _,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                &mut encrypted_len,
+                NCRYPT_PAD_PKCS1_FLAG,
+            )
+        };
+        if status != 0 {
+            error!(
+                "BCryptEncrypt failed getting output buffer length, {}",
+                status
+            );
+            return Err(());
+        }
+        let mut encrypted = vec![0; encrypted_len as usize];
+        if !do_encrypt {
+            return Ok(encrypted);
+        }
+        let mut final_encrypted_len = encrypted_len;
+        let status = unsafe {
+            BCryptEncrypt(
+                *key,
+                input.as_mut_ptr(),
+                input.len().try_into().map_err(|_| ())?,
+                &mut padding_info as *mut BCRYPT_PKCS1_PADDING_INFO as *mut _,
+                std::ptr::null_mut(),
+                0,
+                encrypted.as_mut_ptr(),
+                encrypted_len,
+                &mut final_encrypted_len,
+                NCRYPT_PAD_PKCS1_FLAG,
+            )
+        };
+        if status != 0 {
+            error!("BCryptEncrypt failed encrypting data, {}", status);
+            return Err(());
+        }
+        if final_encrypted_len != encrypted_len {
+            error!(
+                "BCryptEncrypt: inconsistent encrypted lengths? {} != {}",
+                final_encrypted_len, encrypted_len
+            );
+            return Err(());
+        }
+        Ok(encrypted)
+    }
 }
 
 impl Drop for CertContext {
@@ -214,6 +313,7 @@ impl NCryptKeyHandle {
                 &mut must_free,
             ) != 1
             {
+                error!("CryptAcquireCertificatePrivateKey failed");
                 return Err(());
             }
         }
@@ -239,6 +339,52 @@ impl Drop for NCryptKeyHandle {
 
 impl Deref for NCryptKeyHandle {
     type Target = NCRYPT_KEY_HANDLE;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// A handle on a CNG public key imported from a certificate.
+pub struct BCryptPublicKeyHandle(BCRYPT_KEY_HANDLE);
+
+impl BCryptPublicKeyHandle {
+    /// Import the public key of the given certificate as a CNG key. This does not touch any private
+    /// key material; it only uses the (public) certificate bytes.
+    fn from_cert(cert: &CertContext) -> Result<BCryptPublicKeyHandle, ()> {
+        let mut key_handle: BCRYPT_KEY_HANDLE = std::ptr::null_mut();
+        // Extract the subject public key info from the certificate.
+        let pccert: PCCERT_CONTEXT = **cert;
+        let public_key_info: &CERT_PUBLIC_KEY_INFO = unsafe {
+            &(*(*pccert).pCertInfo).SubjectPublicKeyInfo
+        };
+        let imported = unsafe {
+            CryptImportPublicKeyInfoEx2(
+                X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+                public_key_info as *const CERT_PUBLIC_KEY_INFO as *mut CERT_PUBLIC_KEY_INFO,
+                0,
+                std::ptr::null_mut(),
+                &mut key_handle,
+            )
+        };
+        if imported == 0 {
+            error!("CryptImportPublicKeyInfoEx2 failed");
+            return Err(());
+        }
+        Ok(BCryptPublicKeyHandle(key_handle))
+    }
+}
+
+impl Drop for BCryptPublicKeyHandle {
+    fn drop(&mut self) {
+        unsafe {
+            BCryptDestroyKey(self.0);
+        }
+    }
+}
+
+impl Deref for BCryptPublicKeyHandle {
+    type Target = BCRYPT_KEY_HANDLE;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -566,6 +712,91 @@ impl Key {
             return Err(());
         }
         Ok(signature)
+    }
+
+    /// Determine the length of the plaintext that would result from decrypting `data` with this
+    /// key (RSA PKCS#1 v1.5 padding).
+    pub fn decrypt_length(&self, data: &[u8]) -> Result<usize, ()> {
+        match self.decrypt_internal(data, false) {
+            Ok(dummy_plaintext) => Ok(dummy_plaintext.len()),
+            Err(()) => Err(()),
+        }
+    }
+
+    /// Decrypt `data` with this (private, non-exportable) key using RSA PKCS#1 v1.5 padding via
+    /// CNG. The private key material never leaves Windows.
+    pub fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>, ()> {
+        self.decrypt_internal(data, true)
+    }
+
+    fn decrypt_internal(&self, data: &[u8], do_decrypt: bool) -> Result<Vec<u8>, ()> {
+        if !matches!(self.key_type_enum, KeyType::RSA) {
+            error!("decrypt requested for non-RSA key");
+            return Err(());
+        }
+        // Acquiring a handle on the key can cause the OS to show some UI to the user, so we do
+        // this as late as possible (i.e. here).
+        let key = NCryptKeyHandle::from_cert(&self.cert)?;
+        let mut decrypted_len: u32 = 0;
+        // The first call asks CNG for the required output buffer size without performing the
+        // decryption.
+        let status = unsafe {
+            NCryptDecrypt(
+                *key,
+                data.as_ptr() as *mut u8,
+                data.len().try_into().map_err(|_| ())?,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+                &mut decrypted_len,
+                NCRYPT_PAD_PKCS1_FLAG,
+            )
+        };
+        if status != 0 {
+            error!(
+                "NCryptDecrypt failed getting output buffer length, {}",
+                status
+            );
+            return Err(());
+        }
+        let mut decrypted = vec![0; decrypted_len as usize];
+        if !do_decrypt {
+            return Ok(decrypted);
+        }
+        let mut final_decrypted_len = decrypted_len;
+        let status = unsafe {
+            NCryptDecrypt(
+                *key,
+                data.as_ptr() as *mut u8,
+                data.len().try_into().map_err(|_| ())?,
+                std::ptr::null_mut(),
+                decrypted.as_mut_ptr(),
+                decrypted_len,
+                &mut final_decrypted_len,
+                NCRYPT_PAD_PKCS1_FLAG,
+            )
+        };
+        if status != 0 {
+            error!("NCryptDecrypt failed decrypting data, {}", status);
+            return Err(());
+        }
+        decrypted.truncate(final_decrypted_len as usize);
+        Ok(decrypted)
+    }
+
+    /// Determine the length of the ciphertext that would result from encrypting `data` with this
+    /// key's public key (RSA PKCS#1 v1.5 padding).
+    pub fn encrypt_length(&self, data: &[u8]) -> Result<usize, ()> {
+        match self.cert.encrypt_internal(data, false) {
+            Ok(dummy_ciphertext) => Ok(dummy_ciphertext.len()),
+            Err(()) => Err(()),
+        }
+    }
+
+    /// Encrypt `data` with this key's certificate public key using RSA PKCS#1 v1.5 padding via
+    /// CNG.
+    pub fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>, ()> {
+        self.cert.encrypt_internal(data, true)
     }
 }
 
