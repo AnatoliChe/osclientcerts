@@ -244,8 +244,8 @@ extern "C" fn C_GetMechanismList(
     let mechanisms = [CKM_ECDSA, CKM_RSA_PKCS, CKM_RSA_PKCS_PSS];
     if !pMechanismList.is_null() {
         if unsafe { *pulCount as usize } < mechanisms.len() {
-            error!("C_GetMechanismList: CKR_ARGUMENTS_BAD");
-            return CKR_ARGUMENTS_BAD;
+            error!("C_GetMechanismList: CKR_BUFFER_TOO_SMALL");
+            return CKR_BUFFER_TOO_SMALL;
         }
         for i in 0..mechanisms.len() {
             unsafe {
@@ -280,16 +280,16 @@ extern "C" fn C_GetMechanismInfo(
         return CKR_ARGUMENTS_BAD;
     }
     let info = unsafe { &mut *pInfo };
-    // Key sizes are in bits. RSA keys from 512 up to 16384 bits are usable via CNG; for elliptic
+    // Key sizes are in bits. RSA keys from 1024 up to 16384 bits are usable via CNG; for elliptic
     // curves we support the NIST curves P-256 through P-521.
     let (info_min_key_size, info_max_key_size, info_flags) = match mechanism_type {
         CKM_RSA_PKCS => (
-            512,
+            1024,
             16384,
             CKF_SIGN | CKF_DECRYPT | CKF_ENCRYPT,
         ),
-        CKM_RSA_PKCS_PSS => (512, 16384, CKF_SIGN),
-        CKM_ECDSA => (256, 521, CKF_SIGN),
+        CKM_RSA_PKCS_PSS => (1024, 16384, CKF_SIGN),
+        CKM_ECDSA => (192, 521, CKF_SIGN),
         _ => {
             error!("C_GetMechanismInfo: unsupported mechanism: {}", mechanism_type);
             return CKR_MECHANISM_INVALID;
@@ -507,6 +507,7 @@ extern "C" fn C_GetAttributeValue(
         );
         return CKR_DEVICE_ERROR;
     }
+    let mut rv = CKR_OK;
     for i in 0..ulCount as usize {
         let attr = unsafe { &mut *pTemplate.offset(i as isize) };
         // NB: the safety of this array access depends on the length check above
@@ -515,17 +516,24 @@ extern "C" fn C_GetAttributeValue(
                 attr.ulValueLen = attr_value.len() as CK_ULONG;
             } else {
                 let ptr: *mut u8 = attr.pValue as *mut u8;
-                if attr_value.len() != attr.ulValueLen as usize {
-                    error!("C_GetAttributeValue: incorrect attr size");
-                    return CKR_ARGUMENTS_BAD;
+                if (attr.ulValueLen as usize) < attr_value.len() {
+                    // As specified, report the required length for this attribute and keep going;
+                    // the caller is expected to retry with a big enough buffer.
+                    attr.ulValueLen = attr_value.len() as CK_ULONG;
+                    rv = CKR_BUFFER_TOO_SMALL;
+                    continue;
                 }
                 unsafe {
                     std::ptr::copy_nonoverlapping(attr_value.as_ptr(), ptr, attr_value.len());
                 }
             }
         } else {
-            attr.ulValueLen = (0 - 1) as CK_ULONG;
+            attr.ulValueLen = (0 - 1) as CK_ULONG; // CK_UNAVAILABLE_INFORMATION
         }
+    }
+    if rv != CKR_OK {
+        error!("C_GetAttributeValue: CKR_BUFFER_TOO_SMALL");
+        return rv;
     }
     debug!("C_GetAttributeValue: CKR_OK");
     CKR_OK
@@ -992,8 +1000,11 @@ extern "C" fn C_Sign(
             Ok(signature) => {
                 let signature_capacity = unsafe { *pulSignatureLen } as usize;
                 if signature_capacity < signature.len() {
-                    error!("C_Sign: CKR_ARGUMENTS_BAD");
-                    return CKR_ARGUMENTS_BAD;
+                    unsafe {
+                        *pulSignatureLen = signature.len() as CK_ULONG;
+                    }
+                    error!("C_Sign: CKR_BUFFER_TOO_SMALL");
+                    return CKR_BUFFER_TOO_SMALL;
                 }
                 let ptr: *mut u8 = pSignature as *mut u8;
                 unsafe {
