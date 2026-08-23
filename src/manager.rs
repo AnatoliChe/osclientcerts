@@ -529,6 +529,11 @@ impl Manager {
 
     pub fn close_session(&mut self, session: CK_SESSION_HANDLE) -> Result<(), ()> {
         if self.sessions.remove(&session) {
+            // Per PKCS #11, closing a session terminates any active operations on it.
+            self.searches.remove(&session);
+            self.signs.remove(&session);
+            self.decrypts.remove(&session);
+            self.encrypts.remove(&session);
             Ok(())
         } else {
             Err(())
@@ -537,6 +542,10 @@ impl Manager {
 
     pub fn close_all_sessions(&mut self) -> Result<(), ()> {
         self.sessions.clear();
+        self.searches.clear();
+        self.signs.clear();
+        self.decrypts.clear();
+        self.encrypts.clear();
         Ok(())
     }
 

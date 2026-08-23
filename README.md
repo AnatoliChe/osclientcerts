@@ -2,7 +2,7 @@
 
 A standalone Windows PKCS#11 provider based on Mozilla's historical `osclientcerts` project, extended for use with Thunderbird/NSS and Windows CNG-backed certificates and private keys.
 
-> **Project status:** experimental. The provider builds as a standalone Windows x64 DLL and implements RSA encryption/decryption in addition to the original signing functionality. Real-world Thunderbird/S/MIME interoperability is the next validation stage.
+> **Project status:** experimental. The provider builds as a standalone Windows x64 DLL and implements RSA signing, encryption and decryption on top of the original signing-only upstream code. Real-world Thunderbird S/MIME interoperability (signing, sending encrypted mail and decrypting received mail with non-exportable CNG keys) has been validated.
 
 ## Goal
 
@@ -136,7 +136,7 @@ The provider currently advertises:
 | Mechanism | Operation | Windows implementation | Status |
 |---|---|---|---|
 | `CKM_RSA_PKCS` | Sign | `NCryptSignHash` | Supported |
-| `CKM_RSA_PKCS` | Decrypt | `NCryptDecrypt` + `NCRYPT_PAD_PKCS1_FLAG` | Implemented; Thunderbird/S/MIME validation pending |
+| `CKM_RSA_PKCS` | Decrypt | `NCryptDecrypt` + `NCRYPT_PAD_PKCS1_FLAG` | Implemented and validated with Thunderbird S/MIME |
 | `CKM_RSA_PKCS` | Encrypt | `BCryptEncrypt` + RSA PKCS#1 padding | Implemented |
 | `CKM_RSA_PKCS_PSS` | Sign | `NCryptSignHash` + PSS | Supported |
 | `CKM_ECDSA` | Sign | `NCryptSignHash` | Supported |
@@ -241,9 +241,9 @@ This is required for bindgen and Clang to process the Windows SDK correctly on a
 ## Development workflow notes
 
 The repository itself contains only the Rust crate. The Linux/Docker cross-build and diagnostic
-scripts used during development (`build-fork-osclientcerts.sh`, store-inspection and patching
-helpers, Firefox/xul investigation scripts) live in the surrounding development workspace and are
-not part of this repository. The primary cross-build entry point produces:
+scripts used during development (store-inspection and patching helpers, Firefox/xul investigation
+scripts) live in the surrounding development workspace and are not part of this repository. The
+cross-build entry point produces:
 
 ```text
 out/osclientcerts.dll
@@ -287,8 +287,10 @@ Historical Windows PKCS#11 provider based on CryptoAPI. A prebuilt DLL was teste
 [done] Improved PKCS#11 return-code handling
 [done] Modern Rust / pkcs11 / bindgen compatibility updates
 [done] Standalone Windows x64 DLL builds from Linux/Docker
-[pending] Real Thunderbird S/MIME decryption validation
-[pending] Capture and analyze NSS/PKCS#11 operation traces
+[done] Real Thunderbird S/MIME decryption validation
+[done] Capture and analyze NSS/PKCS#11 operation traces
+[done] PKCS#11-compliant CKR_BUFFER_TOO_SMALL handling for sign/encrypt/decrypt
+[done] Cleanup of active operations on session close
 [pending] Add RSA-OAEP if Thunderbird/NSS requires it
 [pending] Validate additional Windows CNG key providers/HSMs
 [pending] Consider legacy CAPI/CSP support if required
@@ -305,7 +307,22 @@ The current provider is intentionally narrow.
 - EC decryption is not implemented.
 - Multi-part `C_EncryptUpdate` / `C_EncryptFinal` and `C_DecryptUpdate` / `C_DecryptFinal` are not implemented.
 - The provider currently focuses on the Windows user's `My` certificate store.
-- Real Thunderbird/NSS S/MIME interoperability remains the key validation target.
+
+## Release notes
+
+### 0.2.0
+
+- First release validated end-to-end with Thunderbird: S/MIME signing, encryption and decryption of
+  real messages using non-exportable Windows CNG keys.
+- Fixed PKCS#11 semantics: `CKR_BUFFER_TOO_SMALL` returned from `C_Sign` / `C_Encrypt` / `C_Decrypt`
+  no longer terminates the active operation; the caller can retry with a larger buffer as the
+  specification requires.
+- Active operations (search/sign/encrypt/decrypt state) are now cleaned up when their session is
+  closed via `C_CloseSession` or `C_CloseAllSessions`.
+- Fixed token-object matching so NSS can resolve certificates by issuer/serial and locate private
+  keys during S/MIME recipient lookup: boolean attributes are compared in single-byte CK_BBOOL form
+  and certificate serial numbers are stored big-endian, matching NSS search templates.
+- Added diagnostic logging of enumerated objects (label, id, issuer, serial).
 
 ## Thunderbird testing
 
