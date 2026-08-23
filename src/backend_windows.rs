@@ -186,7 +186,7 @@ impl Cert {
         &self.id
     }
 
-    fn label(&self) -> &[u8] {
+    pub fn label(&self) -> &[u8] {
         &self.label
     }
 
@@ -194,11 +194,11 @@ impl Cert {
         &self.value
     }
 
-    fn issuer(&self) -> &[u8] {
+    pub fn issuer(&self) -> &[u8] {
         &self.issuer
     }
 
-    fn serial_number(&self) -> &[u8] {
+    pub fn serial_number(&self) -> &[u8] {
         &self.serial_number
     }
 

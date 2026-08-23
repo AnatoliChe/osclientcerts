@@ -6,6 +6,11 @@
 use byteorder::{BigEndian, NativeEndian, ReadBytesExt, WriteBytesExt};
 use std::convert::TryInto;
 
+/// Formats a byte slice as a lowercase hexadecimal string (for diagnostic logging).
+pub fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 /// Accessing fields of packed structs is unsafe (it may be undefined behavior if the field isn't
 /// aligned). Since we're implementing a PKCS#11 module, we already have to trust the caller not to
 /// give us bad data, so normally we would deal with this by adding an unsafe block. If we do that,

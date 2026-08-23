@@ -12,6 +12,7 @@ use crate::backend_macos as backend;
 use crate::backend_windows as backend;
 use backend::*;
 
+use crate::util::hex_encode;
 use crate::util::CryptoError;
 
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -477,6 +478,25 @@ impl Manager {
         self.last_scan_time = Some(now);
         let objects = list_objects();
         debug!("found {} objects", objects.len());
+        for object in &objects {
+            match object {
+                Object::Cert(cert) => {
+                    debug!(
+                        "cert: label {:?}, id {}, issuer {}, serial {}",
+                        String::from_utf8_lossy(cert.label()),
+                        hex_encode(cert.id()),
+                        hex_encode(cert.issuer()),
+                        hex_encode(cert.serial_number()),
+                    );
+                }
+                Object::Key(key) => {
+                    debug!(
+                        "key: id {}",
+                        hex_encode(key.id()),
+                    );
+                }
+            }
+        }
         for object in objects {
             match &object {
                 Object::Cert(cert) => {
