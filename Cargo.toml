@@ -1,10 +1,10 @@
 [package]
 name = "osclientcerts"
 version = "0.3.0"
-authors = ["Dana Keeler <dkeeler@mozilla.com>"]
+authors = ["Dana Keeler <dkeeler@mozilla.com>", "AnatoliChe <AnatoliChe@gmail.com>"]
 edition = "2018"
-description = "Platform-specific support for client authentication certificates in Firefox"
-repository = "https://github.com/mozkeeler/osclientcerts"
+description = "PKCS#11 module exposing OS certificate stores as PKCS#11 tokens; standalone Windows x64 DLL fork of Mozilla's osclientcerts adapted for Thunderbird S/MIME with non-exportable CNG keys"
+repository = "https://github.com/AnatoliChe/osclientcerts"
 license = "MPL-2.0"
 
 [dependencies]
