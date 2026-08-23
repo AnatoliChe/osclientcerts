@@ -12,6 +12,8 @@ use crate::backend_macos as backend;
 use crate::backend_windows as backend;
 use backend::*;
 
+use crate::util::CryptoError;
+
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use std::thread::JoinHandle;
@@ -60,15 +62,15 @@ enum ManagerReturnValue {
     Search(Result<Vec<CK_OBJECT_HANDLE>, ()>),
     ClearSearch(Result<(), ()>),
     GetAttributes(Result<Vec<Option<Vec<u8>>>, ()>),
-    StartSign(Result<(), ()>),
-    GetSignatureLength(Result<usize, ()>),
-    Sign(Result<Vec<u8>, ()>),
-    StartDecrypt(Result<(), ()>),
-    GetDecryptedLength(Result<usize, ()>),
-    Decrypt(Result<Vec<u8>, ()>),
-    StartEncrypt(Result<(), ()>),
-    GetEncryptedLength(Result<usize, ()>),
-    Encrypt(Result<Vec<u8>, ()>),
+    StartSign(Result<(), CryptoError>),
+    GetSignatureLength(Result<usize, CryptoError>),
+    Sign(Result<Vec<u8>, CryptoError>),
+    StartDecrypt(Result<(), CryptoError>),
+    GetDecryptedLength(Result<usize, CryptoError>),
+    Decrypt(Result<Vec<u8>, CryptoError>),
+    StartEncrypt(Result<(), CryptoError>),
+    GetEncryptedLength(Result<usize, CryptoError>),
+    Encrypt(Result<Vec<u8>, CryptoError>),
     Stop(Result<(), ()>),
 }
 
@@ -82,9 +84,9 @@ macro_rules! manager_proxy_fn_impl {
             Ok($return_type(result)) => result,
             Ok(_) => {
                 error!("unexpected return value from manager");
-                Err(())
+                Err(From::from(()))
             }
-            Err(()) => Err(()),
+            Err(()) => Err(From::from(())),
         }
     };
 }
@@ -295,7 +297,7 @@ impl ManagerProxy {
         session: CK_SESSION_HANDLE,
         key_handle: CK_OBJECT_HANDLE,
         params: Option<CK_RSA_PKCS_PSS_PARAMS>,
-    ) -> Result<(), ()> {
+    ) -> Result<(), CryptoError> {
         manager_proxy_fn_impl!(
             self,
             ManagerArguments::StartSign(session, key_handle, params),
@@ -307,7 +309,7 @@ impl ManagerProxy {
         &self,
         session: CK_SESSION_HANDLE,
         data: Vec<u8>,
-    ) -> Result<usize, ()> {
+    ) -> Result<usize, CryptoError> {
         manager_proxy_fn_impl!(
             self,
             ManagerArguments::GetSignatureLength(session, data),
@@ -315,7 +317,7 @@ impl ManagerProxy {
         )
     }
 
-    pub fn sign(&mut self, session: CK_SESSION_HANDLE, data: Vec<u8>) -> Result<Vec<u8>, ()> {
+    pub fn sign(&mut self, session: CK_SESSION_HANDLE, data: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
         manager_proxy_fn_impl!(
             self,
             ManagerArguments::Sign(session, data),
@@ -327,7 +329,7 @@ impl ManagerProxy {
         &mut self,
         session: CK_SESSION_HANDLE,
         key_handle: CK_OBJECT_HANDLE,
-    ) -> Result<(), ()> {
+    ) -> Result<(), CryptoError> {
         manager_proxy_fn_impl!(
             self,
             ManagerArguments::StartDecrypt(session, key_handle),
@@ -339,7 +341,7 @@ impl ManagerProxy {
         &self,
         session: CK_SESSION_HANDLE,
         data: Vec<u8>,
-    ) -> Result<usize, ()> {
+    ) -> Result<usize, CryptoError> {
         manager_proxy_fn_impl!(
             self,
             ManagerArguments::GetDecryptedLength(session, data),
@@ -347,7 +349,7 @@ impl ManagerProxy {
         )
     }
 
-    pub fn decrypt(&mut self, session: CK_SESSION_HANDLE, data: Vec<u8>) -> Result<Vec<u8>, ()> {
+    pub fn decrypt(&mut self, session: CK_SESSION_HANDLE, data: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
         manager_proxy_fn_impl!(
             self,
             ManagerArguments::Decrypt(session, data),
@@ -359,7 +361,7 @@ impl ManagerProxy {
         &mut self,
         session: CK_SESSION_HANDLE,
         key_handle: CK_OBJECT_HANDLE,
-    ) -> Result<(), ()> {
+    ) -> Result<(), CryptoError> {
         manager_proxy_fn_impl!(
             self,
             ManagerArguments::StartEncrypt(session, key_handle),
@@ -371,7 +373,7 @@ impl ManagerProxy {
         &self,
         session: CK_SESSION_HANDLE,
         data: Vec<u8>,
-    ) -> Result<usize, ()> {
+    ) -> Result<usize, CryptoError> {
         manager_proxy_fn_impl!(
             self,
             ManagerArguments::GetEncryptedLength(session, data),
@@ -379,7 +381,7 @@ impl ManagerProxy {
         )
     }
 
-    pub fn encrypt(&mut self, session: CK_SESSION_HANDLE, data: Vec<u8>) -> Result<Vec<u8>, ()> {
+    pub fn encrypt(&mut self, session: CK_SESSION_HANDLE, data: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
         manager_proxy_fn_impl!(
             self,
             ManagerArguments::Encrypt(session, data),
@@ -621,13 +623,13 @@ impl Manager {
         session: CK_SESSION_HANDLE,
         key_handle: CK_OBJECT_HANDLE,
         params: Option<CK_RSA_PKCS_PSS_PARAMS>,
-    ) -> Result<(), ()> {
+    ) -> Result<(), CryptoError> {
         if self.signs.contains_key(&session) {
-            return Err(());
+            return Err(CryptoError::OperationFailed);
         }
         match self.objects.get(&key_handle) {
             Some(Object::Key(_)) => {}
-            _ => return Err(()),
+            _ => return Err(CryptoError::InvalidKey),
         };
         self.signs.insert(session, (key_handle, params));
         Ok(())
@@ -637,28 +639,28 @@ impl Manager {
         &self,
         session: CK_SESSION_HANDLE,
         data: &[u8],
-    ) -> Result<usize, ()> {
+    ) -> Result<usize, CryptoError> {
         let (key_handle, params) = match self.signs.get(&session) {
             Some((key_handle, params)) => (key_handle, params),
-            None => return Err(()),
+            None => return Err(CryptoError::OperationFailed),
         };
         let key = match self.objects.get(&key_handle) {
             Some(Object::Key(key)) => key,
-            _ => return Err(()),
+            _ => return Err(CryptoError::InvalidKey),
         };
         key.get_signature_length(data, params)
     }
 
-    pub fn sign(&mut self, session: CK_SESSION_HANDLE, data: &[u8]) -> Result<Vec<u8>, ()> {
+    pub fn sign(&mut self, session: CK_SESSION_HANDLE, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
         // Performing the signature (via C_Sign, which is the only way we support) finishes the sign
         // operation, so it needs to be removed here.
         let (key_handle, params) = match self.signs.remove(&session) {
             Some((key_handle, params)) => (key_handle, params),
-            None => return Err(()),
+            None => return Err(CryptoError::OperationFailed),
         };
         let key = match self.objects.get(&key_handle) {
             Some(Object::Key(key)) => key,
-            _ => return Err(()),
+            _ => return Err(CryptoError::InvalidKey),
         };
         key.sign(data, &params)
     }
@@ -667,14 +669,14 @@ impl Manager {
         &mut self,
         session: CK_SESSION_HANDLE,
         key_handle: CK_OBJECT_HANDLE,
-    ) -> Result<(), ()> {
+    ) -> Result<(), CryptoError> {
         if self.decrypts.contains_key(&session) {
-            return Err(());
+            return Err(CryptoError::OperationFailed);
         }
         // Only private keys can be used for decryption.
         match self.objects.get(&key_handle) {
             Some(Object::Key(_)) => {}
-            _ => return Err(()),
+            _ => return Err(CryptoError::InvalidKey),
         };
         self.decrypts.insert(session, key_handle);
         Ok(())
@@ -684,28 +686,28 @@ impl Manager {
         &self,
         session: CK_SESSION_HANDLE,
         data: &[u8],
-    ) -> Result<usize, ()> {
+    ) -> Result<usize, CryptoError> {
         let key_handle = match self.decrypts.get(&session) {
             Some(key_handle) => *key_handle,
-            None => return Err(()),
+            None => return Err(CryptoError::OperationFailed),
         };
         let key = match self.objects.get(&key_handle) {
             Some(Object::Key(key)) => key,
-            _ => return Err(()),
+            _ => return Err(CryptoError::InvalidKey),
         };
         key.decrypt_length(data)
     }
 
-    pub fn decrypt(&mut self, session: CK_SESSION_HANDLE, data: &[u8]) -> Result<Vec<u8>, ()> {
+    pub fn decrypt(&mut self, session: CK_SESSION_HANDLE, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
         // Performing the decryption (via C_Decrypt, which is the only way we support) finishes the
         // decrypt operation, so it needs to be removed here.
         let key_handle = match self.decrypts.remove(&session) {
             Some(key_handle) => key_handle,
-            None => return Err(()),
+            None => return Err(CryptoError::OperationFailed),
         };
         let key = match self.objects.get(&key_handle) {
             Some(Object::Key(key)) => key,
-            _ => return Err(()),
+            _ => return Err(CryptoError::InvalidKey),
         };
         key.decrypt(data)
     }
@@ -714,15 +716,15 @@ impl Manager {
         &mut self,
         session: CK_SESSION_HANDLE,
         key_handle: CK_OBJECT_HANDLE,
-    ) -> Result<(), ()> {
+    ) -> Result<(), CryptoError> {
         if self.encrypts.contains_key(&session) {
-            return Err(());
+            return Err(CryptoError::OperationFailed);
         }
         // Encryption uses the public key of a certificate; both certificate objects and private
         // key objects (which know their certificate) are acceptable here.
         match self.objects.get(&key_handle) {
             Some(Object::Cert(_)) | Some(Object::Key(_)) => {}
-            _ => return Err(()),
+            _ => return Err(CryptoError::InvalidKey),
         };
         self.encrypts.insert(session, key_handle);
         Ok(())
@@ -732,29 +734,29 @@ impl Manager {
         &self,
         session: CK_SESSION_HANDLE,
         data: &[u8],
-    ) -> Result<usize, ()> {
+    ) -> Result<usize, CryptoError> {
         let object_handle = match self.encrypts.get(&session) {
             Some(object_handle) => *object_handle,
-            None => return Err(()),
+            None => return Err(CryptoError::OperationFailed),
         };
         match self.objects.get(&object_handle) {
             Some(Object::Cert(cert)) => cert.encrypt_length(data),
             Some(Object::Key(key)) => key.encrypt_length(data),
-            _ => Err(()),
+            _ => Err(CryptoError::InvalidKey),
         }
     }
 
-    pub fn encrypt(&mut self, session: CK_SESSION_HANDLE, data: &[u8]) -> Result<Vec<u8>, ()> {
+    pub fn encrypt(&mut self, session: CK_SESSION_HANDLE, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
         // Performing the encryption (via C_Encrypt, which is the only way we support) finishes the
         // encrypt operation, so it needs to be removed here.
         let object_handle = match self.encrypts.remove(&session) {
             Some(object_handle) => object_handle,
-            None => return Err(()),
+            None => return Err(CryptoError::OperationFailed),
         };
         match self.objects.get(&object_handle) {
             Some(Object::Cert(cert)) => cert.encrypt(data),
             Some(Object::Key(key)) => key.encrypt(data),
-            _ => Err(()),
+            _ => Err(CryptoError::InvalidKey),
         }
     }
 }

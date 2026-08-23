@@ -40,6 +40,7 @@ mod backend_macos;
 mod backend_windows;
 
 use manager::ManagerProxy;
+use util::crypto_error_to_rv;
 
 lazy_static! {
     /// The singleton `ManagerProxy` that handles state with respect to PKCS #11. Only one thread
@@ -259,13 +260,46 @@ extern "C" fn C_GetMechanismList(
     CKR_OK
 }
 
+/// This gets called to determine what capabilities this module supports for a given mechanism.
+/// NSS calls this after `C_GetMechanismList` to decide whether and how to use each mechanism.
 extern "C" fn C_GetMechanismInfo(
-    _slotID: CK_SLOT_ID,
-    _type: CK_MECHANISM_TYPE,
-    _pInfo: CK_MECHANISM_INFO_PTR,
+    slotID: CK_SLOT_ID,
+    mechanism_type: CK_MECHANISM_TYPE,
+    pInfo: CK_MECHANISM_INFO_PTR,
 ) -> CK_RV {
-    error!("C_GetMechanismInfo: CKR_FUNCTION_NOT_SUPPORTED");
-    CKR_FUNCTION_NOT_SUPPORTED
+    debug!(
+        "C_GetMechanismInfo: slot {}, mechanism {}",
+        slotID, mechanism_type
+    );
+    if slotID != SLOT_ID {
+        error!("C_GetMechanismInfo: CKR_SLOT_ID_INVALID");
+        return CKR_SLOT_ID_INVALID;
+    }
+    if pInfo.is_null() {
+        error!("C_GetMechanismInfo: CKR_ARGUMENTS_BAD");
+        return CKR_ARGUMENTS_BAD;
+    }
+    let info = unsafe { &mut *pInfo };
+    // Key sizes are in bits. RSA keys from 512 up to 16384 bits are usable via CNG; for elliptic
+    // curves we support the NIST curves P-256 through P-521.
+    let (info_min_key_size, info_max_key_size, info_flags) = match mechanism_type {
+        CKM_RSA_PKCS => (
+            512,
+            16384,
+            CKF_SIGN | CKF_DECRYPT | CKF_ENCRYPT,
+        ),
+        CKM_RSA_PKCS_PSS => (512, 16384, CKF_SIGN),
+        CKM_ECDSA => (256, 521, CKF_SIGN),
+        _ => {
+            error!("C_GetMechanismInfo: unsupported mechanism: {}", mechanism_type);
+            return CKR_MECHANISM_INVALID;
+        }
+    };
+    info.ulMinKeySize = info_min_key_size;
+    info.ulMaxKeySize = info_max_key_size;
+    info.flags = info_flags;
+    debug!("C_GetMechanismInfo: CKR_OK");
+    CKR_OK
 }
 
 extern "C" fn C_InitToken(
@@ -634,9 +668,8 @@ extern "C" fn C_EncryptInit(
     let manager = manager_guard_to_manager!(manager_guard);
     match manager.start_encrypt(hSession, hKey) {
         Ok(()) => {}
-        Err(()) => {
-            error!("C_EncryptInit: CKR_KEY_HANDLE_INVALID");
-            return CKR_KEY_HANDLE_INVALID;
+        Err(err) => {
+            return crypto_error_to_rv("C_EncryptInit: start_encrypt failed", &err);
         }
     };
     debug!("C_EncryptInit: CKR_OK");
@@ -674,9 +707,8 @@ extern "C" fn C_Encrypt(
                     *pulEncryptedDataLen = encrypted_length as CK_ULONG;
                 }
             }
-            Err(()) => {
-                error!("C_Encrypt: get_encrypted_length failed");
-                return CKR_GENERAL_ERROR;
+            Err(err) => {
+                return crypto_error_to_rv("C_Encrypt: get_encrypted_length failed", &err);
             }
         }
     } else {
@@ -684,9 +716,8 @@ extern "C" fn C_Encrypt(
         let manager = manager_guard_to_manager!(manager_guard);
         let encrypted = match manager.encrypt(hSession, data.to_vec()) {
             Ok(ciphertext) => ciphertext,
-            Err(()) => {
-                error!("C_Encrypt: encrypt failed");
-                return CKR_GENERAL_ERROR;
+            Err(err) => {
+                return crypto_error_to_rv("C_Encrypt: encrypt failed", &err);
             }
         };
         let encrypted_capacity = unsafe { *pulEncryptedDataLen } as usize;
@@ -758,9 +789,8 @@ extern "C" fn C_DecryptInit(
     let manager = manager_guard_to_manager!(manager_guard);
     match manager.start_decrypt(hSession, hKey) {
         Ok(()) => {}
-        Err(()) => {
-            error!("C_DecryptInit: CKR_KEY_HANDLE_INVALID");
-            return CKR_KEY_HANDLE_INVALID;
+        Err(err) => {
+            return crypto_error_to_rv("C_DecryptInit: start_decrypt failed", &err);
         }
     };
     debug!("C_DecryptInit: CKR_OK");
@@ -800,9 +830,8 @@ extern "C" fn C_Decrypt(
                     *pulDataLen = decrypted_length as CK_ULONG;
                 }
             }
-            Err(()) => {
-                error!("C_Decrypt: get_decrypted_length failed");
-                return CKR_GENERAL_ERROR;
+            Err(err) => {
+                return crypto_error_to_rv("C_Decrypt: get_decrypted_length failed", &err);
             }
         }
     } else {
@@ -810,9 +839,8 @@ extern "C" fn C_Decrypt(
         let manager = manager_guard_to_manager!(manager_guard);
         let decrypted = match manager.decrypt(hSession, encrypted_data.to_vec()) {
             Ok(plaintext) => plaintext,
-            Err(()) => {
-                error!("C_Decrypt: decrypt failed");
-                return CKR_GENERAL_ERROR;
+            Err(err) => {
+                return crypto_error_to_rv("C_Decrypt: decrypt failed", &err);
             }
         };
         let data_capacity = unsafe { *pulDataLen } as usize;
@@ -923,9 +951,8 @@ extern "C" fn C_SignInit(
     let manager = manager_guard_to_manager!(manager_guard);
     match manager.start_sign(hSession, hKey, mechanism_params) {
         Ok(()) => {}
-        Err(()) => {
-            error!("C_SignInit: CKR_GENERAL_ERROR");
-            return CKR_GENERAL_ERROR;
+        Err(err) => {
+            return crypto_error_to_rv("C_SignInit: start_sign failed", &err);
         }
     };
     debug!("C_SignInit: CKR_OK");
@@ -954,9 +981,8 @@ extern "C" fn C_Sign(
             Ok(signature_length) => unsafe {
                 *pulSignatureLen = signature_length as CK_ULONG;
             },
-            Err(()) => {
-                error!("C_Sign: get_signature_length failed");
-                return CKR_GENERAL_ERROR;
+            Err(err) => {
+                return crypto_error_to_rv("C_Sign: get_signature_length failed", &err);
             }
         }
     } else {
@@ -975,9 +1001,8 @@ extern "C" fn C_Sign(
                     *pulSignatureLen = signature.len() as CK_ULONG;
                 }
             }
-            Err(()) => {
-                error!("C_Sign: sign failed");
-                return CKR_GENERAL_ERROR;
+            Err(err) => {
+                return crypto_error_to_rv("C_Sign: sign failed", &err);
             }
         }
     }

@@ -759,7 +759,7 @@ impl Key {
         &self,
         data: &[u8],
         params: &Option<CK_RSA_PKCS_PSS_PARAMS>,
-    ) -> Result<usize, ()> {
+    ) -> Result<usize, CryptoError> {
         // Unfortunately we don't have a way of getting the length of a signature without creating
         // one.
         let dummy_signature_bytes = self.sign(data, params)?;
@@ -771,22 +771,26 @@ impl Key {
         &self,
         data: &[u8],
         params: &Option<CK_RSA_PKCS_PSS_PARAMS>,
-    ) -> Result<Vec<u8>, ()> {
-        let key = sec_identity_copy_private_key(&self.identity)?;
-        let sign_params = SignParams::new(self.key_type_enum, data.len(), params)?;
+    ) -> Result<Vec<u8>, CryptoError> {
+        let key = sec_identity_copy_private_key(&self.identity)
+            .map_err(|_| CryptoError::InvalidKey)?;
+        let sign_params = SignParams::new(self.key_type_enum, data.len(), params)
+            .map_err(|_| CryptoError::OperationFailed)?;
         let signing_algorithm = sign_params.get_algorithm();
         let data = CFData::from_buffer(data);
-        let signature =
-            SECURITY_FRAMEWORK.sec_key_create_signature(&key, signing_algorithm, &data)?;
+        let signature = SECURITY_FRAMEWORK
+            .sec_key_create_signature(&key, signing_algorithm, &data)
+            .map_err(|_| CryptoError::OperationFailed)?;
         let signature_value = match self.key_type_enum {
             KeyType::EC(coordinate_width) => {
                 // We need to convert the DER Ecdsa-Sig-Value to the
                 // concatenation of r and s, the coordinates of the point on
                 // the curve. r and s must be 0-padded to be coordinate_width
                 // total bytes.
-                let (r, s) = read_ec_sig_point(signature.bytes())?;
+                let (r, s) = read_ec_sig_point(signature.bytes())
+                    .map_err(|_| CryptoError::InvalidData)?;
                 if r.len() > coordinate_width || s.len() > coordinate_width {
-                    return Err(());
+                    return Err(CryptoError::InvalidData);
                 }
                 let mut signature_value = Vec::with_capacity(2 * coordinate_width);
                 let r_padding = vec![0; coordinate_width - r.len()];

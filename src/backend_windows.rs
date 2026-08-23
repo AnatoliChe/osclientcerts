@@ -13,6 +13,7 @@ use std::ffi::{CStr, CString};
 use std::ops::Deref;
 use std::slice;
 use winapi::shared::bcrypt::*;
+use winapi::um::errhandlingapi::GetLastError;
 use winapi::um::ncrypt::*;
 use winapi::um::wincrypt::*;
 
@@ -106,33 +107,37 @@ impl Cert {
     }
 
     /// Create a temporary certificate context from the DER bytes of this certificate.
-    fn context(&self) -> Result<CertContext, ()> {
+    fn context(&self) -> Result<CertContext, CryptoError> {
         let cert_context = unsafe {
             CertCreateCertificateContext(
                 X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
                 self.value.as_ptr(),
-                self.value.len().try_into().map_err(|_| ())?,
+                self.value.len().try_into().map_err(|_| CryptoError::OperationFailed)?,
             )
         };
         if cert_context.is_null() {
-            error!("CertCreateCertificateContext failed");
-            return Err(());
+            let last_error = unsafe { GetLastError() };
+            error!(
+                "CertCreateCertificateContext failed: {:#010x}",
+                last_error
+            );
+            return Err(CryptoError::Windows(last_error));
         }
         Ok(CertContext(cert_context))
     }
 
     /// Determine the length of the ciphertext that would result from encrypting `data` with this
     /// certificate's public key (RSA PKCS#1 v1.5 padding).
-    pub fn encrypt_length(&self, data: &[u8]) -> Result<usize, ()> {
+    pub fn encrypt_length(&self, data: &[u8]) -> Result<usize, CryptoError> {
         let context = self.context()?;
         match context.encrypt_internal(data, false) {
             Ok(dummy_ciphertext) => Ok(dummy_ciphertext.len()),
-            Err(()) => Err(()),
+            Err(err) => Err(err),
         }
     }
 
     /// Encrypt `data` with this certificate's public key using RSA PKCS#1 v1.5 padding via CNG.
-    pub fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>, ()> {
+    pub fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let context = self.context()?;
         context.encrypt_internal(data, true)
     }
@@ -214,7 +219,7 @@ impl CertContext {
 
     /// Encrypt `data` with this certificate's public key using RSA PKCS#1 v1.5 padding via CNG.
     /// If `do_encrypt` is false, only the length of the ciphertext is determined.
-    fn encrypt_internal(&self, data: &[u8], do_encrypt: bool) -> Result<Vec<u8>, ()> {
+    fn encrypt_internal(&self, data: &[u8], do_encrypt: bool) -> Result<Vec<u8>, CryptoError> {
         let key = BCryptPublicKeyHandle::from_cert(self)?;
         // As with RSA-PKCS1 signing, the padding info does not need a hash algorithm identifier
         // when encrypting with PKCS#1 v1.5 padding.
@@ -229,7 +234,7 @@ impl CertContext {
             BCryptEncrypt(
                 *key,
                 input.as_mut_ptr(),
-                input.len().try_into().map_err(|_| ())?,
+                input.len().try_into().map_err(|_| CryptoError::OperationFailed)?,
                 &mut padding_info as *mut BCRYPT_PKCS1_PADDING_INFO as *mut _,
                 std::ptr::null_mut(),
                 0,
@@ -241,10 +246,10 @@ impl CertContext {
         };
         if status != 0 {
             error!(
-                "BCryptEncrypt failed getting output buffer length, {}",
+                "BCryptEncrypt failed getting output buffer length, {:#010x}",
                 status
             );
-            return Err(());
+            return Err(CryptoError::Windows(status as u32));
         }
         let mut encrypted = vec![0; encrypted_len as usize];
         if !do_encrypt {
@@ -255,7 +260,7 @@ impl CertContext {
             BCryptEncrypt(
                 *key,
                 input.as_mut_ptr(),
-                input.len().try_into().map_err(|_| ())?,
+                input.len().try_into().map_err(|_| CryptoError::OperationFailed)?,
                 &mut padding_info as *mut BCRYPT_PKCS1_PADDING_INFO as *mut _,
                 std::ptr::null_mut(),
                 0,
@@ -266,15 +271,15 @@ impl CertContext {
             )
         };
         if status != 0 {
-            error!("BCryptEncrypt failed encrypting data, {}", status);
-            return Err(());
+            error!("BCryptEncrypt failed encrypting data, {:#010x}", status);
+            return Err(CryptoError::Windows(status as u32));
         }
         if final_encrypted_len != encrypted_len {
             error!(
                 "BCryptEncrypt: inconsistent encrypted lengths? {} != {}",
                 final_encrypted_len, encrypted_len
             );
-            return Err(());
+            return Err(CryptoError::OperationFailed);
         }
         Ok(encrypted)
     }
@@ -299,7 +304,7 @@ impl Deref for CertContext {
 struct NCryptKeyHandle(NCRYPT_KEY_HANDLE);
 
 impl NCryptKeyHandle {
-    fn from_cert(cert: &CertContext) -> Result<NCryptKeyHandle, ()> {
+    fn from_cert(cert: &CertContext) -> Result<NCryptKeyHandle, CryptoError> {
         let mut key_handle = 0;
         let mut key_spec = 0;
         let mut must_free = 0;
@@ -313,17 +318,21 @@ impl NCryptKeyHandle {
                 &mut must_free,
             ) != 1
             {
-                error!("CryptAcquireCertificatePrivateKey failed");
-                return Err(());
+                let last_error = GetLastError();
+                error!(
+                    "CryptAcquireCertificatePrivateKey failed: {:#010x}",
+                    last_error
+                );
+                return Err(CryptoError::Windows(last_error as u32));
             }
         }
         if key_spec != CERT_NCRYPT_KEY_SPEC {
             error!("CryptAcquireCertificatePrivateKey returned non-ncrypt handle");
-            return Err(());
+            return Err(CryptoError::OperationFailed);
         }
         if must_free == 0 {
             error!("CryptAcquireCertificatePrivateKey returned shared key handle");
-            return Err(());
+            return Err(CryptoError::OperationFailed);
         }
         Ok(NCryptKeyHandle(key_handle as NCRYPT_KEY_HANDLE))
     }
@@ -351,7 +360,7 @@ pub struct BCryptPublicKeyHandle(BCRYPT_KEY_HANDLE);
 impl BCryptPublicKeyHandle {
     /// Import the public key of the given certificate as a CNG key. This does not touch any private
     /// key material; it only uses the (public) certificate bytes.
-    fn from_cert(cert: &CertContext) -> Result<BCryptPublicKeyHandle, ()> {
+    fn from_cert(cert: &CertContext) -> Result<BCryptPublicKeyHandle, CryptoError> {
         let mut key_handle: BCRYPT_KEY_HANDLE = std::ptr::null_mut();
         // Extract the subject public key info from the certificate.
         let pccert: PCCERT_CONTEXT = **cert;
@@ -368,8 +377,9 @@ impl BCryptPublicKeyHandle {
             )
         };
         if imported == 0 {
-            error!("CryptImportPublicKeyInfoEx2 failed");
-            return Err(());
+            let last_error = unsafe { GetLastError() };
+            error!("CryptImportPublicKeyInfoEx2 failed: {:#010x}", last_error);
+            return Err(CryptoError::Windows(last_error));
         }
         Ok(BCryptPublicKeyHandle(key_handle))
     }
@@ -629,10 +639,10 @@ impl Key {
         &self,
         data: &[u8],
         params: &Option<CK_RSA_PKCS_PSS_PARAMS>,
-    ) -> Result<usize, ()> {
+    ) -> Result<usize, CryptoError> {
         match self.sign_internal(data, params, false) {
             Ok(dummy_signature_bytes) => Ok(dummy_signature_bytes.len()),
-            Err(()) => Err(()),
+            Err(err) => Err(err),
         }
     }
 
@@ -640,7 +650,7 @@ impl Key {
         &self,
         data: &[u8],
         params: &Option<CK_RSA_PKCS_PSS_PARAMS>,
-    ) -> Result<Vec<u8>, ()> {
+    ) -> Result<Vec<u8>, CryptoError> {
         self.sign_internal(data, params, true)
     }
 
@@ -652,11 +662,12 @@ impl Key {
         data: &[u8],
         params: &Option<CK_RSA_PKCS_PSS_PARAMS>,
         do_signature: bool,
-    ) -> Result<Vec<u8>, ()> {
+    ) -> Result<Vec<u8>, CryptoError> {
         // Acquiring a handle on the key can cause the OS to show some UI to the user, so we do this
         // as late as possible (i.e. here).
         let key = NCryptKeyHandle::from_cert(&self.cert)?;
-        let mut sign_params = SignParams::new(self.key_type_enum, params)?;
+        let mut sign_params =
+            SignParams::new(self.key_type_enum, params).map_err(|_| CryptoError::OperationFailed)?;
         let params_ptr = sign_params.params_ptr();
         let flags = sign_params.flags();
         let mut data = data.to_vec();
@@ -668,7 +679,7 @@ impl Key {
                 *key,
                 params_ptr,
                 data.as_mut_ptr(),
-                data.len().try_into().map_err(|_| ())?,
+                data.len().try_into().map_err(|_| CryptoError::OperationFailed)?,
                 std::ptr::null_mut(),
                 0,
                 &mut signature_len,
@@ -678,10 +689,10 @@ impl Key {
         // 0 is "ERROR_SUCCESS" (but "ERROR_SUCCESS" is unsigned, whereas SECURITY_STATUS is signed)
         if status != 0 {
             error!(
-                "NCryptSignHash failed trying to get signature buffer length, {}",
+                "NCryptSignHash failed trying to get signature buffer length, {:#010x}",
                 status
             );
-            return Err(());
+            return Err(CryptoError::Windows(status as u32));
         }
         let mut signature = vec![0; signature_len as usize];
         if !do_signature {
@@ -693,7 +704,7 @@ impl Key {
                 *key,
                 params_ptr,
                 data.as_mut_ptr(),
-                data.len().try_into().map_err(|_| ())?,
+                data.len().try_into().map_err(|_| CryptoError::OperationFailed)?,
                 signature.as_mut_ptr(),
                 signature_len,
                 &mut final_signature_len,
@@ -701,38 +712,38 @@ impl Key {
             )
         };
         if status != 0 {
-            error!("NCryptSignHash failed signing data {}", status);
-            return Err(());
+            error!("NCryptSignHash failed signing data {:#010x}", status);
+            return Err(CryptoError::Windows(status as u32));
         }
         if final_signature_len != signature_len {
             error!(
                 "NCryptSignHash: inconsistent signature lengths? {} != {}",
                 final_signature_len, signature_len
             );
-            return Err(());
+            return Err(CryptoError::OperationFailed);
         }
         Ok(signature)
     }
 
     /// Determine the length of the plaintext that would result from decrypting `data` with this
     /// key (RSA PKCS#1 v1.5 padding).
-    pub fn decrypt_length(&self, data: &[u8]) -> Result<usize, ()> {
+    pub fn decrypt_length(&self, data: &[u8]) -> Result<usize, CryptoError> {
         match self.decrypt_internal(data, false) {
             Ok(dummy_plaintext) => Ok(dummy_plaintext.len()),
-            Err(()) => Err(()),
+            Err(err) => Err(err),
         }
     }
 
     /// Decrypt `data` with this (private, non-exportable) key using RSA PKCS#1 v1.5 padding via
     /// CNG. The private key material never leaves Windows.
-    pub fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>, ()> {
+    pub fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
         self.decrypt_internal(data, true)
     }
 
-    fn decrypt_internal(&self, data: &[u8], do_decrypt: bool) -> Result<Vec<u8>, ()> {
+    fn decrypt_internal(&self, data: &[u8], do_decrypt: bool) -> Result<Vec<u8>, CryptoError> {
         if !matches!(self.key_type_enum, KeyType::RSA) {
             error!("decrypt requested for non-RSA key");
-            return Err(());
+            return Err(CryptoError::InvalidKey);
         }
         // Acquiring a handle on the key can cause the OS to show some UI to the user, so we do
         // this as late as possible (i.e. here).
@@ -744,7 +755,7 @@ impl Key {
             NCryptDecrypt(
                 *key,
                 data.as_ptr() as *mut u8,
-                data.len().try_into().map_err(|_| ())?,
+                data.len().try_into().map_err(|_| CryptoError::OperationFailed)?,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 0,
@@ -754,10 +765,10 @@ impl Key {
         };
         if status != 0 {
             error!(
-                "NCryptDecrypt failed getting output buffer length, {}",
+                "NCryptDecrypt failed getting output buffer length, {:#010x}",
                 status
             );
-            return Err(());
+            return Err(CryptoError::Windows(status as u32));
         }
         let mut decrypted = vec![0; decrypted_len as usize];
         if !do_decrypt {
@@ -768,7 +779,7 @@ impl Key {
             NCryptDecrypt(
                 *key,
                 data.as_ptr() as *mut u8,
-                data.len().try_into().map_err(|_| ())?,
+                data.len().try_into().map_err(|_| CryptoError::OperationFailed)?,
                 std::ptr::null_mut(),
                 decrypted.as_mut_ptr(),
                 decrypted_len,
@@ -777,8 +788,8 @@ impl Key {
             )
         };
         if status != 0 {
-            error!("NCryptDecrypt failed decrypting data, {}", status);
-            return Err(());
+            error!("NCryptDecrypt failed decrypting data, {:#010x}", status);
+            return Err(CryptoError::Windows(status as u32));
         }
         decrypted.truncate(final_decrypted_len as usize);
         Ok(decrypted)
@@ -786,16 +797,16 @@ impl Key {
 
     /// Determine the length of the ciphertext that would result from encrypting `data` with this
     /// key's public key (RSA PKCS#1 v1.5 padding).
-    pub fn encrypt_length(&self, data: &[u8]) -> Result<usize, ()> {
+    pub fn encrypt_length(&self, data: &[u8]) -> Result<usize, CryptoError> {
         match self.cert.encrypt_internal(data, false) {
             Ok(dummy_ciphertext) => Ok(dummy_ciphertext.len()),
-            Err(()) => Err(()),
+            Err(err) => Err(err),
         }
     }
 
     /// Encrypt `data` with this key's certificate public key using RSA PKCS#1 v1.5 padding via
     /// CNG.
-    pub fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>, ()> {
+    pub fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
         self.cert.encrypt_internal(data, true)
     }
 }
