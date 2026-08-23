@@ -159,19 +159,27 @@ impl Cert {
     }
 
     /// Determine the length of the ciphertext that would result from encrypting `data` with this
-    /// certificate's public key (RSA PKCS#1 v1.5 padding).
-    pub fn encrypt_length(&self, data: &[u8]) -> Result<usize, CryptoError> {
+    /// certificate's public key.
+    pub fn encrypt_length(
+        &self,
+        data: &[u8],
+        mechanism: &RsaCipherMechanism,
+    ) -> Result<usize, CryptoError> {
         let context = self.context()?;
-        match context.encrypt_internal(data, false) {
+        match context.encrypt_internal(data, false, mechanism) {
             Ok(dummy_ciphertext) => Ok(dummy_ciphertext.len()),
             Err(err) => Err(err),
         }
     }
 
-    /// Encrypt `data` with this certificate's public key using RSA PKCS#1 v1.5 padding via CNG.
-    pub fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    /// Encrypt `data` with this certificate's public key via CNG.
+    pub fn encrypt(
+        &self,
+        data: &[u8],
+        mechanism: &RsaCipherMechanism,
+    ) -> Result<Vec<u8>, CryptoError> {
         let context = self.context()?;
-        context.encrypt_internal(data, true)
+        context.encrypt_internal(data, true, mechanism)
     }
 
     fn class(&self) -> &[u8] {
@@ -250,31 +258,33 @@ impl CertContext {
         CertContext(unsafe { CertDuplicateCertificateContext(cert) })
     }
 
-    /// Encrypt `data` with this certificate's public key using RSA PKCS#1 v1.5 padding via CNG.
+    /// Encrypt `data` with this certificate's public key via CNG.
     /// If `do_encrypt` is false, only the length of the ciphertext is determined.
-    fn encrypt_internal(&self, data: &[u8], do_encrypt: bool) -> Result<Vec<u8>, CryptoError> {
+    fn encrypt_internal(
+        &self,
+        data: &[u8],
+        do_encrypt: bool,
+        mechanism: &RsaCipherMechanism,
+    ) -> Result<Vec<u8>, CryptoError> {
         let key = BCryptPublicKeyHandle::from_cert(self)?;
-        // As with RSA-PKCS1 signing, the padding info does not need a hash algorithm identifier
-        // when encrypting with PKCS#1 v1.5 padding.
-        let mut padding_info = BCRYPT_PKCS1_PADDING_INFO {
-            pszAlgId: std::ptr::null(),
-        };
+        let mut padding_info =
+            CipherPaddingInfo::new(mechanism).map_err(|_| CryptoError::InvalidKey)?;
         let mut input = data.to_vec();
         let mut encrypted_len: u32 = 0;
         // The first call asks CNG for the required output buffer size without performing the
-        // encryption.
+        // encryption (unlike RSA decryption, CNG can report this size cheaply).
         let status = unsafe {
             BCryptEncrypt(
                 *key,
                 input.as_mut_ptr(),
                 input.len().try_into().map_err(|_| CryptoError::OperationFailed)?,
-                &mut padding_info as *mut BCRYPT_PKCS1_PADDING_INFO as *mut _,
+                padding_info.params_ptr() as *mut _,
                 std::ptr::null_mut(),
                 0,
                 std::ptr::null_mut(),
                 0,
                 &mut encrypted_len,
-                NCRYPT_PAD_PKCS1_FLAG,
+                padding_info.flags(),
             )
         };
         if status != 0 {
@@ -294,13 +304,13 @@ impl CertContext {
                 *key,
                 input.as_mut_ptr(),
                 input.len().try_into().map_err(|_| CryptoError::OperationFailed)?,
-                &mut padding_info as *mut BCRYPT_PKCS1_PADDING_INFO as *mut _,
+                padding_info.params_ptr() as *mut _,
                 std::ptr::null_mut(),
                 0,
                 encrypted.as_mut_ptr(),
                 encrypted_len,
                 &mut final_encrypted_len,
-                NCRYPT_PAD_PKCS1_FLAG,
+                padding_info.flags(),
             )
         };
         if status != 0 {
@@ -509,6 +519,98 @@ impl SignParams {
             &SignParams::EC => 0,
             &SignParams::RSA_PKCS1(_) => NCRYPT_PAD_PKCS1_FLAG,
             &SignParams::RSA_PSS(_) => NCRYPT_PAD_PSS_FLAG,
+        }
+    }
+}
+
+/// An owned representation of the mechanism used for an RSA encryption or decryption operation.
+/// This mirrors what was parsed from the PKCS #11 `C_*Init` call (raw pointers are converted to
+/// owned data so this type can safely cross threads).
+#[derive(Debug)]
+pub enum RsaCipherMechanism {
+    /// RSA PKCS#1 v1.5 padding (`CKM_RSA_PKCS`).
+    Pkcs1v15,
+    /// RSA OAEP padding (`CKM_RSA_PKCS_OAEP`). Note that CNG ties the MGF1 hash function to the
+    /// digest algorithm, so callers must have already ensured the MGF matches the hash algorithm
+    /// before constructing this variant.
+    Oaep {
+        hash_alg: CK_MECHANISM_TYPE,
+        label: Vec<u8>,
+    },
+}
+
+impl RsaCipherMechanism {
+    /// Map a PKCS #11 hash algorithm identifier onto its CNG algorithm identifier string.
+    fn hash_algorithm_string(hash_alg: CK_MECHANISM_TYPE) -> Result<&'static [u16], ()> {
+        match hash_alg {
+            CKM_SHA_1 => Ok(SHA1_ALGORITHM_STRING),
+            CKM_SHA256 => Ok(SHA256_ALGORITHM_STRING),
+            CKM_SHA384 => Ok(SHA384_ALGORITHM_STRING),
+            CKM_SHA512 => Ok(SHA512_ALGORITHM_STRING),
+            _ => {
+                error!(
+                    "unsupported hash algorithm for RSA-OAEP: {}",
+                    unsafe_packed_field_access!(hash_alg)
+                );
+                Err(())
+            }
+        }
+    }
+}
+
+/// Padding parameters for RSA encryption and decryption operations. For the OAEP variant, the
+/// label pointer points into the `RsaCipherMechanism` the parameters were built from, which must
+/// outlive any use of this value.
+enum CipherPaddingInfo<'a> {
+    Pkcs1v15(BCRYPT_PKCS1_PADDING_INFO),
+    Oaep(BCRYPT_OAEP_PADDING_INFO, std::marker::PhantomData<&'a [u8]>),
+}
+
+impl<'a> CipherPaddingInfo<'a> {
+    fn new(mechanism: &'a RsaCipherMechanism) -> Result<CipherPaddingInfo<'a>, ()> {
+        match mechanism {
+            RsaCipherMechanism::Pkcs1v15 => {
+                // As with RSA-PKCS1 signing, the padding info does not need a hash algorithm
+                // identifier when encrypting or decrypting with PKCS#1 v1.5 padding.
+                Ok(CipherPaddingInfo::Pkcs1v15(BCRYPT_PKCS1_PADDING_INFO {
+                    pszAlgId: std::ptr::null(),
+                }))
+            }
+            RsaCipherMechanism::Oaep { hash_alg, label } => {
+                let algorithm_string = RsaCipherMechanism::hash_algorithm_string(*hash_alg)?;
+                // An empty label is represented by a null pointer and length 0, which is exactly
+                // what CNG expects when no label was specified.
+                Ok(CipherPaddingInfo::Oaep(
+                    BCRYPT_OAEP_PADDING_INFO {
+                        pszAlgId: algorithm_string.as_ptr(),
+                        pbLabel: if label.is_empty() {
+                            std::ptr::null_mut()
+                        } else {
+                            label.as_ptr() as *mut u8
+                        },
+                        cbLabel: label.len() as u32,
+                    },
+                    std::marker::PhantomData,
+                ))
+            }
+        }
+    }
+
+    fn params_ptr(&mut self) -> *mut std::ffi::c_void {
+        match self {
+            CipherPaddingInfo::Pkcs1v15(params) => {
+                params as *mut BCRYPT_PKCS1_PADDING_INFO as *mut std::ffi::c_void
+            }
+            CipherPaddingInfo::Oaep(params, _) => {
+                params as *mut BCRYPT_OAEP_PADDING_INFO as *mut std::ffi::c_void
+            }
+        }
+    }
+
+    fn flags(&self) -> u32 {
+        match self {
+            &CipherPaddingInfo::Pkcs1v15(_) => NCRYPT_PAD_PKCS1_FLAG,
+            &CipherPaddingInfo::Oaep(_, _) => NCRYPT_PAD_OAEP_FLAG,
         }
     }
 }
@@ -760,25 +862,40 @@ impl Key {
     }
 
     /// Determine the length of the plaintext that would result from decrypting `data` with this
-    /// key (RSA PKCS#1 v1.5 padding).
-    pub fn decrypt_length(&self, data: &[u8]) -> Result<usize, CryptoError> {
-        match self.decrypt_internal(data, false) {
+    /// key.
+    pub fn decrypt_length(
+        &self,
+        data: &[u8],
+        mechanism: &RsaCipherMechanism,
+    ) -> Result<usize, CryptoError> {
+        match self.decrypt_internal(data, false, mechanism) {
             Ok(dummy_plaintext) => Ok(dummy_plaintext.len()),
             Err(err) => Err(err),
         }
     }
 
-    /// Decrypt `data` with this (private, non-exportable) key using RSA PKCS#1 v1.5 padding via
-    /// CNG. The private key material never leaves Windows.
-    pub fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        self.decrypt_internal(data, true)
+    /// Decrypt `data` with this (private, non-exportable) key via CNG. The private key material
+    /// never leaves Windows.
+    pub fn decrypt(
+        &self,
+        data: &[u8],
+        mechanism: &RsaCipherMechanism,
+    ) -> Result<Vec<u8>, CryptoError> {
+        self.decrypt_internal(data, true, mechanism)
     }
 
-    fn decrypt_internal(&self, data: &[u8], do_decrypt: bool) -> Result<Vec<u8>, CryptoError> {
+    fn decrypt_internal(
+        &self,
+        data: &[u8],
+        do_decrypt: bool,
+        mechanism: &RsaCipherMechanism,
+    ) -> Result<Vec<u8>, CryptoError> {
         if !matches!(self.key_type_enum, KeyType::RSA) {
             error!("decrypt requested for non-RSA key");
             return Err(CryptoError::InvalidKey);
         }
+        let mut padding_info =
+            CipherPaddingInfo::new(mechanism).map_err(|_| CryptoError::InvalidKey)?;
         // Acquiring a handle on the key can cause the OS to show some UI to the user, so we do
         // this as late as possible (i.e. here).
         let key = NCryptKeyHandle::from_cert(&self.cert)?;
@@ -791,11 +908,11 @@ impl Key {
                 *key,
                 data.as_ptr() as *mut u8,
                 data.len().try_into().map_err(|_| CryptoError::OperationFailed)?,
-                std::ptr::null_mut(),
+                padding_info.params_ptr(),
                 std::ptr::null_mut(),
                 0,
                 &mut decrypted_len,
-                NCRYPT_PAD_PKCS1_FLAG,
+                padding_info.flags(),
             )
         };
         if status != 0 {
@@ -815,11 +932,11 @@ impl Key {
                 *key,
                 data.as_ptr() as *mut u8,
                 data.len().try_into().map_err(|_| CryptoError::OperationFailed)?,
-                std::ptr::null_mut(),
+                padding_info.params_ptr(),
                 decrypted.as_mut_ptr(),
                 decrypted_len,
                 &mut final_decrypted_len,
-                NCRYPT_PAD_PKCS1_FLAG,
+                padding_info.flags(),
             )
         };
         if status != 0 {
@@ -831,18 +948,25 @@ impl Key {
     }
 
     /// Determine the length of the ciphertext that would result from encrypting `data` with this
-    /// key's public key (RSA PKCS#1 v1.5 padding).
-    pub fn encrypt_length(&self, data: &[u8]) -> Result<usize, CryptoError> {
-        match self.cert.encrypt_internal(data, false) {
+    /// key's public key.
+    pub fn encrypt_length(
+        &self,
+        data: &[u8],
+        mechanism: &RsaCipherMechanism,
+    ) -> Result<usize, CryptoError> {
+        match self.cert.encrypt_internal(data, false, mechanism) {
             Ok(dummy_ciphertext) => Ok(dummy_ciphertext.len()),
             Err(err) => Err(err),
         }
     }
 
-    /// Encrypt `data` with this key's certificate public key using RSA PKCS#1 v1.5 padding via
-    /// CNG.
-    pub fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        self.cert.encrypt_internal(data, true)
+    /// Encrypt `data` with this key's certificate public key via CNG.
+    pub fn encrypt(
+        &self,
+        data: &[u8],
+        mechanism: &RsaCipherMechanism,
+    ) -> Result<Vec<u8>, CryptoError> {
+        self.cert.encrypt_internal(data, true, mechanism)
     }
 }
 

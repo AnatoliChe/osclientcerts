@@ -43,10 +43,10 @@ enum ManagerArguments {
     ),
     GetSignatureLength(CK_SESSION_HANDLE, Vec<u8>),
     Sign(CK_SESSION_HANDLE, Vec<u8>),
-    StartDecrypt(CK_SESSION_HANDLE, CK_OBJECT_HANDLE),
+    StartDecrypt(CK_SESSION_HANDLE, CK_OBJECT_HANDLE, RsaCipherMechanism),
     GetDecryptedLength(CK_SESSION_HANDLE, Vec<u8>),
     Decrypt(CK_SESSION_HANDLE, Vec<u8>),
-    StartEncrypt(CK_SESSION_HANDLE, CK_OBJECT_HANDLE),
+    StartEncrypt(CK_SESSION_HANDLE, CK_OBJECT_HANDLE, RsaCipherMechanism),
     GetEncryptedLength(CK_SESSION_HANDLE, Vec<u8>),
     Encrypt(CK_SESSION_HANDLE, Vec<u8>),
     Stop,
@@ -153,9 +153,9 @@ impl ManagerProxy {
                     ManagerArguments::Sign(session, data) => {
                         ManagerReturnValue::Sign(real_manager.sign(session, &data))
                     }
-                    ManagerArguments::StartDecrypt(session, key_handle) => {
+                    ManagerArguments::StartDecrypt(session, key_handle, mechanism) => {
                         ManagerReturnValue::StartDecrypt(
-                            real_manager.start_decrypt(session, key_handle),
+                            real_manager.start_decrypt(session, key_handle, mechanism),
                         )
                     }
                     ManagerArguments::GetDecryptedLength(session, data) => {
@@ -166,9 +166,9 @@ impl ManagerProxy {
                     ManagerArguments::Decrypt(session, data) => {
                         ManagerReturnValue::Decrypt(real_manager.decrypt(session, &data))
                     }
-                    ManagerArguments::StartEncrypt(session, key_handle) => {
+                    ManagerArguments::StartEncrypt(session, key_handle, mechanism) => {
                         ManagerReturnValue::StartEncrypt(
-                            real_manager.start_encrypt(session, key_handle),
+                            real_manager.start_encrypt(session, key_handle, mechanism),
                         )
                     }
                     ManagerArguments::GetEncryptedLength(session, data) => {
@@ -330,10 +330,11 @@ impl ManagerProxy {
         &mut self,
         session: CK_SESSION_HANDLE,
         key_handle: CK_OBJECT_HANDLE,
+        mechanism: RsaCipherMechanism,
     ) -> Result<(), CryptoError> {
         manager_proxy_fn_impl!(
             self,
-            ManagerArguments::StartDecrypt(session, key_handle),
+            ManagerArguments::StartDecrypt(session, key_handle, mechanism),
             ManagerReturnValue::StartDecrypt
         )
     }
@@ -362,10 +363,11 @@ impl ManagerProxy {
         &mut self,
         session: CK_SESSION_HANDLE,
         key_handle: CK_OBJECT_HANDLE,
+        mechanism: RsaCipherMechanism,
     ) -> Result<(), CryptoError> {
         manager_proxy_fn_impl!(
             self,
-            ManagerArguments::StartEncrypt(session, key_handle),
+            ManagerArguments::StartEncrypt(session, key_handle, mechanism),
             ManagerReturnValue::StartEncrypt
         )
     }
@@ -421,11 +423,12 @@ struct Manager {
     /// A map of sign operations to a pair of the object handle and optionally some params being
     /// used by each one.
     signs: BTreeMap<CK_SESSION_HANDLE, (CK_OBJECT_HANDLE, Option<CK_RSA_PKCS_PSS_PARAMS>)>,
-    /// A map of decrypt operations to the key handle being used by each one.
-    decrypts: BTreeMap<CK_SESSION_HANDLE, CK_OBJECT_HANDLE>,
-    /// A map of encrypt operations to the object handle (certificate or key) being used by each
+    /// A map of decrypt operations to a pair of the key handle and mechanism being used by each
     /// one.
-    encrypts: BTreeMap<CK_SESSION_HANDLE, CK_OBJECT_HANDLE>,
+    decrypts: BTreeMap<CK_SESSION_HANDLE, (CK_OBJECT_HANDLE, RsaCipherMechanism)>,
+    /// A map of encrypt operations to a pair of the object handle (certificate or key) and
+    /// mechanism being used by each one.
+    encrypts: BTreeMap<CK_SESSION_HANDLE, (CK_OBJECT_HANDLE, RsaCipherMechanism)>,
     /// A map of object handles to the underlying objects.
     objects: BTreeMap<CK_OBJECT_HANDLE, Object>,
     /// A set of certificate identifiers (not the same as handles).
@@ -698,6 +701,7 @@ impl Manager {
         &mut self,
         session: CK_SESSION_HANDLE,
         key_handle: CK_OBJECT_HANDLE,
+        mechanism: RsaCipherMechanism,
     ) -> Result<(), CryptoError> {
         if self.decrypts.contains_key(&session) {
             return Err(CryptoError::OperationFailed);
@@ -707,7 +711,7 @@ impl Manager {
             Some(Object::Key(_)) => {}
             _ => return Err(CryptoError::InvalidKey),
         };
-        self.decrypts.insert(session, key_handle);
+        self.decrypts.insert(session, (key_handle, mechanism));
         Ok(())
     }
 
@@ -716,35 +720,36 @@ impl Manager {
         session: CK_SESSION_HANDLE,
         data: &[u8],
     ) -> Result<usize, CryptoError> {
-        let key_handle = match self.decrypts.get(&session) {
-            Some(key_handle) => *key_handle,
+        let (key_handle, mechanism) = match self.decrypts.get(&session) {
+            Some((key_handle, mechanism)) => (*key_handle, mechanism),
             None => return Err(CryptoError::OperationFailed),
         };
         let key = match self.objects.get(&key_handle) {
             Some(Object::Key(key)) => key,
             _ => return Err(CryptoError::InvalidKey),
         };
-        key.decrypt_length(data)
+        key.decrypt_length(data, mechanism)
     }
 
     pub fn decrypt(&mut self, session: CK_SESSION_HANDLE, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
         // Performing the decryption (via C_Decrypt, which is the only way we support) finishes the
         // decrypt operation, so it needs to be removed here.
-        let key_handle = match self.decrypts.remove(&session) {
-            Some(key_handle) => key_handle,
+        let (key_handle, mechanism) = match self.decrypts.remove(&session) {
+            Some((key_handle, mechanism)) => (key_handle, mechanism),
             None => return Err(CryptoError::OperationFailed),
         };
         let key = match self.objects.get(&key_handle) {
             Some(Object::Key(key)) => key,
             _ => return Err(CryptoError::InvalidKey),
         };
-        key.decrypt(data)
+        key.decrypt(data, &mechanism)
     }
 
     pub fn start_encrypt(
         &mut self,
         session: CK_SESSION_HANDLE,
         key_handle: CK_OBJECT_HANDLE,
+        mechanism: RsaCipherMechanism,
     ) -> Result<(), CryptoError> {
         if self.encrypts.contains_key(&session) {
             return Err(CryptoError::OperationFailed);
@@ -755,7 +760,7 @@ impl Manager {
             Some(Object::Cert(_)) | Some(Object::Key(_)) => {}
             _ => return Err(CryptoError::InvalidKey),
         };
-        self.encrypts.insert(session, key_handle);
+        self.encrypts.insert(session, (key_handle, mechanism));
         Ok(())
     }
 
@@ -764,13 +769,13 @@ impl Manager {
         session: CK_SESSION_HANDLE,
         data: &[u8],
     ) -> Result<usize, CryptoError> {
-        let object_handle = match self.encrypts.get(&session) {
-            Some(object_handle) => *object_handle,
+        let (object_handle, mechanism) = match self.encrypts.get(&session) {
+            Some((object_handle, mechanism)) => (*object_handle, mechanism),
             None => return Err(CryptoError::OperationFailed),
         };
         match self.objects.get(&object_handle) {
-            Some(Object::Cert(cert)) => cert.encrypt_length(data),
-            Some(Object::Key(key)) => key.encrypt_length(data),
+            Some(Object::Cert(cert)) => cert.encrypt_length(data, mechanism),
+            Some(Object::Key(key)) => key.encrypt_length(data, mechanism),
             _ => Err(CryptoError::InvalidKey),
         }
     }
@@ -778,13 +783,13 @@ impl Manager {
     pub fn encrypt(&mut self, session: CK_SESSION_HANDLE, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
         // Performing the encryption (via C_Encrypt, which is the only way we support) finishes the
         // encrypt operation, so it needs to be removed here.
-        let object_handle = match self.encrypts.remove(&session) {
-            Some(object_handle) => object_handle,
+        let (object_handle, mechanism) = match self.encrypts.remove(&session) {
+            Some((object_handle, mechanism)) => (object_handle, mechanism),
             None => return Err(CryptoError::OperationFailed),
         };
         match self.objects.get(&object_handle) {
-            Some(Object::Cert(cert)) => cert.encrypt(data),
-            Some(Object::Key(key)) => key.encrypt(data),
+            Some(Object::Cert(cert)) => cert.encrypt(data, &mechanism),
+            Some(Object::Key(key)) => key.encrypt(data, &mechanism),
             _ => Err(CryptoError::InvalidKey),
         }
     }

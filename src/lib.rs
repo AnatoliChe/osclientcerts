@@ -42,6 +42,9 @@ mod backend_windows;
 use manager::ManagerProxy;
 use util::crypto_error_to_rv;
 
+#[cfg(target_os = "windows")]
+use crate::backend_windows::RsaCipherMechanism;
+
 lazy_static! {
     /// The singleton `ManagerProxy` that handles state with respect to PKCS #11. Only one thread
     /// may use it at a time, but there is no restriction on which threads may use it. However, as
@@ -241,7 +244,7 @@ extern "C" fn C_GetMechanismList(
         error!("C_GetMechanismList: CKR_ARGUMENTS_BAD");
         return CKR_ARGUMENTS_BAD;
     }
-    let mechanisms = [CKM_ECDSA, CKM_RSA_PKCS, CKM_RSA_PKCS_PSS];
+    let mechanisms = [CKM_ECDSA, CKM_RSA_PKCS, CKM_RSA_PKCS_PSS, CKM_RSA_PKCS_OAEP];
     if !pMechanismList.is_null() {
         if unsafe { *pulCount as usize } < mechanisms.len() {
             error!("C_GetMechanismList: CKR_BUFFER_TOO_SMALL");
@@ -289,6 +292,11 @@ extern "C" fn C_GetMechanismInfo(
             CKF_SIGN | CKF_DECRYPT | CKF_ENCRYPT,
         ),
         CKM_RSA_PKCS_PSS => (1024, 16384, CKF_SIGN),
+        CKM_RSA_PKCS_OAEP => (
+            1024,
+            16384,
+            CKF_ENCRYPT | CKF_DECRYPT,
+        ),
         CKM_ECDSA => (192, 521, CKF_SIGN),
         _ => {
             error!("C_GetMechanismInfo: unsupported mechanism: {}", mechanism_type);
@@ -643,8 +651,102 @@ extern "C" fn C_FindObjectsFinal(hSession: CK_SESSION_HANDLE) -> CK_RV {
     }
 }
 
-/// This gets called to set up an encrypt operation. Only RSA PKCS#1 v1.5 is supported; encryption
-/// uses the public key of the certificate associated with the given object.
+/// Parse the mechanism of an RSA encryption or decryption operation into its owned representation
+/// (`RsaCipherMechanism`). Returns an appropriate PKCS#11 return value on failure. RSA PKCS#1 v1.5
+/// (`CKM_RSA_PKCS`) and RSA-OAEP (`CKM_RSA_PKCS_OAEP`) are supported.
+#[cfg(target_os = "windows")]
+fn rsa_cipher_mechanism_from_ck_mechanism(
+    function_name: &str,
+    mechanism: &CK_MECHANISM,
+) -> Result<RsaCipherMechanism, CK_RV> {
+    let mechanism_type = unsafe_packed_field_access!(mechanism.mechanism);
+    if mechanism_type == CKM_RSA_PKCS {
+        let parameter_len = unsafe_packed_field_access!(mechanism.ulParameterLen);
+        if parameter_len != 0 || !mechanism.pParameter.is_null() {
+            error!(
+                "{}: unexpected mechanism parameters, len {}",
+                function_name, parameter_len
+            );
+            return Err(CKR_ARGUMENTS_BAD);
+        }
+        return Ok(RsaCipherMechanism::Pkcs1v15);
+    }
+    if mechanism_type != CKM_RSA_PKCS_OAEP {
+        error!(
+            "{}: unsupported mechanism: {}",
+            function_name, mechanism_type
+        );
+        return Err(CKR_MECHANISM_INVALID);
+    }
+    let parameter_len = unsafe_packed_field_access!(mechanism.ulParameterLen);
+    if parameter_len as usize != std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>()
+        || mechanism.pParameter.is_null()
+    {
+        error!(
+            "{}: invalid OAEP mechanism parameters, len {}",
+            function_name, parameter_len
+        );
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    // CK_RSA_PKCS_OAEP_PARAMS is packed, so copy its fields into local variables before using
+    // them (taking references to fields of packed structs is not allowed).
+    let params = unsafe { *(mechanism.pParameter as *const CK_RSA_PKCS_OAEP_PARAMS) };
+    let source = params.source;
+    if source != CKZ_DATA_SPECIFIED {
+        // CNG only supports labels passed directly in the parameters; there is no support for
+        // other encoding parameter sources (e.g. object handles or callbacks).
+        error!(
+            "{}: unsupported OAEP source type: {}",
+            function_name, source
+        );
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    let hash_alg = params.hashAlg;
+    let expected_mgf = match hash_alg {
+        CKM_SHA_1 => CKG_MGF1_SHA1,
+        CKM_SHA256 => CKG_MGF1_SHA256,
+        CKM_SHA384 => CKG_MGF1_SHA384,
+        CKM_SHA512 => CKG_MGF1_SHA512,
+        _ => {
+            // This includes SHA-224, which CNG does not implement.
+            error!(
+                "{}: unsupported OAEP hash algorithm: {}",
+                function_name, hash_alg
+            );
+            return Err(CKR_MECHANISM_INVALID);
+        }
+    };
+    let mgf = params.mgf;
+    if mgf != expected_mgf {
+        // CNG derives the MGF1 hash function from the digest algorithm identifier, so we cannot
+        // support an MGF that differs from the digest.
+        error!(
+            "{}: unsupported OAEP MGF: {} (CNG requires MGF1 with the same hash)",
+            function_name, mgf
+        );
+        return Err(CKR_MECHANISM_INVALID);
+    }
+    let label = if params.ulSourceDataLen == 0 || params.pSourceData.is_null() {
+        Vec::new()
+    } else {
+        unsafe {
+            std::slice::from_raw_parts(
+                params.pSourceData as *const u8,
+                params.ulSourceDataLen as usize,
+            )
+        }
+        .to_vec()
+    };
+    debug!(
+        "{}: OAEP parameters: hash {}, label {} bytes",
+        function_name, hash_alg, label.len()
+    );
+    Ok(RsaCipherMechanism::Oaep { hash_alg, label })
+}
+
+/// This gets called to set up an encrypt operation. Only RSA is supported (with PKCS#1 v1.5 or
+/// OAEP padding); encryption uses the public key of the certificate associated with the given
+/// object.
 extern "C" fn C_EncryptInit(
     hSession: CK_SESSION_HANDLE,
     pMechanism: CK_MECHANISM_PTR,
@@ -656,25 +758,14 @@ extern "C" fn C_EncryptInit(
     }
     let mechanism = unsafe { *pMechanism };
     debug!("C_EncryptInit: mechanism is {:?}", mechanism);
-    let mechanism_type = unsafe_packed_field_access!(mechanism.mechanism);
-    if mechanism_type != CKM_RSA_PKCS {
-        error!(
-            "C_EncryptInit: unsupported mechanism: {}",
-            mechanism_type
-        );
-        return CKR_MECHANISM_INVALID;
-    }
-    let parameter_len = unsafe_packed_field_access!(mechanism.ulParameterLen);
-    if parameter_len != 0 || !mechanism.pParameter.is_null() {
-        error!(
-            "C_EncryptInit: unexpected mechanism parameters, len {}",
-            parameter_len
-        );
-        return CKR_ARGUMENTS_BAD;
-    }
+    let cipher_mechanism =
+        match rsa_cipher_mechanism_from_ck_mechanism("C_EncryptInit", &mechanism) {
+            Ok(cipher_mechanism) => cipher_mechanism,
+            Err(rv) => return rv,
+        };
     let mut manager_guard = try_to_get_manager_guard!();
     let manager = manager_guard_to_manager!(manager_guard);
-    match manager.start_encrypt(hSession, hKey) {
+    match manager.start_encrypt(hSession, hKey, cipher_mechanism) {
         Ok(()) => {}
         Err(err) => {
             return crypto_error_to_rv("C_EncryptInit: start_encrypt failed", &err);
@@ -795,25 +886,14 @@ extern "C" fn C_DecryptInit(
     }
     let mechanism = unsafe { *pMechanism };
     debug!("C_DecryptInit: mechanism is {:?}", mechanism);
-    let mechanism_type = unsafe_packed_field_access!(mechanism.mechanism);
-    if mechanism_type != CKM_RSA_PKCS {
-        error!(
-            "C_DecryptInit: unsupported mechanism: {}",
-            mechanism_type
-        );
-        return CKR_MECHANISM_INVALID;
-    }
-    let parameter_len = unsafe_packed_field_access!(mechanism.ulParameterLen);
-    if parameter_len != 0 || !mechanism.pParameter.is_null() {
-        error!(
-            "C_DecryptInit: unexpected mechanism parameters, len {}",
-            parameter_len
-        );
-        return CKR_ARGUMENTS_BAD;
-    }
+    let cipher_mechanism =
+        match rsa_cipher_mechanism_from_ck_mechanism("C_DecryptInit", &mechanism) {
+            Ok(cipher_mechanism) => cipher_mechanism,
+            Err(rv) => return rv,
+        };
     let mut manager_guard = try_to_get_manager_guard!();
     let manager = manager_guard_to_manager!(manager_guard);
-    match manager.start_decrypt(hSession, hKey) {
+    match manager.start_decrypt(hSession, hKey, cipher_mechanism) {
         Ok(()) => {}
         Err(err) => {
             return crypto_error_to_rv("C_DecryptInit: start_decrypt failed", &err);
