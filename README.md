@@ -6,7 +6,7 @@ A standalone Windows PKCS#11 provider based on Mozilla's historical `osclientcer
 
 ## Goal
 
-The project aims to make certificates and **non-exportable private keys stored in the Windows certificate/CNG infrastructure** available to applications through the standard PKCS#11 interface.
+The project aims to make certificates and **non-exportable private keys stored in the Windows certificate/CNG infrastructure** available to applications through the standard PKCS#11 interface — including hardware-backed keys when exposed through the Windows CNG/NCRYPT interface.
 
 The primary use case is S/MIME in Thunderbird:
 
