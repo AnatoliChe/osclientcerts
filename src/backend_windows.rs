@@ -70,6 +70,35 @@ pub struct Cert {
     subject: Vec<u8>,
 }
 
+/// Compares a stored boolean attribute (always one byte, per CK_BBOOL) against the value requested
+/// in a search template. Callers normally send CK_BBOOL (one byte); be lenient and also accept a
+/// native-endian CK_ULONG (four bytes).
+fn bool_attr_matches(stored: &[u8], requested: &[u8]) -> bool {
+    let stored_bool = match stored {
+        [b] => *b != 0,
+        _ => return false,
+    };
+    let requested_bool = match requested {
+        [b] => *b != 0,
+        [a, b, c, d] => u32::from_ne_bytes([*a, *b, *c, *d]) != 0,
+        _ => return false,
+    };
+    stored_bool == requested_bool
+}
+
+/// Compares the stored certificate serial number (the raw big-endian integer content bytes) against
+/// the value requested in a search template. Callers send either the bare integer content or the
+/// full DER TLV encoding of the INTEGER; accept both.
+fn serial_number_matches(stored: &[u8], requested: &[u8]) -> bool {
+    if requested == stored {
+        return true;
+    }
+    requested.len() == stored.len() + 2
+        && requested[0] == 0x02
+        && requested[1] as usize == stored.len()
+        && &requested[2..] == stored
+}
+
 impl Cert {
     fn new(cert: PCCERT_CONTEXT) -> Result<Cert, ()> {
         let cert = unsafe { &*cert };
@@ -89,14 +118,17 @@ impl Cert {
                 cert_info.SerialNumber.cbData as usize,
             )
         };
-        let serial_number = serial_number.to_vec();
+        // Windows reports the serial number least-significant-byte first; store the big-endian
+        // integer content bytes (the form used in DER and by NSS search templates).
+        let mut serial_number = serial_number.to_vec();
+        serial_number.reverse();
         let subject = unsafe {
             slice::from_raw_parts(cert_info.Subject.pbData, cert_info.Subject.cbData as usize)
         };
         let subject = subject.to_vec();
         Ok(Cert {
             class: serialize_uint(CKO_CERTIFICATE)?,
-            token: serialize_uint(CK_TRUE)?,
+            token: vec![CK_TRUE as u8],
             id,
             label,
             value,
@@ -175,23 +207,24 @@ impl Cert {
     }
 
     fn matches(&self, attrs: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)]) -> bool {
-        for (attr_type, attr_value) in attrs {
-            let comparison = match *attr_type {
-                CKA_CLASS => self.class(),
-                CKA_TOKEN => self.token(),
-                CKA_LABEL => self.label(),
-                CKA_ID => self.id(),
-                CKA_VALUE => self.value(),
-                CKA_ISSUER => self.issuer(),
-                CKA_SERIAL_NUMBER => self.serial_number(),
-                CKA_SUBJECT => self.subject(),
-                _ => return false,
-            };
-            if attr_value.as_slice() != comparison {
-                return false;
+        attrs.iter().all(|(attr_type, attr_value)| {
+            match *attr_type {
+                CKA_TOKEN => bool_attr_matches(self.token(), attr_value),
+                CKA_SERIAL_NUMBER => serial_number_matches(self.serial_number(), attr_value),
+                _ => {
+                    let comparison = match *attr_type {
+                        CKA_CLASS => self.class(),
+                        CKA_LABEL => self.label(),
+                        CKA_ID => self.id(),
+                        CKA_VALUE => self.value(),
+                        CKA_ISSUER => self.issuer(),
+                        CKA_SUBJECT => self.subject(),
+                        _ => return false,
+                    };
+                    attr_value.as_slice() == comparison
+                }
             }
-        }
-        true
+        })
     }
 
     fn get_attribute(&self, attribute: CK_ATTRIBUTE_TYPE) -> Option<&[u8]> {
@@ -547,9 +580,9 @@ impl Key {
         Ok(Key {
             cert: CertContext::new(cert_context),
             class: serialize_uint(CKO_PRIVATE_KEY)?,
-            token: serialize_uint(CK_TRUE)?,
+            token: vec![CK_TRUE as u8],
             id,
-            private: serialize_uint(CK_TRUE)?,
+            private: vec![CK_TRUE as u8],
             key_type: serialize_uint(key_type_attribute)?,
             modulus,
             ec_params,
@@ -592,34 +625,35 @@ impl Key {
     }
 
     fn matches(&self, attrs: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)]) -> bool {
-        for (attr_type, attr_value) in attrs {
-            let comparison = match *attr_type {
-                CKA_CLASS => self.class(),
-                CKA_TOKEN => self.token(),
-                CKA_ID => self.id(),
-                CKA_PRIVATE => self.private(),
-                CKA_KEY_TYPE => self.key_type(),
-                CKA_MODULUS => {
-                    if let Some(modulus) = self.modulus() {
-                        modulus
-                    } else {
-                        return false;
-                    }
+        attrs.iter().all(|(attr_type, attr_value)| {
+            match *attr_type {
+                CKA_TOKEN => bool_attr_matches(self.token(), attr_value),
+                CKA_PRIVATE => bool_attr_matches(self.private(), attr_value),
+                _ => {
+                    let comparison = match *attr_type {
+                        CKA_CLASS => self.class(),
+                        CKA_ID => self.id(),
+                        CKA_KEY_TYPE => self.key_type(),
+                        CKA_MODULUS => {
+                            if let Some(modulus) = self.modulus() {
+                                modulus
+                            } else {
+                                return false;
+                            }
+                        }
+                        CKA_EC_PARAMS => {
+                            if let Some(ec_params) = self.ec_params() {
+                                ec_params
+                            } else {
+                                return false;
+                            }
+                        }
+                        _ => return false,
+                    };
+                    attr_value.as_slice() == comparison
                 }
-                CKA_EC_PARAMS => {
-                    if let Some(ec_params) = self.ec_params() {
-                        ec_params
-                    } else {
-                        return false;
-                    }
-                }
-                _ => return false,
-            };
-            if attr_value.as_slice() != comparison {
-                return false;
             }
-        }
-        true
+        })
     }
 
     fn get_attribute(&self, attribute: CK_ATTRIBUTE_TYPE) -> Option<&[u8]> {
