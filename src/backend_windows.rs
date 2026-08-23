@@ -783,8 +783,9 @@ impl Key {
         // this as late as possible (i.e. here).
         let key = NCryptKeyHandle::from_cert(&self.cert)?;
         let mut decrypted_len: u32 = 0;
-        // The first call asks CNG for the required output buffer size without performing the
-        // decryption.
+        // The first call asks CNG for the required output buffer size. Note that to produce this
+        // result CNG processes the input (including unpadding), so this is effectively one
+        // decryption pass; the second call below performs the decryption again to get the data.
         let status = unsafe {
             NCryptDecrypt(
                 *key,

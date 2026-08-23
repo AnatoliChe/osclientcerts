@@ -720,22 +720,40 @@ extern "C" fn C_Encrypt(
             }
         }
     } else {
-        let mut manager_guard = try_to_get_manager_guard!();
-        let manager = manager_guard_to_manager!(manager_guard);
-        let encrypted = match manager.encrypt(hSession, data.to_vec()) {
-            Ok(ciphertext) => ciphertext,
-            Err(err) => {
-                return crypto_error_to_rv("C_Encrypt: encrypt failed", &err);
+        // PKCS #11 requires that CKR_BUFFER_TOO_SMALL does not terminate the active operation, so
+        // the output length must be determined (and the buffer checked) before the operation that
+        // consumes it runs.
+        let encrypted_length = {
+            let mut manager_guard = try_to_get_manager_guard!();
+            let manager = manager_guard_to_manager!(manager_guard);
+            match manager.get_encrypted_length(hSession, data.to_vec()) {
+                Ok(encrypted_length) => encrypted_length,
+                Err(err) => {
+                    return crypto_error_to_rv(
+                        "C_Encrypt: get_encrypted_length failed",
+                        &err,
+                    );
+                }
             }
         };
         let encrypted_capacity = unsafe { *pulEncryptedDataLen } as usize;
-        if encrypted_capacity < encrypted.len() {
+        if encrypted_capacity < encrypted_length {
             unsafe {
-                *pulEncryptedDataLen = encrypted.len() as CK_ULONG;
+                *pulEncryptedDataLen = encrypted_length as CK_ULONG;
             }
             error!("C_Encrypt: CKR_BUFFER_TOO_SMALL");
             return CKR_BUFFER_TOO_SMALL;
         }
+        let encrypted = {
+            let mut manager_guard = try_to_get_manager_guard!();
+            let manager = manager_guard_to_manager!(manager_guard);
+            match manager.encrypt(hSession, data.to_vec()) {
+                Ok(ciphertext) => ciphertext,
+                Err(err) => {
+                    return crypto_error_to_rv("C_Encrypt: encrypt failed", &err);
+                }
+            }
+        };
         let ptr: *mut u8 = pEncryptedData as *mut u8;
         unsafe {
             std::ptr::copy_nonoverlapping(encrypted.as_ptr(), ptr, encrypted.len());
@@ -843,22 +861,40 @@ extern "C" fn C_Decrypt(
             }
         }
     } else {
-        let mut manager_guard = try_to_get_manager_guard!();
-        let manager = manager_guard_to_manager!(manager_guard);
-        let decrypted = match manager.decrypt(hSession, encrypted_data.to_vec()) {
-            Ok(plaintext) => plaintext,
-            Err(err) => {
-                return crypto_error_to_rv("C_Decrypt: decrypt failed", &err);
+        // PKCS #11 requires that CKR_BUFFER_TOO_SMALL does not terminate the active operation, so
+        // the output length must be determined (and the buffer checked) before the operation that
+        // consumes it runs.
+        let decrypted_length = {
+            let mut manager_guard = try_to_get_manager_guard!();
+            let manager = manager_guard_to_manager!(manager_guard);
+            match manager.get_decrypted_length(hSession, encrypted_data.to_vec()) {
+                Ok(decrypted_length) => decrypted_length,
+                Err(err) => {
+                    return crypto_error_to_rv(
+                        "C_Decrypt: get_decrypted_length failed",
+                        &err,
+                    );
+                }
             }
         };
         let data_capacity = unsafe { *pulDataLen } as usize;
-        if data_capacity < decrypted.len() {
+        if data_capacity < decrypted_length {
             unsafe {
-                *pulDataLen = decrypted.len() as CK_ULONG;
+                *pulDataLen = decrypted_length as CK_ULONG;
             }
             error!("C_Decrypt: CKR_BUFFER_TOO_SMALL");
             return CKR_BUFFER_TOO_SMALL;
         }
+        let decrypted = {
+            let mut manager_guard = try_to_get_manager_guard!();
+            let manager = manager_guard_to_manager!(manager_guard);
+            match manager.decrypt(hSession, encrypted_data.to_vec()) {
+                Ok(plaintext) => plaintext,
+                Err(err) => {
+                    return crypto_error_to_rv("C_Decrypt: decrypt failed", &err);
+                }
+            }
+        };
         let ptr: *mut u8 = pData as *mut u8;
         unsafe {
             std::ptr::copy_nonoverlapping(decrypted.as_ptr(), ptr, decrypted.len());
@@ -994,27 +1030,41 @@ extern "C" fn C_Sign(
             }
         }
     } else {
-        let mut manager_guard = try_to_get_manager_guard!();
-        let manager = manager_guard_to_manager!(manager_guard);
-        match manager.sign(hSession, data.to_vec()) {
-            Ok(signature) => {
-                let signature_capacity = unsafe { *pulSignatureLen } as usize;
-                if signature_capacity < signature.len() {
-                    unsafe {
-                        *pulSignatureLen = signature.len() as CK_ULONG;
-                    }
-                    error!("C_Sign: CKR_BUFFER_TOO_SMALL");
-                    return CKR_BUFFER_TOO_SMALL;
-                }
-                let ptr: *mut u8 = pSignature as *mut u8;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(signature.as_ptr(), ptr, signature.len());
-                    *pulSignatureLen = signature.len() as CK_ULONG;
+        // PKCS #11 requires that CKR_BUFFER_TOO_SMALL does not terminate the active operation, so
+        // the output length must be determined (and the buffer checked) before the operation that
+        // consumes it runs.
+        let signature_length = {
+            let mut manager_guard = try_to_get_manager_guard!();
+            let manager = manager_guard_to_manager!(manager_guard);
+            match manager.get_signature_length(hSession, data.to_vec()) {
+                Ok(signature_length) => signature_length,
+                Err(err) => {
+                    return crypto_error_to_rv("C_Sign: get_signature_length failed", &err);
                 }
             }
-            Err(err) => {
-                return crypto_error_to_rv("C_Sign: sign failed", &err);
+        };
+        let signature_capacity = unsafe { *pulSignatureLen } as usize;
+        if signature_capacity < signature_length {
+            unsafe {
+                *pulSignatureLen = signature_length as CK_ULONG;
             }
+            error!("C_Sign: CKR_BUFFER_TOO_SMALL");
+            return CKR_BUFFER_TOO_SMALL;
+        }
+        let signature = {
+            let mut manager_guard = try_to_get_manager_guard!();
+            let manager = manager_guard_to_manager!(manager_guard);
+            match manager.sign(hSession, data.to_vec()) {
+                Ok(signature) => signature,
+                Err(err) => {
+                    return crypto_error_to_rv("C_Sign: sign failed", &err);
+                }
+            }
+        };
+        let ptr: *mut u8 = pSignature as *mut u8;
+        unsafe {
+            std::ptr::copy_nonoverlapping(signature.as_ptr(), ptr, signature.len());
+            *pulSignatureLen = signature.len() as CK_ULONG;
         }
     }
     debug!("C_Sign: CKR_OK");
