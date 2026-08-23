@@ -122,6 +122,8 @@ RSA keys are currently used for:
 - RSA-PSS signing
 - RSA PKCS#1 v1.5 decryption
 - RSA PKCS#1 v1.5 encryption using the certificate public key
+- RSA-OAEP decryption
+- RSA-OAEP encryption using the certificate public key
 
 ### EC
 
@@ -139,9 +141,21 @@ The provider currently advertises:
 | `CKM_RSA_PKCS` | Decrypt | `NCryptDecrypt` + `NCRYPT_PAD_PKCS1_FLAG` | Implemented and validated with Thunderbird S/MIME |
 | `CKM_RSA_PKCS` | Encrypt | `BCryptEncrypt` + RSA PKCS#1 padding | Implemented |
 | `CKM_RSA_PKCS_PSS` | Sign | `NCryptSignHash` + PSS | Supported |
+| `CKM_RSA_PKCS_OAEP` | Decrypt | `NCryptDecrypt` + `NCRYPT_PAD_OAEP_FLAG` | Implemented (not yet validated with Thunderbird) |
+| `CKM_RSA_PKCS_OAEP` | Encrypt | `BCryptEncrypt` + `BCRYPT_OAEP_PADDING_INFO` | Implemented (not yet validated with Thunderbird) |
 | `CKM_ECDSA` | Sign | `NCryptSignHash` | Supported |
 
-(`CKM_RSA_PKCS_OAEP` is not implemented and therefore not advertised.)
+(`CKM_RSA_PKCS_OAEP` is advertised as of version 0.3.0.)
+
+RSA-OAEP restrictions imposed by Windows CNG:
+
+- The MGF1 hash function must be the same as the digest algorithm (`CKG_MGF1_SHA1` for
+  `CKM_SHA_1`, and so on). Requests that specify a different MGF are rejected with
+  `CKR_MECHANISM_INVALID`.
+- Supported digest algorithms: SHA-1, SHA-256, SHA-384, SHA-512. SHA-224 is not implemented by
+  CNG.
+- Only the `CKZ_DATA_SPECIFIED` encoding parameter source is supported; the optional label is
+  passed to CNG via `BCRYPT_OAEP_PADDING_INFO.pbLabel`.
 
 The provider currently does not implement streaming RSA operations through:
 
@@ -291,7 +305,8 @@ Historical Windows PKCS#11 provider based on CryptoAPI. A prebuilt DLL was teste
 [done] Capture and analyze NSS/PKCS#11 operation traces
 [done] PKCS#11-compliant CKR_BUFFER_TOO_SMALL handling for sign/encrypt/decrypt
 [done] Cleanup of active operations on session close
-[pending] Add RSA-OAEP if Thunderbird/NSS requires it
+[done] RSA-OAEP encryption and decryption (CKM_RSA_PKCS_OAEP)
+[pending] Validate RSA-OAEP with Thunderbird/NSS end-to-end
 [pending] Validate additional Windows CNG key providers/HSMs
 [pending] Consider legacy CAPI/CSP support if required
 [pending] Production hardening and broader PKCS#11 compatibility
@@ -302,13 +317,25 @@ Historical Windows PKCS#11 provider based on CryptoAPI. A prebuilt DLL was teste
 The current provider is intentionally narrow.
 
 - Windows CNG/NCRYPT keys are supported; legacy CAPI/CSP private-key providers are not currently supported.
-- RSA PKCS#1 v1.5 is the current decryption mechanism.
-- RSA-OAEP is not implemented.
+- RSA PKCS#1 v1.5 and RSA-OAEP are the supported decryption mechanisms. For RSA-OAEP, CNG requires
+  MGF1 to use the same hash as the digest algorithm (SHA-1/SHA-256/SHA-384/SHA-512 only), and only
+  `CKZ_DATA_SPECIFIED` labels are supported.
 - EC decryption is not implemented.
 - Multi-part `C_EncryptUpdate` / `C_EncryptFinal` and `C_DecryptUpdate` / `C_DecryptFinal` are not implemented.
 - The provider currently focuses on the Windows user's `My` certificate store.
 
 ## Release notes
+
+### 0.3.0
+
+- Added RSA-OAEP support (`CKM_RSA_PKCS_OAEP`) for encryption (`C_EncryptInit` / `C_Encrypt` via
+  `BCryptEncrypt` with `BCRYPT_OAEP_PADDING_INFO`) and decryption (`C_DecryptInit` / `C_Decrypt`
+  via `NCryptDecrypt` with `NCRYPT_PAD_OAEP_FLAG`).
+- OAEP parameters are validated at init time: the digest must be SHA-1, SHA-256, SHA-384 or
+  SHA-512; MGF1 must use the same hash (a Windows CNG limitation); only `CKZ_DATA_SPECIFIED`
+  encoding parameter sources are accepted, and an optional label is passed through to CNG.
+- Invalid or unsupported OAEP parameter combinations are rejected up front with
+  `CKR_MECHANISM_INVALID` / `CKR_ARGUMENTS_BAD` instead of failing later inside CNG.
 
 ### 0.2.0
 
