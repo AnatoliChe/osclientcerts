@@ -39,6 +39,102 @@ pub fn serialize_uint<T: TryInto<u64>>(value: T) -> Result<Vec<u8>, ()> {
     Ok(value_buf)
 }
 
+/// An error that can occur while performing a cryptographic operation via the OS. This carries
+/// enough information to both log a useful diagnostic and map the failure onto the appropriate
+/// PKCS#11 return code for the calling application.
+// Some variants are only constructed by platform backends other than the one being compiled.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CryptoError {
+    /// A generic failure with no more specific information available.
+    OperationFailed,
+    /// The certificate or key involved cannot perform the requested operation (wrong type,
+    /// missing private key, not acquired, ...).
+    InvalidKey,
+    /// The input data is invalid for the operation (e.g. an encrypted blob does not decrypt to
+    /// something with valid padding).
+    InvalidData,
+    /// The caller-supplied output buffer is too small; the payload is the required length in
+    /// bytes.
+    BufferTooSmall(usize),
+    /// A Windows API returned the given error code (e.g. a SECURITY_STATUS from CNG/NCrypt).
+    Windows(u32),
+}
+
+impl std::fmt::Display for CryptoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            CryptoError::OperationFailed => write!(f, "operation failed"),
+            CryptoError::InvalidKey => write!(f, "invalid key"),
+            CryptoError::InvalidData => write!(f, "invalid data"),
+            CryptoError::BufferTooSmall(len) => {
+                write!(f, "buffer too small (need {} bytes)", len)
+            }
+            CryptoError::Windows(status) => write!(f, "windows error {:#010x}", status),
+        }
+    }
+}
+
+impl From<()> for CryptoError {
+    fn from(_: ()) -> CryptoError {
+        CryptoError::OperationFailed
+    }
+}
+
+/// Windows CNG SECURITY_STATUS values we want to distinguish when mapping errors onto PKCS#11
+/// return codes. See winerror.h.
+#[cfg(target_os = "windows")]
+const NTE_BAD_KEY: u32 = 0x8009_0003;
+#[cfg(target_os = "windows")]
+const NTE_BAD_DATA: u32 = 0x8009_0005;
+#[cfg(target_os = "windows")]
+const NTE_BAD_ALGID: u32 = 0x8009_0008;
+#[cfg(target_os = "windows")]
+const NTE_BAD_FLAGS: u32 = 0x8009_0009;
+#[cfg(target_os = "windows")]
+const NTE_BAD_KEY_STATE: u32 = 0x8009_000B;
+#[cfg(target_os = "windows")]
+const NTE_NO_KEY: u32 = 0x8009_000D;
+#[cfg(target_os = "windows")]
+const NTE_PERM: u32 = 0x8009_0010;
+#[cfg(target_os = "windows")]
+const NTE_BAD_KEYSET: u32 = 0x8009_0016;
+#[cfg(target_os = "windows")]
+const NTE_INVALID_PARAMETER: u32 = 0x8009_0027;
+#[cfg(target_os = "windows")]
+const NTE_BUFFER_TOO_SMALL: u32 = 0x8009_0028;
+#[cfg(target_os = "windows")]
+const NTE_NOT_SUPPORTED: u32 = 0x8009_0029;
+
+/// Log the given error with context and convert it into a PKCS#11 return code so that the
+/// application (e.g. NSS in Thunderbird) can react appropriately.
+pub fn crypto_error_to_rv(context: &str, err: &CryptoError) -> crate::pkcs11::types::CK_RV {
+    use crate::pkcs11::types::*;
+    let rv = match err {
+        CryptoError::OperationFailed => CKR_FUNCTION_FAILED,
+        CryptoError::InvalidKey => CKR_KEY_HANDLE_INVALID,
+        CryptoError::InvalidData => CKR_ENCRYPTED_DATA_INVALID,
+        CryptoError::BufferTooSmall(_) => CKR_BUFFER_TOO_SMALL,
+        CryptoError::Windows(status) => match *status {
+            #[cfg(target_os = "windows")]
+            NTE_NO_KEY | NTE_BAD_KEY | NTE_BAD_KEYSET | NTE_BAD_KEY_STATE | NTE_PERM => {
+                CKR_KEY_HANDLE_INVALID
+            }
+            #[cfg(target_os = "windows")]
+            NTE_BAD_DATA => CKR_ENCRYPTED_DATA_INVALID,
+            #[cfg(target_os = "windows")]
+            NTE_INVALID_PARAMETER | NTE_BAD_FLAGS => CKR_ARGUMENTS_BAD,
+            #[cfg(target_os = "windows")]
+            NTE_BUFFER_TOO_SMALL => CKR_BUFFER_TOO_SMALL,
+            #[cfg(target_os = "windows")]
+            NTE_BAD_ALGID | NTE_NOT_SUPPORTED => CKR_FUNCTION_NOT_SUPPORTED,
+            _ => CKR_DEVICE_ERROR,
+        },
+    };
+    error!("{}: {} (CK_RV {})", context, err, rv);
+    rv
+}
+
 /// Given a slice of DER bytes representing an RSA public key, extracts the bytes of the modulus
 /// as an unsigned integer. Also verifies that the public exponent is present (again as an
 /// unsigned integer). Finally verifies that reading these values consumes the entirety of the
