@@ -1467,7 +1467,7 @@ static mut FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
 
 /// This is the only function this module exposes. NSS calls it to obtain the list of functions
 /// comprising this module.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn C_GetFunctionList(ppFunctionList: CK_FUNCTION_LIST_PTR_PTR) -> CK_RV {
     if ppFunctionList.is_null() {
         return CKR_ARGUMENTS_BAD;
@@ -1479,4 +1479,4 @@ pub extern "C" fn C_GetFunctionList(ppFunctionList: CK_FUNCTION_LIST_PTR_PTR) ->
 }
 
 #[cfg_attr(target_os = "macos", link(name = "Security", kind = "framework"))]
-extern "C" {}
+unsafe extern "C" {}

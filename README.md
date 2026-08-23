@@ -326,6 +326,14 @@ The current provider is intentionally narrow.
 
 ## Release notes
 
+### 0.3.1
+
+- Modernized the crate to Rust edition 2024 (up from 2018, inherited from the 2018-era upstream
+  project). Required mechanical changes: `#[unsafe(no_mangle)]` for the exported
+  `C_GetFunctionList` and an `unsafe extern "C"` block. No functional changes; PKCS#11 behavior is
+  identical to 0.3.0.
+- Updated crate metadata (repository URL, authors, description) to reflect this fork.
+
 ### 0.3.0
 
 - Added RSA-OAEP support (`CKM_RSA_PKCS_OAEP`) for encryption (`C_EncryptInit` / `C_Encrypt` via
