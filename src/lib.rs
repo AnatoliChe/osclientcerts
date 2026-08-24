@@ -24,23 +24,22 @@ extern crate sha2;
 #[cfg(target_os = "windows")]
 extern crate winapi;
 
-use pkcs11::types::*;
 use pkcs11::types::padding::{
-    BlankPaddedString16, BlankPaddedUtf8String16, BlankPaddedUtf8String32,
-    BlankPaddedUtf8String64,
+    BlankPaddedString16, BlankPaddedUtf8String16, BlankPaddedUtf8String32, BlankPaddedUtf8String64,
 };
+use pkcs11::types::*;
 use std::sync::Mutex;
 
 mod manager;
 #[macro_use]
 mod util;
-mod mechanism;
 #[cfg(target_os = "macos")]
 mod backend_macos;
-#[cfg(target_os = "windows")]
-mod backend_windows;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod backend_other;
+#[cfg(target_os = "windows")]
+mod backend_windows;
+mod mechanism;
 
 use manager::ManagerProxy;
 use util::crypto_error_to_rv;
@@ -101,11 +100,15 @@ extern "C" fn C_Initialize(_pInitArgs: CK_C_INITIALIZE_ARGS_PTR) -> CK_RV {
         Some(_unexpected_previous_manager) => {
             #[cfg(target_os = "macos")]
             {
-                info!("C_Initialize: manager previously set (this is expected on macOS - replacing it)");
+                info!(
+                    "C_Initialize: manager previously set (this is expected on macOS - replacing it)"
+                );
             }
             #[cfg(target_os = "windows")]
             {
-                warn!("C_Initialize: manager unexpectedly previously set (bravely continuing by replacing it)");
+                warn!(
+                    "C_Initialize: manager unexpectedly previously set (bravely continuing by replacing it)"
+                );
             }
         }
         None => {}
@@ -288,20 +291,15 @@ extern "C" fn C_GetMechanismInfo(
     // Key sizes are in bits. RSA keys from 1024 up to 16384 bits are usable via CNG; for elliptic
     // curves we support the NIST curves P-256 through P-521.
     let (info_min_key_size, info_max_key_size, info_flags) = match mechanism_type {
-        CKM_RSA_PKCS => (
-            1024,
-            16384,
-            CKF_SIGN | CKF_DECRYPT | CKF_ENCRYPT,
-        ),
+        CKM_RSA_PKCS => (1024, 16384, CKF_SIGN | CKF_DECRYPT | CKF_ENCRYPT),
         CKM_RSA_PKCS_PSS => (1024, 16384, CKF_SIGN),
-        CKM_RSA_PKCS_OAEP => (
-            1024,
-            16384,
-            CKF_ENCRYPT | CKF_DECRYPT,
-        ),
+        CKM_RSA_PKCS_OAEP => (1024, 16384, CKF_ENCRYPT | CKF_DECRYPT),
         CKM_ECDSA => (192, 521, CKF_SIGN),
         _ => {
-            error!("C_GetMechanismInfo: unsupported mechanism: {}", mechanism_type);
+            error!(
+                "C_GetMechanismInfo: unsupported mechanism: {}",
+                mechanism_type
+            );
             return CKR_MECHANISM_INVALID;
         }
     };
@@ -667,11 +665,10 @@ extern "C" fn C_EncryptInit(
     }
     let mechanism = unsafe { *pMechanism };
     debug!("C_EncryptInit: mechanism is {:?}", mechanism);
-    let cipher_mechanism =
-        match parse_rsa_cipher_mechanism("C_EncryptInit", &mechanism) {
-            Ok(cipher_mechanism) => cipher_mechanism,
-            Err(rv) => return rv,
-        };
+    let cipher_mechanism = match parse_rsa_cipher_mechanism("C_EncryptInit", &mechanism) {
+        Ok(cipher_mechanism) => cipher_mechanism,
+        Err(rv) => return rv,
+    };
     let mut manager_guard = try_to_get_manager_guard!();
     let manager = manager_guard_to_manager!(manager_guard);
     match manager.start_encrypt(hSession, hKey, cipher_mechanism) {
@@ -729,10 +726,7 @@ extern "C" fn C_Encrypt(
             match manager.get_encrypted_length(hSession, data.to_vec()) {
                 Ok(encrypted_length) => encrypted_length,
                 Err(err) => {
-                    return crypto_error_to_rv(
-                        "C_Encrypt: get_encrypted_length failed",
-                        &err,
-                    );
+                    return crypto_error_to_rv("C_Encrypt: get_encrypted_length failed", &err);
                 }
             }
         };
@@ -795,11 +789,10 @@ extern "C" fn C_DecryptInit(
     }
     let mechanism = unsafe { *pMechanism };
     debug!("C_DecryptInit: mechanism is {:?}", mechanism);
-    let cipher_mechanism =
-        match parse_rsa_cipher_mechanism("C_DecryptInit", &mechanism) {
-            Ok(cipher_mechanism) => cipher_mechanism,
-            Err(rv) => return rv,
-        };
+    let cipher_mechanism = match parse_rsa_cipher_mechanism("C_DecryptInit", &mechanism) {
+        Ok(cipher_mechanism) => cipher_mechanism,
+        Err(rv) => return rv,
+    };
     let mut manager_guard = try_to_get_manager_guard!();
     let manager = manager_guard_to_manager!(manager_guard);
     match manager.start_decrypt(hSession, hKey, cipher_mechanism) {
@@ -859,10 +852,7 @@ extern "C" fn C_Decrypt(
             match manager.get_decrypted_length(hSession, encrypted_data.to_vec()) {
                 Ok(decrypted_length) => decrypted_length,
                 Err(err) => {
-                    return crypto_error_to_rv(
-                        "C_Decrypt: get_decrypted_length failed",
-                        &err,
-                    );
+                    return crypto_error_to_rv("C_Decrypt: get_decrypted_length failed", &err);
                 }
             }
         };
@@ -1506,7 +1496,11 @@ mod tests {
         let session = open_session();
         let key = find_key(session);
         assert_eq!(
-            C_DecryptInit(session, &mut oaep_mechanism(CKM_SHA256, CKG_MGF1_SHA256), key),
+            C_DecryptInit(
+                session,
+                &mut oaep_mechanism(CKM_SHA256, CKG_MGF1_SHA256),
+                key
+            ),
             CKR_OK
         );
         // The successful init above started an operation on this session; use a fresh one.
@@ -1521,10 +1515,7 @@ mod tests {
     fn buffer_too_small_preserves_decrypt_operation() {
         let session = open_session();
         let key = find_key(session);
-        assert_eq!(
-            C_DecryptInit(session, &mut pkcs1_mechanism(), key),
-            CKR_OK
-        );
+        assert_eq!(C_DecryptInit(session, &mut pkcs1_mechanism(), key), CKR_OK);
         // Inputs shorter than the stub threshold make length queries fail with
         // CKR_BUFFER_TOO_SMALL; this must not terminate the operation.
         let mut short_input = [0xEE_u8; 32];
@@ -1585,10 +1576,7 @@ mod tests {
     fn buffer_too_small_preserves_encrypt_operation() {
         let session = open_session();
         let key = find_key(session);
-        assert_eq!(
-            C_EncryptInit(session, &mut pkcs1_mechanism(), key),
-            CKR_OK
-        );
+        assert_eq!(C_EncryptInit(session, &mut pkcs1_mechanism(), key), CKR_OK);
         let mut short_input = [0xEE_u8; 32];
         let mut out_len: CK_ULONG = 0;
         assert_eq!(
@@ -1622,10 +1610,7 @@ mod tests {
     fn close_session_clears_decrypt_operation() {
         let session = open_session();
         let key = find_key(session);
-        assert_eq!(
-            C_DecryptInit(session, &mut pkcs1_mechanism(), key),
-            CKR_OK
-        );
+        assert_eq!(C_DecryptInit(session, &mut pkcs1_mechanism(), key), CKR_OK);
         assert_eq!(C_CloseSession(session), CKR_OK);
         let mut long_input = [0x5A_u8; 128];
         let mut big_out = [0u8; 256];
@@ -1646,10 +1631,7 @@ mod tests {
     fn close_session_clears_encrypt_operation() {
         let session = open_session();
         let key = find_key(session);
-        assert_eq!(
-            C_EncryptInit(session, &mut pkcs1_mechanism(), key),
-            CKR_OK
-        );
+        assert_eq!(C_EncryptInit(session, &mut pkcs1_mechanism(), key), CKR_OK);
         assert_eq!(C_CloseSession(session), CKR_OK);
         let mut long_input = [0x5A_u8; 128];
         let mut big_out = [0u8; 256];

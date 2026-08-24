@@ -14,7 +14,7 @@
 
 use pkcs11::types::*;
 
-use crate::util::{serialize_uint, CryptoError};
+use crate::util::{CryptoError, serialize_uint};
 
 pub use crate::mechanism::RsaCipherMechanism;
 
@@ -224,5 +224,10 @@ fn key_attrs() -> Attrs {
 }
 
 pub fn list_objects() -> Vec<Object> {
-    vec![Object::Cert(Cert { attrs: cert_attrs() }), Object::Key(Key { attrs: key_attrs() })]
+    vec![
+        Object::Cert(Cert {
+            attrs: cert_attrs(),
+        }),
+        Object::Key(Key { attrs: key_attrs() }),
+    ]
 }
