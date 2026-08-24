@@ -6,6 +6,8 @@ A standalone Windows PKCS#11 provider based on Mozilla's historical `osclientcer
 [![Windows build](https://github.com/AnatoliChe/osclientcerts/actions/workflows/windows.yml/badge.svg)](https://github.com/AnatoliChe/osclientcerts/actions/workflows/windows.yml)
 
 > **Project status:** working. The provider builds as a standalone Windows x64 DLL and implements RSA signing, encryption and decryption (PKCS#1 v1.5 and OAEP) as well as RSA-PSS and ECDSA signing on top of the original signing-only upstream code. Real-world Thunderbird S/MIME interoperability (signing, sending encrypted mail and decrypting received mail with non-exportable CNG keys) has been validated. The RSA cipher mechanism parsing, the PKCS#11 operation state machines and the error-code mapping are covered by a unit test suite that runs in CI on every push.
+>
+> Release history: [CHANGELOG.md](CHANGELOG.md)
 
 ## Goal
 
@@ -383,61 +385,6 @@ The current provider is intentionally narrow.
 - EC decryption is not implemented.
 - Multi-part `C_EncryptUpdate` / `C_EncryptFinal` and `C_DecryptUpdate` / `C_DecryptFinal` are not implemented.
 - The provider currently focuses on the Windows user's `My` certificate store.
-
-## Release notes
-
-### 0.3.3
-
-- Internal quality release; no functional changes to the provider.
-- Codebase formatted with `rustfmt` (edition 2024 defaults) and made clean under
-  `cargo clippy --all-targets --all-features -- -D warnings`.
-- CI quality gates on every push/PR: rustfmt check, unit tests, clippy (Linux) and a native MSVC
-  Windows build with tests plus automated DLL artifacts/tag releases (Windows).
-- Dependabot enabled for Cargo dependencies (weekly PRs) and GitHub Actions versions (monthly).
-- The DLL in this release is rebuilt from the reformatted sources; behavior is identical to 0.3.2.
-
-### 0.3.2
-
-- Added a unit test suite (40 tests) that runs on the Linux build host inside the existing Docker
-  image (`cargo test`): OAEP/PKCS#1 mechanism parsing, `C_GetMechanismInfo` advertisement,
-  PKCS#11 buffer-too-small retry semantics for decrypt/encrypt, session-close operation cleanup,
-  and error-code mapping.
-- Refactored RSA cipher mechanism parsing into the platform-neutral `src/mechanism.rs` module and
-  added a deterministic stub backend (`src/backend_other.rs`) so the manager and FFI layers
-  compile and run on non-Windows/non-macOS hosts. No changes to Windows runtime behavior.
-
-### 0.3.1
-
-- Modernized the crate to Rust edition 2024 (up from 2018, inherited from the 2018-era upstream
-  project). Required mechanical changes: `#[unsafe(no_mangle)]` for the exported
-  `C_GetFunctionList` and an `unsafe extern "C"` block. No functional changes; PKCS#11 behavior is
-  identical to 0.3.0.
-- Updated crate metadata (repository URL, authors, description) to reflect this fork.
-
-### 0.3.0
-
-- Added RSA-OAEP support (`CKM_RSA_PKCS_OAEP`) for encryption (`C_EncryptInit` / `C_Encrypt` via
-  `BCryptEncrypt` with `BCRYPT_OAEP_PADDING_INFO`) and decryption (`C_DecryptInit` / `C_Decrypt`
-  via `NCryptDecrypt` with `NCRYPT_PAD_OAEP_FLAG`).
-- OAEP parameters are validated at init time: the digest must be SHA-1, SHA-256, SHA-384 or
-  SHA-512; MGF1 must use the same hash (a Windows CNG limitation); only `CKZ_DATA_SPECIFIED`
-  encoding parameter sources are accepted, and an optional label is passed through to CNG.
-- Invalid or unsupported OAEP parameter combinations are rejected up front with
-  `CKR_MECHANISM_INVALID` / `CKR_ARGUMENTS_BAD` instead of failing later inside CNG.
-
-### 0.2.0
-
-- First release validated end-to-end with Thunderbird: S/MIME signing, encryption and decryption of
-  real messages using non-exportable Windows CNG keys.
-- Fixed PKCS#11 semantics: `CKR_BUFFER_TOO_SMALL` returned from `C_Sign` / `C_Encrypt` / `C_Decrypt`
-  no longer terminates the active operation; the caller can retry with a larger buffer as the
-  specification requires.
-- Active operations (search/sign/encrypt/decrypt state) are now cleaned up when their session is
-  closed via `C_CloseSession` or `C_CloseAllSessions`.
-- Fixed token-object matching so NSS can resolve certificates by issuer/serial and locate private
-  keys during S/MIME recipient lookup: boolean attributes are compared in single-byte CK_BBOOL form
-  and certificate serial numbers are stored big-endian, matching NSS search templates.
-- Added diagnostic logging of enumerated objects (label, id, issuer, serial).
 
 ## Thunderbird testing
 
