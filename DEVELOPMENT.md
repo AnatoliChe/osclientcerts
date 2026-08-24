@@ -157,7 +157,8 @@ manager and the PKCS#11 FFI layer be exercised end-to-end without OS crypto APIs
 test-fork-osclientcerts.sh   # cargo test --release in the Docker image
 ```
 
-Current coverage (40 tests):
+Current coverage (40 tests on Linux; the Windows runner additionally executes a
+Windows-only regression suite, see below):
 
 - `src/mechanism.rs` - OAEP/PKCS#1 mechanism parsing: SHA-1/256/384/512 parameter sets, label
   handling, mismatched MGF rejection, unsupported digest rejection, invalid source rejection,
@@ -177,6 +178,28 @@ buffer-retry state machines deterministically testable.
 
 Note: plaintext/ciphertext size boundaries (RSA PKCS#1 v1.5 `k-11`, OAEP `k-2-2hLen`) are enforced
 inside Windows CNG, not in this provider, so they cannot be unit-tested at the provider layer.
+
+### S/MIME regression tests (Windows runner only)
+
+`src/manager.rs` also contains a `cfg(all(test, target_os = "windows"))` suite that runs against
+the **real** CNG backend inside the CI Windows job. Self-signed RSA-2048 and ECDSA P-256 marker
+certificates (`osclientcerts-smime-rsa`, `osclientcerts-smime-ec`, non-exportable keys) are
+provisioned by `scripts/provision-smime-test-certs.ps1` before the test step. The tests cover the
+historical regression classes listed above at a higher level:
+
+- discovery of both certificates and their attributes (`CKA_CLASS`, `CKA_TOKEN`, issuer/serial,
+  DER `CKA_VALUE`);
+- private-key-to-certificate linkage via `CKA_ID`;
+- RSA PKCS#1 v1.5 signatures over NSS-style `DigestInfo` (modulus-size output plus determinism,
+  which pins down both mechanism and input);
+- RSA-PSS signatures (SHA-256, MGF1, 32-byte salt; randomized per signature);
+- ECDSA P-256 signatures returned as raw `r || s` per the PKCS#11 `CKM_ECDSA` spec;
+- RSA PKCS#1 v1.5 and OAEP (SHA-256, label) encrypt/decrypt roundtrips;
+- closing a session terminates an in-progress real signing operation.
+
+Because signatures are opaque values (the result of the private-key operation), structural checks
+rely on mechanism-level properties - deterministic vs randomized encodings and exact output sizes -
+rather than byte layouts of encoded messages.
 
 ## Continuous integration
 

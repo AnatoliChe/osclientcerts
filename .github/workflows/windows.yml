@@ -24,6 +24,11 @@ jobs:
       - name: Build release DLL
         run: cargo build --release
 
+      - name: Provision regression test certificates
+        shell: pwsh
+        timeout-minutes: 10
+        run: ./scripts/provision-smime-test-certs.ps1
+
       - name: Run tests (host target)
         run: cargo test --all-targets
 

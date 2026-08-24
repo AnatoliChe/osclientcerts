@@ -890,3 +890,348 @@ mod tests {
         );
     }
 }
+
+// S/MIME regression tests: exercise the real Windows CNG backend (certificate enumeration,
+// attribute serialization/matching, RSA PKCS#1/PSS signatures and RSA PKCS#1/OAEP
+// encrypt-decrypt roundtrips) against deterministic self-signed test certificates provisioned by
+// scripts/provision-smime-test-certs.ps1. These tests are the automated replacement for manual
+// Thunderbird smoke-testing of historical regressions (issuer/serial matching, CK_BBOOL
+// encoding, buffer-too-small retry semantics).
+#[cfg(all(test, target_os = "windows"))]
+mod smime_regression_tests {
+    use super::*;
+    use crate::util::serialize_uint;
+    use sha2::{Digest, Sha256};
+
+    /// Friendly-name / subject markers of the certificates created by
+    /// scripts/provision-smime-test-certs.ps1. They appear verbatim inside the DER-encoded
+    /// issuer strings, which is how the tests locate "their" objects in a real store.
+    const MARKER_RSA: &[u8] = b"osclientcerts-smime-rsa";
+    const MARKER_EC: &[u8] = b"osclientcerts-smime-ec";
+
+    /// SHA-256 DigestInfo prefix (RFC 8017): SEQ(SEQ(OID 2.16.840.1.101.3.4.2.1, NULL), OCTET(32))
+    const SHA256_DIGEST_INFO_PREFIX: [u8; 19] = [
+        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+        0x05, 0x00, 0x04, 0x20,
+    ];
+
+    /// Finds the certificate object whose issuer contains `marker`; returns its handle and the
+    /// CKA_ID value shared with the corresponding private key.
+    fn find_marker_cert(
+        manager: &mut Manager,
+        session: CK_SESSION_HANDLE,
+        marker: &[u8],
+    ) -> (CK_OBJECT_HANDLE, Vec<u8>) {
+        manager
+            .start_search(
+                session,
+                &[(CKA_CLASS, serialize_uint(CKO_CERTIFICATE).unwrap())],
+            )
+            .expect("start_search failed");
+        let handles = manager.search(session, 100).expect("search failed");
+        manager.clear_search(session).unwrap();
+        let mut found = None;
+        for handle in handles {
+            let values = manager
+                .get_attributes(handle, vec![CKA_ISSUER, CKA_ID])
+                .expect("get_attributes failed");
+            if values[0]
+                .as_ref()
+                .is_some_and(|issuer| issuer.windows(marker.len()).any(|w| w == marker))
+            {
+                assert!(found.is_none(), "multiple objects matched {:?}", marker);
+                found = Some((handle, values[1].clone().expect("CKA_ID missing")));
+            }
+        }
+        found
+            .expect("regression certificate not found - run scripts/provision-smime-test-certs.ps1")
+    }
+
+    /// Finds the single private key matching the given certificate's CKA_ID (the same linkage
+    /// NSS uses to pair an S/MIME certificate with its private key).
+    fn find_key_for_cert(
+        manager: &mut Manager,
+        session: CK_SESSION_HANDLE,
+        cert_id: Vec<u8>,
+    ) -> CK_OBJECT_HANDLE {
+        manager
+            .start_search(
+                session,
+                &[
+                    (CKA_CLASS, serialize_uint(CKO_PRIVATE_KEY).unwrap()),
+                    (CKA_ID, cert_id),
+                ],
+            )
+            .expect("start_search key failed");
+        let handles = manager.search(session, 10).expect("key search failed");
+        manager.clear_search(session).unwrap();
+        assert_eq!(
+            handles.len(),
+            1,
+            "expected exactly one key for the regression certificate"
+        );
+        handles[0]
+    }
+
+    #[test]
+    fn smime_rsa_cert_discovery_and_attributes() {
+        let mut manager = Manager::new();
+        let session = manager.open_session().unwrap();
+        let (cert_handle, _id) = find_marker_cert(&mut manager, session, MARKER_RSA);
+        let values = manager
+            .get_attributes(
+                cert_handle,
+                vec![
+                    CKA_CLASS,
+                    CKA_CERTIFICATE_TYPE,
+                    CKA_TOKEN,
+                    CKA_SERIAL_NUMBER,
+                    CKA_VALUE,
+                ],
+            )
+            .expect("cert get_attributes failed");
+        assert_eq!(
+            values[0].as_deref(),
+            Some(serialize_uint(CKO_CERTIFICATE).unwrap().as_slice())
+        );
+        assert_eq!(values[2].as_deref(), Some([CK_TRUE as u8].as_slice()));
+        let serial = values[3].as_ref().expect("serial number missing");
+        assert!(!serial.is_empty());
+        let der = values[4].as_ref().expect("certificate value missing");
+        assert_eq!(der[0], 0x30, "certificate should be a DER SEQUENCE");
+    }
+
+    #[test]
+    fn smime_key_matches_certificate_by_id() {
+        let mut manager = Manager::new();
+        let session = manager.open_session().unwrap();
+        let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session, MARKER_RSA);
+        let key_handle = find_key_for_cert(&mut manager, session, cert_id);
+        let values = manager
+            .get_attributes(key_handle, vec![CKA_CLASS, CKA_KEY_TYPE, CKA_MODULUS])
+            .expect("key get_attributes failed");
+        assert_eq!(
+            values[0].as_deref(),
+            Some(serialize_uint(CKO_PRIVATE_KEY).unwrap().as_slice())
+        );
+        assert_eq!(
+            values[1].as_deref(),
+            Some(serialize_uint(CKK_RSA).unwrap().as_slice())
+        );
+        // The provider parses the modulus out of the SPKI; it must be a full 2048-bit integer.
+        assert_eq!(values[2].as_ref().map(Vec::len), Some(256));
+    }
+
+    fn dump(tag: &str, sig: &[u8]) {
+        let head: Vec<String> = sig.iter().take(16).map(|b| format!("{:02x}", b)).collect();
+        let tail: Vec<String> = sig
+            .iter()
+            .rev()
+            .take(16)
+            .rev()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        eprintln!(
+            "DBG {} len={} head={:?} tail={:?}",
+            tag,
+            sig.len(),
+            head,
+            tail
+        );
+    }
+
+    #[test]
+    fn smime_rsa_pkcs1_signature_structure() {
+        let mut manager = Manager::new();
+        let session = manager.open_session().unwrap();
+        let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session, MARKER_RSA);
+        let key_handle = find_key_for_cert(&mut manager, session, cert_id);
+
+        // NSS signs DigestInfo (not a bare hash) with CKM_RSA_PKCS; CNG with a null padding-info
+        // algorithm embeds this blob verbatim into the EMSA-PKCS1-v1_5 message.
+        let digest = Sha256::digest(b"smime regression pkcs1").to_vec();
+        let digest_info = SHA256_DIGEST_INFO_PREFIX
+            .iter()
+            .copied()
+            .chain(digest)
+            .collect::<Vec<u8>>();
+
+        manager.start_sign(session, key_handle, None).unwrap();
+        let len = manager.get_signature_length(session, &digest_info).unwrap();
+        assert_eq!(len, 256);
+        let signature = manager.sign(session, &digest_info).unwrap();
+        dump("pkcs1", &signature);
+
+        // The returned value is the opaque RSA signature (the result of the private-key
+        // operation), so its bytes look random. PKCS#1 v1.5 encoding is deterministic though,
+        // which lets us pin down both the mechanism and the exact input without a public-key
+        // verification implementation: re-signing identical data must reproduce the signature
+        // byte-for-byte, and different data must produce a different one.
+        assert_eq!(signature.len(), 256);
+
+        manager.start_sign(session, key_handle, None).unwrap();
+        manager.get_signature_length(session, &digest_info).unwrap();
+        let repeat = manager.sign(session, &digest_info).unwrap();
+        assert_eq!(
+            signature, repeat,
+            "RSA PKCS#1 v1.5 signatures must be deterministic"
+        );
+
+        let other_digest_info = SHA256_DIGEST_INFO_PREFIX
+            .iter()
+            .copied()
+            .chain(Sha256::digest(b"smime regression pkcs1 v2"))
+            .collect::<Vec<u8>>();
+        manager.start_sign(session, key_handle, None).unwrap();
+        manager
+            .get_signature_length(session, &other_digest_info)
+            .unwrap();
+        let other = manager.sign(session, &other_digest_info).unwrap();
+        assert_ne!(
+            signature, other,
+            "different DigestInfo inputs must yield different signatures"
+        );
+    }
+
+    #[test]
+    fn smime_rsa_pss_signature_structure() {
+        let mut manager = Manager::new();
+        let session = manager.open_session().unwrap();
+        let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session, MARKER_RSA);
+        let key_handle = find_key_for_cert(&mut manager, session, cert_id);
+
+        let params = CK_RSA_PKCS_PSS_PARAMS {
+            hashAlg: CKM_SHA256,
+            mgf: CKG_MGF1_SHA256,
+            sLen: 32,
+        };
+        let digest = Sha256::digest(b"smime regression pss").to_vec();
+
+        manager
+            .start_sign(session, key_handle, Some(params))
+            .unwrap();
+        let len = manager.get_signature_length(session, &digest).unwrap();
+        assert_eq!(len, 256);
+        let signature = manager.sign(session, &digest).unwrap();
+        dump("pss", &signature);
+        // Again an opaque RSA signature of modulus size; PSS randomizes its salt, so unlike
+        // PKCS#1 v1.5, re-signing the same data must produce a different signature.
+        assert_eq!(signature.len(), 256);
+
+        manager
+            .start_sign(session, key_handle, Some(params))
+            .unwrap();
+        manager.get_signature_length(session, &digest).unwrap();
+        let repeat = manager.sign(session, &digest).unwrap();
+        assert_ne!(
+            signature, repeat,
+            "RSA-PSS signatures are randomized and must differ between runs"
+        );
+    }
+
+    #[test]
+    fn smime_rsa_pkcs1_encrypt_decrypt_roundtrip() {
+        let mut manager = Manager::new();
+        let session = manager.open_session().unwrap();
+        let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session, MARKER_RSA);
+        let key_handle = find_key_for_cert(&mut manager, session, cert_id);
+
+        let plaintext = vec![0xA5_u8; 100];
+        manager
+            .start_encrypt(session, key_handle, RsaCipherMechanism::Pkcs1v15)
+            .unwrap();
+        let ciphertext = manager.encrypt(session, &plaintext).unwrap();
+        assert_ne!(ciphertext, plaintext);
+
+        manager
+            .start_decrypt(session, key_handle, RsaCipherMechanism::Pkcs1v15)
+            .unwrap();
+        let decrypted = manager.decrypt(session, &ciphertext).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn smime_rsa_oaep_sha256_roundtrip_with_label() {
+        let mut manager = Manager::new();
+        let session = manager.open_session().unwrap();
+        let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session, MARKER_RSA);
+        let key_handle = find_key_for_cert(&mut manager, session, cert_id);
+
+        let label = b"smime-regression".to_vec();
+        let plaintext = vec![0x37_u8; 100];
+        manager
+            .start_encrypt(
+                session,
+                key_handle,
+                RsaCipherMechanism::Oaep {
+                    hash_alg: CKM_SHA256,
+                    label: label.clone(),
+                },
+            )
+            .unwrap();
+        let ciphertext = manager.encrypt(session, &plaintext).unwrap();
+        manager
+            .start_decrypt(
+                session,
+                key_handle,
+                RsaCipherMechanism::Oaep {
+                    hash_alg: CKM_SHA256,
+                    label,
+                },
+            )
+            .unwrap();
+        let decrypted = manager.decrypt(session, &ciphertext).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn smime_ecdsa_signature_structure() {
+        let mut manager = Manager::new();
+        let session = manager.open_session().unwrap();
+        let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session, MARKER_EC);
+        let key_handle = find_key_for_cert(&mut manager, session, cert_id);
+
+        // ECDSA over P-256 signs the bare SHA-256 digest.
+        let digest = Sha256::digest(b"smime regression ecdsa").to_vec();
+        manager.start_sign(session, key_handle, None).unwrap();
+        let len = manager.get_signature_length(session, &digest).unwrap();
+        assert!(len >= 64, "ECDSA signature cannot be shorter than r||s");
+        let signature = manager.sign(session, &digest).unwrap();
+        dump("ecdsa", &signature);
+        // PKCS#11 CKM_ECDSA mandates the raw fixed-width big-endian concatenation r || s
+        // (32 + 32 bytes for P-256); DER wrapping is the caller's job. ECDSA randomizes k,
+        // so re-signing yields a different pair for the same digest.
+        assert_eq!(
+            signature.len(),
+            64,
+            "P-256 ECDSA signature must be r||s of 64 bytes"
+        );
+        assert!(
+            signature[..32].iter().any(|&b| b != 0),
+            "r must be non-zero"
+        );
+        assert!(
+            signature[32..].iter().any(|&b| b != 0),
+            "s must be non-zero"
+        );
+
+        manager.start_sign(session, key_handle, None).unwrap();
+        manager.get_signature_length(session, &digest).unwrap();
+        let repeat = manager.sign(session, &digest).unwrap();
+        assert_ne!(signature, repeat, "ECDSA signatures are randomized per k");
+    }
+
+    #[test]
+    fn smime_close_session_terminates_real_operation() {
+        let mut manager = Manager::new();
+        let session = manager.open_session().unwrap();
+        let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session, MARKER_RSA);
+        let key_handle = find_key_for_cert(&mut manager, session, cert_id);
+        manager
+            .start_decrypt(session, key_handle, RsaCipherMechanism::Pkcs1v15)
+            .unwrap();
+        manager.close_session(session).unwrap();
+        let result = manager.decrypt(session, &[0x00; 256]);
+        assert!(matches!(result, Err(CryptoError::OperationFailed)));
+    }
+}
