@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file. Pre-built DLLs 
 are published on the GitHub
 [releases page](https://github.com/AnatoliChe/osclientcerts/releases).
 
-## Unreleased
+## 0.3.4 - 2026-08-24
 
 - Hardened the C ABI boundary against hostile or buggy callers: `C_FindObjectsInit` and
   `C_GetAttributeValue` now reject absurd template counts, `C_FindObjectsInit` rejects
