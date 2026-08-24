@@ -148,6 +148,9 @@ pub fn crypto_error_to_rv(context: &str, err: &CryptoError) -> crate::pkcs11::ty
 ///     modulus           INTEGER,  -- n
 ///     publicExponent    INTEGER   -- e
 /// }
+// Upstream helper, currently unused (RSA public keys are parsed by CNG); retained for the
+// planned PKCS #11 multipart work.
+#[allow(dead_code)]
 pub fn read_rsa_modulus(public_key: &[u8]) -> Result<Vec<u8>, ()> {
     let mut sequence = Sequence::new(public_key)?;
     let modulus_value = sequence.read_unsigned_integer()?;
@@ -187,19 +190,24 @@ macro_rules! try_read_bytes {
 }
 
 /// ASN.1 tag identifying an integer.
+#[allow(dead_code)]
 const INTEGER: u8 = 0x02;
 /// ASN.1 tag identifying a sequence.
+#[allow(dead_code)]
 const SEQUENCE: u8 = 0x10;
 /// ASN.1 tag modifier identifying an item as constructed.
+#[allow(dead_code)]
 const CONSTRUCTED: u8 = 0x20;
 
 /// A helper struct for reading items from a DER SEQUENCE (in this case, all sequences are
 /// assumed to be CONSTRUCTED).
+#[allow(dead_code)]
 struct Sequence<'a> {
     /// The contents of the SEQUENCE.
     contents: Der<'a>,
 }
 
+#[allow(dead_code)]
 impl<'a> Sequence<'a> {
     fn new(input: &'a [u8]) -> Result<Sequence<'a>, ()> {
         let mut der = Der::new(input);
@@ -236,10 +244,12 @@ impl<'a> Sequence<'a> {
 
 /// A helper struct for reading DER data. The contents are treated like a cursor, so its position
 /// is updated as data is read.
+#[allow(dead_code)]
 struct Der<'a> {
     contents: &'a [u8],
 }
 
+#[allow(dead_code)]
 impl<'a> Der<'a> {
     fn new(contents: &'a [u8]) -> Der<'a> {
         Der { contents }

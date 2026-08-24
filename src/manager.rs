@@ -186,10 +186,7 @@ impl ManagerProxy {
                         ManagerReturnValue::Stop(Ok(()))
                     }
                 };
-                let stop_after_send = match &results {
-                    &ManagerReturnValue::Stop(_) => true,
-                    _ => false,
-                };
+                let stop_after_send = matches!(&results, ManagerReturnValue::Stop(_));
                 match manager_sender.send(results) {
                     Ok(()) => {}
                     Err(e) => {
@@ -484,13 +481,10 @@ impl Manager {
     /// their IDs.
     fn maybe_find_new_objects(&mut self) {
         let now = Instant::now();
-        match self.last_scan_time {
-            Some(last_scan_time) => {
-                if now.duration_since(last_scan_time) < Duration::new(3, 0) {
-                    return;
-                }
-            }
-            None => {}
+        if let Some(last_scan_time) = self.last_scan_time
+            && now.duration_since(last_scan_time) < Duration::new(3, 0)
+        {
+            return;
         }
         self.last_scan_time = Some(now);
         let objects = list_objects();
@@ -648,10 +642,7 @@ impl Manager {
         };
         let mut results = Vec::with_capacity(attr_types.len());
         for attr_type in attr_types {
-            let result = match object.get_attribute(attr_type) {
-                Some(value) => Some(value.to_owned()),
-                None => None,
-            };
+            let result = object.get_attribute(attr_type).map(<[u8]>::to_owned);
             results.push(result);
         }
         Ok(results)
@@ -687,7 +678,7 @@ impl Manager {
             Some((key_handle, params)) => (key_handle, params),
             None => return Err(CryptoError::OperationFailed),
         };
-        let key = match self.objects.get(&key_handle) {
+        let key = match self.objects.get(key_handle) {
             Some(Object::Key(key)) => key,
             _ => return Err(CryptoError::InvalidKey),
         };
