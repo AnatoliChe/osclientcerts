@@ -1234,4 +1234,166 @@ mod smime_regression_tests {
         let result = manager.decrypt(session, &[0x00; 256]);
         assert!(matches!(result, Err(CryptoError::OperationFailed)));
     }
+
+    // Store-level association checks. Unlike the tests above these deliberately bypass the
+    // provider and talk to crypt32/NCrypt directly: they verify that provisioning produced a
+    // certificate whose private key exists AND is a CNG/NCrypt key (the provider refuses legacy
+    // CryptoAPI keys outright), independently of any provider-side bugs.
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// Finds the provisioned test certificate in the current user's personal store by friendly
+    /// name (the same property the provider matches against CKA_LABEL) and returns a duplicated
+    /// certificate context; the caller must release it via `CertFreeCertificateContext`.
+    unsafe fn find_store_cert(friendly_name: &str) -> *const winapi::um::wincrypt::CERT_CONTEXT {
+        use winapi::um::wincrypt::{
+            self, CERT_CLOSE_STORE_FORCE_FLAG, CERT_FRIENDLY_NAME_PROP_ID, CertCloseStore,
+            CertDuplicateCertificateContext, CertEnumCertificatesInStore,
+            CertGetCertificateContextProperty,
+        };
+
+        let store = wincrypt::CertOpenSystemStoreW(0, wide("My").as_ptr());
+        assert!(
+            !store.is_null(),
+            "failed to open the personal certificate store"
+        );
+
+        let expected = wide(friendly_name);
+        let mut cursor: *const wincrypt::CERT_CONTEXT = std::ptr::null();
+        loop {
+            // The enumeration takes ownership of `cursor` and frees it when advancing.
+            let cert = CertEnumCertificatesInStore(store, cursor);
+            if cert.is_null() {
+                panic!("provisioned certificate '{friendly_name}' not found in CurrentUser\\My");
+            }
+            cursor = cert;
+
+            let mut len = 0u32;
+            if CertGetCertificateContextProperty(
+                cert,
+                CERT_FRIENDLY_NAME_PROP_ID,
+                std::ptr::null_mut(),
+                &mut len,
+            ) == 0
+                || len == 0
+            {
+                continue;
+            }
+            let mut buf = vec![0u16; (len as usize + 1) / 2];
+            if CertGetCertificateContextProperty(
+                cert,
+                CERT_FRIENDLY_NAME_PROP_ID,
+                buf.as_mut_ptr() as *mut _,
+                &mut len,
+            ) == 0
+            {
+                continue;
+            }
+            while buf.last() == Some(&0) {
+                buf.pop();
+            }
+            if buf != expected {
+                continue;
+            }
+
+            let owned = CertDuplicateCertificateContext(cert);
+            assert!(!owned.is_null(), "CertDuplicateCertificateContext failed");
+            // Force-close the store to free contexts still linked to it; our duplicate stays
+            // valid and is released by the caller.
+            CertCloseStore(store, CERT_CLOSE_STORE_FORCE_FLAG);
+            return owned;
+        }
+    }
+
+    /// Asserts the certificate carries an accessible private key that is a CNG/NCrypt key of the
+    /// given algorithm ("RSA", "ECDSA_P256", ...), then frees all acquired resources.
+    unsafe fn assert_cng_private_key(cert: *const winapi::um::wincrypt::CERT_CONTEXT, alg: &str) {
+        use winapi::um::wincrypt::{
+            CERT_NCRYPT_KEY_SPEC, CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG, CertFreeCertificateContext,
+            CryptAcquireCertificatePrivateKey,
+        };
+        // winapi does not wrap this crypt32/ncrypt pair member, declare it locally (test-only).
+        #[link(name = "ncrypt")]
+        unsafe extern "system" {
+            fn NCryptGetProperty(
+                handle: usize,
+                property: *const u16,
+                output: *mut u8,
+                output_len: u32,
+                needed: *mut u32,
+                flags: u32,
+            ) -> i32;
+        }
+
+        let mut key_handle: usize = 0;
+        let mut key_spec = 0u32;
+        let mut caller_free = 0i32;
+        let ok = CryptAcquireCertificatePrivateKey(
+            cert,
+            CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG,
+            std::ptr::null_mut(),
+            &mut key_handle,
+            &mut key_spec,
+            &mut caller_free,
+        );
+        assert_ne!(ok, 0, "certificate must have an accessible private key");
+        assert_eq!(
+            key_spec, CERT_NCRYPT_KEY_SPEC,
+            "private key must be reachable through NCrypt (CNG), not legacy CryptoAPI"
+        );
+
+        let prop_name = wide("Algorithm");
+        let mut needed = 0u32;
+        let status = NCryptGetProperty(
+            key_handle,
+            prop_name.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            &mut needed,
+            0,
+        );
+        assert_eq!(status, 0, "querying the CNG key algorithm size failed");
+        let mut buf = vec![0u8; needed as usize];
+        let status = NCryptGetProperty(
+            key_handle,
+            prop_name.as_ptr(),
+            buf.as_mut_ptr(),
+            needed,
+            &mut needed,
+            0,
+        );
+        assert_eq!(status, 0, "reading the CNG key algorithm failed");
+        let actual_alg = String::from_utf16_lossy(
+            &buf.chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .take_while(|&v| v != 0)
+                .collect::<Vec<u16>>(),
+        );
+        assert_eq!(actual_alg, alg, "unexpected CNG key algorithm");
+
+        if caller_free != 0 && key_handle != 0 {
+            winapi::um::ncrypt::NCryptFreeObject(key_handle as winapi::um::ncrypt::NCRYPT_HANDLE);
+        }
+        CertFreeCertificateContext(cert);
+    }
+
+    #[test]
+    fn smime_rsa_certificate_has_cng_private_key() {
+        unsafe {
+            let cert = find_store_cert("osclientcerts-smime-rsa");
+            assert_cng_private_key(cert, "RSA");
+        }
+    }
+
+    #[test]
+    fn smime_ec_certificate_has_cng_private_key() {
+        // This guards the KeySpec-less ECDSA provisioning path: the certificate must still end up
+        // associated with a discoverable P-256 CNG key.
+        unsafe {
+            let cert = find_store_cert("osclientcerts-smime-ec");
+            assert_cng_private_key(cert, "ECDSA_P256");
+        }
+    }
 }
