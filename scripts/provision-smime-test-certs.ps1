@@ -26,7 +26,9 @@ function New-RegressionCert {
         [string]$FriendlyName,
         [string]$KeyAlgorithm,
         [int]$KeyLength,
-        [string]$KeySpec,
+        # KeySpec is a legacy CryptoAPI concept; CNG-only algorithms (e.g. ECDSA_nistP256) must
+        # not specify it - doing so fails with NTE_PROV_TYPE_NOT_DEF.
+        [string]$KeySpec = '',
         [string[]]$KeyUsage
     )
     Write-Host "provision: checking for existing '$FriendlyName'..."
@@ -39,7 +41,6 @@ function New-RegressionCert {
         Subject           = $Subject
         FriendlyName      = $FriendlyName
         KeyAlgorithm      = $KeyAlgorithm
-        KeySpec           = $KeySpec
         KeyUsage          = $KeyUsage
         KeyExportPolicy   = 'NonExportable'
         NotAfter          = (Get-Date).AddYears(5)
@@ -49,6 +50,9 @@ function New-RegressionCert {
     }
     if ($KeyLength -gt 0) {
         $params.KeyLength = $KeyLength
+    }
+    if ($KeySpec) {
+        $params.KeySpec = $KeySpec
     }
     Write-Host "provision: creating '$FriendlyName' ($KeyAlgorithm)..."
     # Run in a job so a wedged KSP call fails loudly instead of hanging the CI job forever.
@@ -80,7 +84,6 @@ $ecParams = @{
     FriendlyName = 'osclientcerts-smime-ec'
     KeyAlgorithm = 'ECDSA_nistP256'
     KeyLength    = 0
-    KeySpec      = 'Signature'
     KeyUsage     = @('DigitalSignature')
 }
 New-RegressionCert @ecParams
