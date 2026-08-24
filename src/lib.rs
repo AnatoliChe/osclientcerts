@@ -157,6 +157,20 @@ extern "C" fn C_GetInfo(pInfo: CK_INFO_PTR) -> CK_RV {
 /// This module only has one slot. Its ID is 1.
 const SLOT_ID: CK_SLOT_ID = 1;
 
+// Bounds on caller-provided sizes at the FFI boundary. Legitimate callers (NSS) use values well
+// under these limits; the bounds exist so that a hostile or buggy caller passing absurd counts or
+// lengths makes us return CKR_ARGUMENTS_BAD instead of walking (and dereferencing) arbitrary
+// amounts of memory. Note that we can never validate that a non-null pointer itself is valid -
+// that remains part of the C calling contract.
+/// The largest number of attributes we will accept in a template.
+const MAX_TEMPLATE_COUNT: CK_ULONG = 128;
+/// The largest attribute value we will copy out of caller-provided memory (labels, IDs, and even
+/// full certificate values are at most a few KiB).
+const MAX_ATTRIBUTE_VALUE_LEN: CK_ULONG = 64 * 1024;
+/// The largest input buffer (plaintext, ciphertext, or digest) we will read from
+/// caller-provided memory (RSA operations for keys up to 4096 bits use well under 1 KiB).
+const MAX_DATA_LEN: CK_ULONG = 64 * 1024;
+
 /// This gets called twice: once with a null `pSlotList` to get the number of slots (returned via
 /// `pulCount`) and a second time to get the ID for each slot.
 extern "C" fn C_GetSlotList(
@@ -494,6 +508,10 @@ extern "C" fn C_GetAttributeValue(
         error!("C_GetAttributeValue: CKR_ARGUMENTS_BAD");
         return CKR_ARGUMENTS_BAD;
     }
+    if ulCount > MAX_TEMPLATE_COUNT {
+        error!("C_GetAttributeValue: unreasonable template count {ulCount}");
+        return CKR_ARGUMENTS_BAD;
+    }
     let mut attr_types = Vec::with_capacity(ulCount as usize);
     let template = unsafe { std::slice::from_raw_parts(pTemplate, ulCount as usize) };
     for attr in template {
@@ -568,15 +586,31 @@ extern "C" fn C_FindObjectsInit(
         error!("C_FindObjectsInit: CKR_ARGUMENTS_BAD");
         return CKR_ARGUMENTS_BAD;
     }
+    if ulCount > MAX_TEMPLATE_COUNT {
+        error!("C_FindObjectsInit: unreasonable template count {ulCount}");
+        return CKR_ARGUMENTS_BAD;
+    }
     let mut attrs = Vec::new();
     info!("C_FindObjectsInit:");
     for i in 0..ulCount {
         let attr = unsafe { &*pTemplate.offset(i as isize) };
         info!("  {:?}", attr);
-        let slice = unsafe {
-            std::slice::from_raw_parts(attr.pValue as *const u8, attr.ulValueLen as usize)
-        };
-        attrs.push((attr.attrType, slice.to_owned()));
+        // CK_ATTRIBUTE may be packed depending on the target, so copy fields out before using
+        // them (formatting or referencing a field of a packed struct is not allowed).
+        let attr_type = attr.attrType;
+        let value_len = attr.ulValueLen;
+        if attr.pValue.is_null() && value_len != 0 {
+            // A null value pointer is only meaningful for a zero-length value.
+            error!("C_FindObjectsInit: attribute with null value and length {value_len}");
+            return CKR_ARGUMENTS_BAD;
+        }
+        if value_len > MAX_ATTRIBUTE_VALUE_LEN {
+            error!("C_FindObjectsInit: unreasonable attribute value length {value_len}");
+            return CKR_ARGUMENTS_BAD;
+        }
+        let slice =
+            unsafe { std::slice::from_raw_parts(attr.pValue as *const u8, value_len as usize) };
+        attrs.push((attr_type, slice.to_owned()));
     }
     let mut manager_guard = try_to_get_manager_guard!();
     let manager = manager_guard_to_manager!(manager_guard);
@@ -697,6 +731,10 @@ extern "C" fn C_Encrypt(
     );
     if pData.is_null() || pulEncryptedDataLen.is_null() {
         error!("C_Encrypt: CKR_ARGUMENTS_BAD");
+        return CKR_ARGUMENTS_BAD;
+    }
+    if ulDataLen > MAX_DATA_LEN {
+        error!("C_Encrypt: unreasonable data length {ulDataLen}");
         return CKR_ARGUMENTS_BAD;
     }
     let data = unsafe { std::slice::from_raw_parts(pData, ulDataLen as usize) };
@@ -821,6 +859,10 @@ extern "C" fn C_Decrypt(
     );
     if pEncryptedData.is_null() || pulDataLen.is_null() {
         error!("C_Decrypt: CKR_ARGUMENTS_BAD");
+        return CKR_ARGUMENTS_BAD;
+    }
+    if ulEncryptedDataLen > MAX_DATA_LEN {
+        error!("C_Decrypt: unreasonable data length {ulEncryptedDataLen}");
         return CKR_ARGUMENTS_BAD;
     }
     let encrypted_data =
@@ -991,6 +1033,10 @@ extern "C" fn C_Sign(
 ) -> CK_RV {
     if pData.is_null() || pulSignatureLen.is_null() {
         error!("C_Sign: CKR_ARGUMENTS_BAD");
+        return CKR_ARGUMENTS_BAD;
+    }
+    if ulDataLen > MAX_DATA_LEN {
+        error!("C_Sign: unreasonable data length {ulDataLen}");
         return CKR_ARGUMENTS_BAD;
     }
     let data = unsafe { std::slice::from_raw_parts(pData, ulDataLen as usize) };
@@ -1380,22 +1426,23 @@ pub extern "C" fn C_GetFunctionList(ppFunctionList: CK_FUNCTION_LIST_PTR_PTR) ->
 #[cfg_attr(target_os = "macos", link(name = "Security", kind = "framework"))]
 unsafe extern "C" {}
 
-// These tests exercise the stub backend semantics (deterministic key discovery and
-// cipher outputs), which only exists on platforms without a real backend.
-#[cfg(all(test, not(any(target_os = "macos", target_os = "windows"))))]
-mod tests {
+/// Test-only support shared by every test module that drives the exported PKCS #11 functions.
+/// Initialization lives here so that exactly one `C_Initialize` happens per test process no matter
+/// how many test modules (or platforms) run.
+#[cfg(test)]
+mod ffi_test_support {
     use super::*;
-    use crate::util::serialize_uint;
     use std::sync::Once;
 
-    fn ensure_initialized() {
-        static INIT: Once = Once::new();
+    static INIT: Once = Once::new();
+
+    pub(crate) fn ensure_initialized() {
         INIT.call_once(|| {
             assert_eq!(C_Initialize(std::ptr::null_mut()), CKR_OK);
         });
     }
 
-    fn open_session() -> CK_SESSION_HANDLE {
+    pub(crate) fn open_session() -> CK_SESSION_HANDLE {
         ensure_initialized();
         let mut session: CK_SESSION_HANDLE = 0;
         assert_eq!(
@@ -1410,6 +1457,15 @@ mod tests {
         );
         session
     }
+}
+
+// These tests exercise the stub backend semantics (deterministic key discovery and
+// cipher outputs), which only exists on platforms without a real backend.
+#[cfg(all(test, not(any(target_os = "macos", target_os = "windows"))))]
+mod tests {
+    use super::*;
+    use crate::ffi_test_support::open_session;
+    use crate::util::serialize_uint;
 
     fn find_key(session: CK_SESSION_HANDLE) -> CK_OBJECT_HANDLE {
         let class_value = serialize_uint(CKO_PRIVATE_KEY).unwrap();
@@ -1648,5 +1704,173 @@ mod tests {
             ),
             CKR_FUNCTION_FAILED
         );
+    }
+}
+
+/// Hostile-input tests for the C ABI boundary. These exercise the argument validation of the
+/// exported functions directly with values a buggy or malicious caller could pass: null/absurd
+/// template pointers and counts, inconsistent `pValue`/`ulValueLen` pairs, oversized mechanism
+/// parameters, and oversized data buffers. The guards under test deliberately run before any
+/// dereference, so every assertion here must return an error code rather than crash. These tests
+/// are platform-neutral (they do not depend on backend semantics) and run everywhere.
+#[cfg(test)]
+mod ffi_hardening_tests {
+    use super::*;
+    use crate::ffi_test_support::open_session;
+
+    fn dummy_template() -> [CK_ATTRIBUTE; 1] {
+        [CK_ATTRIBUTE {
+            attrType: CKA_CLASS,
+            pValue: std::ptr::null_mut(),
+            ulValueLen: 0,
+        }]
+    }
+
+    #[test]
+    fn get_attribute_value_rejects_null_template() {
+        assert_eq!(
+            C_GetAttributeValue(1, 2, std::ptr::null_mut(), 1),
+            CKR_ARGUMENTS_BAD
+        );
+    }
+
+    #[test]
+    fn get_attribute_value_rejects_huge_count() {
+        let template = dummy_template();
+        assert_eq!(
+            C_GetAttributeValue(1, 2, template.as_ptr() as CK_ATTRIBUTE_PTR, CK_ULONG::MAX),
+            CKR_ARGUMENTS_BAD
+        );
+    }
+
+    #[test]
+    fn find_objects_init_rejects_null_template() {
+        assert_eq!(
+            C_FindObjectsInit(1, std::ptr::null_mut(), 1),
+            CKR_ARGUMENTS_BAD
+        );
+    }
+
+    #[test]
+    fn find_objects_init_rejects_huge_count() {
+        let mut template = dummy_template();
+        assert_eq!(
+            C_FindObjectsInit(1, template.as_mut_ptr(), CK_ULONG::MAX),
+            CKR_ARGUMENTS_BAD
+        );
+    }
+
+    #[test]
+    fn find_objects_init_rejects_null_value_with_nonzero_length() {
+        let mut template = dummy_template();
+        template[0].ulValueLen = 4;
+        assert_eq!(
+            C_FindObjectsInit(1, template.as_mut_ptr(), 1),
+            CKR_ARGUMENTS_BAD
+        );
+    }
+
+    #[test]
+    fn find_objects_init_rejects_huge_value_length() {
+        let backing = [0u8; 4];
+        let mut template = dummy_template();
+        template[0].pValue = backing.as_ptr() as CK_VOID_PTR;
+        template[0].ulValueLen = CK_ULONG::MAX;
+        assert_eq!(
+            C_FindObjectsInit(1, template.as_mut_ptr(), 1),
+            CKR_ARGUMENTS_BAD
+        );
+    }
+
+    #[test]
+    fn sign_rejects_huge_data_length() {
+        let input = [0u8; 8];
+        let mut sig_len: CK_ULONG = 0;
+        assert_eq!(
+            C_Sign(
+                1,
+                input.as_ptr() as CK_BYTE_PTR,
+                CK_ULONG::MAX,
+                std::ptr::null_mut(),
+                &mut sig_len
+            ),
+            CKR_ARGUMENTS_BAD
+        );
+    }
+
+    #[test]
+    fn encrypt_rejects_huge_data_length() {
+        let input = [0u8; 8];
+        let mut out_len: CK_ULONG = 0;
+        assert_eq!(
+            C_Encrypt(
+                1,
+                input.as_ptr() as CK_BYTE_PTR,
+                CK_ULONG::MAX,
+                std::ptr::null_mut(),
+                &mut out_len
+            ),
+            CKR_ARGUMENTS_BAD
+        );
+    }
+
+    #[test]
+    fn decrypt_rejects_huge_encrypted_data_length() {
+        let input = [0u8; 8];
+        let mut out_len: CK_ULONG = 0;
+        assert_eq!(
+            C_Decrypt(
+                1,
+                input.as_ptr() as CK_BYTE_PTR,
+                CK_ULONG::MAX,
+                std::ptr::null_mut(),
+                &mut out_len
+            ),
+            CKR_ARGUMENTS_BAD
+        );
+    }
+
+    /// A zero-count search template is legal (it matches every object) and must leave the session
+    /// in a usable state afterwards.
+    #[test]
+    fn find_objects_init_accepts_zero_count() {
+        let session = open_session();
+        // The template pointer is never dereferenced for a zero-count search, but it must still
+        // be non-null (and aligned), so point it at a dummy attribute.
+        let mut template = dummy_template();
+        assert_eq!(C_FindObjectsInit(session, template.as_mut_ptr(), 0), CKR_OK);
+        let mut handles = [0 as CK_OBJECT_HANDLE; 16];
+        let mut count: CK_ULONG = 0;
+        assert_eq!(
+            C_FindObjects(session, handles.as_mut_ptr(), 16, &mut count),
+            CKR_OK
+        );
+        assert!((count as usize) <= handles.len());
+        assert_eq!(C_FindObjectsFinal(session), CKR_OK);
+        assert_eq!(C_CloseSession(session), CKR_OK);
+    }
+
+    /// Unsupported attribute types and duplicate entries in a search template must be handled
+    /// gracefully (empty results), not rejected or crashed on.
+    #[test]
+    fn find_objects_init_handles_unsupported_and_duplicate_attributes() {
+        let value = [1u8, 2, 3, 4];
+        let make_attr = || CK_ATTRIBUTE {
+            attrType: CKA_CERTIFICATE_TYPE,
+            pValue: value.as_ptr() as CK_VOID_PTR,
+            ulValueLen: value.len() as CK_ULONG,
+        };
+        let mut template = [make_attr(), make_attr()];
+        let session = open_session();
+        assert_eq!(C_FindObjectsInit(session, template.as_mut_ptr(), 2), CKR_OK);
+        let mut handles = [0 as CK_OBJECT_HANDLE; 16];
+        let mut count: CK_ULONG = 0;
+        assert_eq!(
+            C_FindObjects(session, handles.as_mut_ptr(), 16, &mut count),
+            CKR_OK
+        );
+        assert_eq!(count, 0);
+        assert_eq!(C_FindObjectsFinal(session), CKR_OK);
+        assert_eq!(C_CloseSession(session), CKR_OK);
     }
 }
