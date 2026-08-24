@@ -21,6 +21,11 @@ pub const SHA384_ALGORITHM_STRING: &[u16] = &[83, 72, 65, 51, 56, 52, 0];
 #[allow(dead_code)]
 pub const SHA512_ALGORITHM_STRING: &[u16] = &[83, 72, 65, 53, 49, 50, 0];
 
+/// The largest OAEP label (encoding parameter) we will copy out of caller-provided memory.
+/// Real-world labels are tiny; this bound only exists to keep a hostile caller from making us
+/// read arbitrary amounts of memory.
+const MAX_OAEP_LABEL_LEN: CK_ULONG = 8 * 1024;
+
 /// An owned representation of the mechanism used for an RSA encryption or decryption operation.
 /// This mirrors what was parsed from the PKCS #11 `C_*Init` call (raw pointers are converted to
 /// owned data so this type can safely cross threads).
@@ -134,6 +139,23 @@ pub fn parse_rsa_cipher_mechanism(
     }
     let label_len = params.ulSourceDataLen;
     let label_ptr = params.pSourceData;
+    // The label pointer and length come from caller-provided memory; bound the length so a
+    // hostile value cannot make us read arbitrary amounts of memory, and require the two fields
+    // to be consistent.
+    if label_ptr.is_null() && label_len != 0 {
+        error!(
+            "{}: OAEP parameters have null source data with length {}",
+            function_name, label_len
+        );
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    if label_len > MAX_OAEP_LABEL_LEN {
+        error!(
+            "{}: unreasonably large OAEP label of {} bytes",
+            function_name, label_len
+        );
+        return Err(CKR_ARGUMENTS_BAD);
+    }
     let label = if label_len == 0 || label_ptr.is_null() {
         Vec::new()
     } else {
@@ -311,6 +333,43 @@ mod tests {
         let mut mechanism = make_mechanism(CKM_RSA_PKCS_OAEP, None);
         // Non-zero length advertised, but no parameter buffer given.
         mechanism.ulParameterLen = std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>() as CK_ULONG;
+        assert_eq!(
+            parse_rsa_cipher_mechanism("test", &mechanism),
+            Err(CKR_ARGUMENTS_BAD)
+        );
+    }
+
+    #[test]
+    fn oaep_null_source_data_with_nonzero_length_rejected() {
+        // A null label pointer is only meaningful for a zero-length label; the parser must reject
+        // the inconsistent combination instead of silently treating it as an empty label.
+        let params = CK_RSA_PKCS_OAEP_PARAMS {
+            hashAlg: CKM_SHA256,
+            mgf: CKG_MGF1_SHA256,
+            source: CKZ_DATA_SPECIFIED,
+            pSourceData: std::ptr::null_mut(),
+            ulSourceDataLen: 5,
+        };
+        let mechanism = make_mechanism(CKM_RSA_PKCS_OAEP, Some(&params));
+        assert_eq!(
+            parse_rsa_cipher_mechanism("test", &mechanism),
+            Err(CKR_ARGUMENTS_BAD)
+        );
+    }
+
+    #[test]
+    fn oaep_huge_label_rejected() {
+        // The claimed label length exceeds the sane bound, so the parser must reject it without
+        // ever dereferencing the (here valid) pointer.
+        let label = [0u8; 4];
+        let params = CK_RSA_PKCS_OAEP_PARAMS {
+            hashAlg: CKM_SHA256,
+            mgf: CKG_MGF1_SHA256,
+            source: CKZ_DATA_SPECIFIED,
+            pSourceData: label.as_ptr() as CK_VOID_PTR,
+            ulSourceDataLen: MAX_OAEP_LABEL_LEN + 1,
+        };
+        let mechanism = make_mechanism(CKM_RSA_PKCS_OAEP, Some(&params));
         assert_eq!(
             parse_rsa_cipher_mechanism("test", &mechanism),
             Err(CKR_ARGUMENTS_BAD)

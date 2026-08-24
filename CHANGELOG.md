@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file. Pre-built DLLs 
 are published on the GitHub
 [releases page](https://github.com/AnatoliChe/osclientcerts/releases).
 
+## Unreleased
+
+- Hardened the C ABI boundary against hostile or buggy callers: `C_FindObjectsInit` and
+  `C_GetAttributeValue` now reject absurd template counts, `C_FindObjectsInit` rejects
+  inconsistent (`null` pointer with non-zero length) or oversized attribute values,
+  `C_Encrypt`/`C_Decrypt`/`C_Sign` reject oversized input buffers, RSA-OAEP parsing bounds the
+  label length and requires the label pointer/length pair to be consistent. All violations return
+  `CKR_ARGUMENTS_BAD`.
+- Added a platform-neutral hostile-input test suite (13 tests, runs in both CI jobs) covering the
+  guards above plus graceful handling of zero-count, unsupported-type, and duplicate-attribute
+  search templates.
+- Corrected the `C_GetMechanismList` doc comment to also list RSA-OAEP.
+
 ## 0.3.3 - 2026-08-24
 
 - Internal quality release; no functional changes to the provider.

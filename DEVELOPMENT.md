@@ -206,6 +206,33 @@ Because signatures are opaque values (the result of the private-key operation), 
 rely on mechanism-level properties - deterministic vs randomized encodings and exact output sizes -
 rather than byte layouts of encoded messages.
 
+### Hostile-input tests (FFI boundary, all platforms)
+
+The exported `C_*` functions are the library's attack surface: any process that loads the DLL can
+pass arbitrary values through the C ABI. `src/lib.rs` contains a
+`cfg(test) mod ffi_hardening_tests` suite (platform-neutral, runs in both CI jobs) that calls the
+exported functions directly with hostile arguments and asserts they return error codes instead of
+crashing:
+
+- `C_GetAttributeValue` / `C_FindObjectsInit`: null template pointers and absurd template counts;
+- `C_FindObjectsInit`: attribute entries with a null value pointer but non-zero length, or with
+  lengths above the sane bound; plus graceful handling of legal-but-unusual templates
+  (zero-count match-all searches, unsupported attribute types, duplicate types);
+- `C_Encrypt` / `C_Decrypt` / `C_Sign`: oversized input buffers.
+
+The corresponding bounds live in constants next to the FFI layer (`MAX_TEMPLATE_COUNT = 128`,
+`MAX_ATTRIBUTE_VALUE_LEN = 64 KiB`, `MAX_DATA_LEN = 64 KiB`, `MAX_OAEP_LABEL_LEN = 8 KiB`) and
+every violation returns `CKR_ARGUMENTS_BAD`. RSA-OAEP mechanism-parameter parsing is hardened and
+unit-tested separately in `src/mechanism.rs` (wrong parameter length, null parameter pointer,
+unsupported hash/MGF/source combinations, inconsistent label pointer/length pairs, oversized
+labels).
+
+Threat-model note: these guards defend everything that is *definable* in-process - counts,
+lengths, and null/non-null consistency. A caller passing a **valid-looking but invalid** non-null
+pointer cannot be defended against by any in-process check (that remains part of the C calling
+contract); the tests therefore only exercise inputs where validation happens before the first
+dereference.
+
 ## Continuous integration
 
 GitHub Actions run on every push to `trunk` and on pull requests:
