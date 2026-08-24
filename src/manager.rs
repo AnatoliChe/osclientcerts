@@ -1249,62 +1249,34 @@ mod smime_regression_tests {
     /// certificate context; the caller must release it via `CertFreeCertificateContext`.
     unsafe fn find_store_cert(friendly_name: &str) -> *const winapi::um::wincrypt::CERT_CONTEXT {
         use winapi::um::wincrypt::{
-            self, CERT_CLOSE_STORE_FORCE_FLAG, CERT_FRIENDLY_NAME_PROP_ID, CertCloseStore,
-            CertDuplicateCertificateContext, CertEnumCertificatesInStore,
-            CertGetCertificateContextProperty,
+            self, CERT_FIND_SUBJECT_STR, CertCloseStore, CertFindCertificateInStore,
+            PKCS_7_ASN_ENCODING, X509_ASN_ENCODING,
         };
 
+        eprintln!("assoc: looking up 'CN={friendly_name}' in CurrentUser\\My...");
         let store = wincrypt::CertOpenSystemStoreW(0, wide("My").as_ptr());
         assert!(
             !store.is_null(),
             "failed to open the personal certificate store"
         );
-
-        let expected: Vec<u16> = friendly_name.encode_utf16().collect();
-        let mut cursor: *const wincrypt::CERT_CONTEXT = std::ptr::null();
-        loop {
-            // The enumeration takes ownership of `cursor` and frees it when advancing.
-            let cert = CertEnumCertificatesInStore(store, cursor);
-            if cert.is_null() {
-                panic!("provisioned certificate '{friendly_name}' not found in CurrentUser\\My");
-            }
-            cursor = cert;
-
-            let mut len = 0u32;
-            if CertGetCertificateContextProperty(
-                cert,
-                CERT_FRIENDLY_NAME_PROP_ID,
-                std::ptr::null_mut(),
-                &mut len,
-            ) == 0
-                || len == 0
-            {
-                continue;
-            }
-            let mut buf = vec![0u16; (len as usize + 1) / 2];
-            if CertGetCertificateContextProperty(
-                cert,
-                CERT_FRIENDLY_NAME_PROP_ID,
-                buf.as_mut_ptr() as *mut _,
-                &mut len,
-            ) == 0
-            {
-                continue;
-            }
-            while buf.last() == Some(&0) {
-                buf.pop();
-            }
-            if buf != expected {
-                continue;
-            }
-
-            let owned = CertDuplicateCertificateContext(cert);
-            assert!(!owned.is_null(), "CertDuplicateCertificateContext failed");
-            // Force-close the store to free contexts still linked to it; our duplicate stays
-            // valid and is released by the caller.
-            CertCloseStore(store, CERT_CLOSE_STORE_FORCE_FLAG);
-            return owned;
-        }
+        let subject = wide(&format!("CN={friendly_name}"));
+        let found = CertFindCertificateInStore(
+            store,
+            (X509_ASN_ENCODING | PKCS_7_ASN_ENCODING) as u32,
+            0,
+            CERT_FIND_SUBJECT_STR,
+            subject.as_ptr() as *const _,
+            std::ptr::null_mut(),
+        );
+        assert!(
+            !found.is_null(),
+            "provisioned certificate 'CN={friendly_name}' not found in CurrentUser\\My"
+        );
+        // The found context is independently reference-counted; closing the store does not
+        // invalidate it. Ownership passes to the caller, who must call CertFreeCertificateContext.
+        CertCloseStore(store, 0);
+        eprintln!("assoc: found 'CN={friendly_name}'");
+        found
     }
 
     /// Asserts the certificate carries an accessible private key that is a CNG/NCrypt key of the
@@ -1338,6 +1310,7 @@ mod smime_regression_tests {
             &mut key_spec,
             &mut caller_free,
         );
+        eprintln!("assoc: acquire ok={ok} spec={key_spec:#x}");
         assert_ne!(ok, 0, "certificate must have an accessible private key");
         assert_eq!(
             key_spec, CERT_NCRYPT_KEY_SPEC,
@@ -1371,6 +1344,7 @@ mod smime_regression_tests {
                 .take_while(|&v| v != 0)
                 .collect::<Vec<u16>>(),
         );
+        eprintln!("assoc: key algorithm '{actual_alg}'");
         assert_eq!(actual_alg, alg, "unexpected CNG key algorithm");
 
         if caller_free != 0 && key_handle != 0 {
