@@ -26,6 +26,7 @@ jobs:
 
       - name: Provision regression test certificates
         shell: pwsh
+        timeout-minutes: 10
         run: ./scripts/provision-smime-test-certs.ps1
 
       - name: Run tests (host target)
