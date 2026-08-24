@@ -96,22 +96,19 @@ extern "C" fn C_Initialize(_pInitArgs: CK_C_INITIALIZE_ARGS_PTR) -> CK_RV {
     // logging has been initialized.
     let _ = env_logger::try_init();
     let mut manager_guard = try_to_get_manager_guard!();
-    match manager_guard.replace(ManagerProxy::new()) {
-        Some(_unexpected_previous_manager) => {
-            #[cfg(target_os = "macos")]
-            {
-                info!(
-                    "C_Initialize: manager previously set (this is expected on macOS - replacing it)"
-                );
-            }
-            #[cfg(target_os = "windows")]
-            {
-                warn!(
-                    "C_Initialize: manager unexpectedly previously set (bravely continuing by replacing it)"
-                );
-            }
+    if let Some(_unexpected_previous_manager) = manager_guard.replace(ManagerProxy::new()) {
+        #[cfg(target_os = "macos")]
+        {
+            info!(
+                "C_Initialize: manager previously set (this is expected on macOS - replacing it)"
+            );
         }
-        None => {}
+        #[cfg(target_os = "windows")]
+        {
+            warn!(
+                "C_Initialize: manager unexpectedly previously set (bravely continuing by replacing it)"
+            );
+        }
     }
     debug!("C_Initialize: CKR_OK");
     CKR_OK
@@ -1366,7 +1363,11 @@ static mut FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
 
 /// This is the only function this module exposes. NSS calls it to obtain the list of functions
 /// comprising this module.
+// The PKCS #11 specification requires this export to have a safe signature (NSS calls it through
+// a plain function pointer type), so the pointer dereference below cannot make this function
+// `unsafe`.
 #[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn C_GetFunctionList(ppFunctionList: CK_FUNCTION_LIST_PTR_PTR) -> CK_RV {
     if ppFunctionList.is_null() {
         return CKR_ARGUMENTS_BAD;
