@@ -96,22 +96,19 @@ extern "C" fn C_Initialize(_pInitArgs: CK_C_INITIALIZE_ARGS_PTR) -> CK_RV {
     // logging has been initialized.
     let _ = env_logger::try_init();
     let mut manager_guard = try_to_get_manager_guard!();
-    match manager_guard.replace(ManagerProxy::new()) {
-        Some(_unexpected_previous_manager) => {
-            #[cfg(target_os = "macos")]
-            {
-                info!(
-                    "C_Initialize: manager previously set (this is expected on macOS - replacing it)"
-                );
-            }
-            #[cfg(target_os = "windows")]
-            {
-                warn!(
-                    "C_Initialize: manager unexpectedly previously set (bravely continuing by replacing it)"
-                );
-            }
+    if let Some(_unexpected_previous_manager) = manager_guard.replace(ManagerProxy::new()) {
+        #[cfg(target_os = "macos")]
+        {
+            info!(
+                "C_Initialize: manager previously set (this is expected on macOS - replacing it)"
+            );
         }
-        None => {}
+        #[cfg(target_os = "windows")]
+        {
+            warn!(
+                "C_Initialize: manager unexpectedly previously set (bravely continuing by replacing it)"
+            );
+        }
     }
     debug!("C_Initialize: CKR_OK");
     CKR_OK
@@ -223,14 +220,16 @@ extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, pInfo: CK_TOKEN_INFO_PTR) -> CK
         error!("C_GetTokenInfo: CKR_ARGUMENTS_BAD");
         return CKR_ARGUMENTS_BAD;
     }
-    let mut token_info = CK_TOKEN_INFO::default();
-    token_info.label = BlankPaddedUtf8String32(*TOKEN_LABEL_BYTES);
-    token_info.manufacturerID = BlankPaddedUtf8String32(*MANUFACTURER_ID_BYTES);
-    token_info.model = BlankPaddedUtf8String16(*TOKEN_MODEL_BYTES);
-    token_info.serialNumber = BlankPaddedString16(*TOKEN_SERIAL_NUMBER_BYTES);
-    // Advertise what this token can do so that applications (e.g. NSS) will attempt sign,
-    // encrypt, and decrypt operations.
-    token_info.flags |= CKF_SIGN | CKF_ENCRYPT | CKF_DECRYPT;
+    let token_info = CK_TOKEN_INFO {
+        label: BlankPaddedUtf8String32(*TOKEN_LABEL_BYTES),
+        manufacturerID: BlankPaddedUtf8String32(*MANUFACTURER_ID_BYTES),
+        model: BlankPaddedUtf8String16(*TOKEN_MODEL_BYTES),
+        serialNumber: BlankPaddedString16(*TOKEN_SERIAL_NUMBER_BYTES),
+        // Advertise what this token can do so that applications (e.g. NSS) will attempt sign,
+        // encrypt, and decrypt operations.
+        flags: CKF_SIGN | CKF_ENCRYPT | CKF_DECRYPT,
+        ..Default::default()
+    };
     unsafe {
         *pInfo = token_info;
     }
@@ -255,9 +254,9 @@ extern "C" fn C_GetMechanismList(
             error!("C_GetMechanismList: CKR_BUFFER_TOO_SMALL");
             return CKR_BUFFER_TOO_SMALL;
         }
-        for i in 0..mechanisms.len() {
+        for (i, mechanism) in mechanisms.iter().enumerate() {
             unsafe {
-                *pMechanismList.offset(i as isize) = mechanisms[i];
+                *pMechanismList.add(i) = *mechanism;
             }
         }
     }
@@ -496,8 +495,8 @@ extern "C" fn C_GetAttributeValue(
         return CKR_ARGUMENTS_BAD;
     }
     let mut attr_types = Vec::with_capacity(ulCount as usize);
-    for i in 0..ulCount {
-        let attr = unsafe { &*pTemplate.offset(i as isize) };
+    let template = unsafe { std::slice::from_raw_parts(pTemplate, ulCount as usize) };
+    for attr in template {
         attr_types.push(attr.attrType);
     }
     let mut manager_guard = try_to_get_manager_guard!();
@@ -516,14 +515,14 @@ extern "C" fn C_GetAttributeValue(
         return CKR_DEVICE_ERROR;
     }
     let mut rv = CKR_OK;
-    for i in 0..ulCount as usize {
-        let attr = unsafe { &mut *pTemplate.offset(i as isize) };
-        // NB: the safety of this array access depends on the length check above
-        if let Some(attr_value) = &values[i] {
+    let template = unsafe { std::slice::from_raw_parts_mut(pTemplate, ulCount as usize) };
+    // NB: the zip below relies on values.len() == ulCount, which is checked above
+    for (attr, value) in template.iter_mut().zip(values.iter()) {
+        if let Some(attr_value) = value {
             if attr.pValue.is_null() {
                 attr.ulValueLen = attr_value.len() as CK_ULONG;
             } else {
-                let ptr: *mut u8 = attr.pValue as *mut u8;
+                let ptr: *mut u8 = attr.pValue.cast();
                 if (attr.ulValueLen as usize) < attr_value.len() {
                     // As specified, report the required length for this attribute and keep going;
                     // the caller is expected to retry with a big enough buffer.
@@ -748,9 +747,8 @@ extern "C" fn C_Encrypt(
                 }
             }
         };
-        let ptr: *mut u8 = pEncryptedData as *mut u8;
         unsafe {
-            std::ptr::copy_nonoverlapping(encrypted.as_ptr(), ptr, encrypted.len());
+            std::ptr::copy_nonoverlapping(encrypted.as_ptr(), pEncryptedData, encrypted.len());
             *pulEncryptedDataLen = encrypted.len() as CK_ULONG;
         }
     }
@@ -874,9 +872,8 @@ extern "C" fn C_Decrypt(
                 }
             }
         };
-        let ptr: *mut u8 = pData as *mut u8;
         unsafe {
-            std::ptr::copy_nonoverlapping(decrypted.as_ptr(), ptr, decrypted.len());
+            std::ptr::copy_nonoverlapping(decrypted.as_ptr(), pData, decrypted.len());
             *pulDataLen = decrypted.len() as CK_ULONG;
         }
     }
@@ -1040,9 +1037,8 @@ extern "C" fn C_Sign(
                 }
             }
         };
-        let ptr: *mut u8 = pSignature as *mut u8;
         unsafe {
-            std::ptr::copy_nonoverlapping(signature.as_ptr(), ptr, signature.len());
+            std::ptr::copy_nonoverlapping(signature.as_ptr(), pSignature, signature.len());
             *pulSignatureLen = signature.len() as CK_ULONG;
         }
     }
@@ -1366,7 +1362,11 @@ static mut FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
 
 /// This is the only function this module exposes. NSS calls it to obtain the list of functions
 /// comprising this module.
+// The PKCS #11 specification requires this export to have a safe signature (NSS calls it through
+// a plain function pointer type), so the pointer dereference below cannot make this function
+// `unsafe`.
 #[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn C_GetFunctionList(ppFunctionList: CK_FUNCTION_LIST_PTR_PTR) -> CK_RV {
     if ppFunctionList.is_null() {
         return CKR_ARGUMENTS_BAD;
