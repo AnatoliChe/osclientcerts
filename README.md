@@ -2,7 +2,8 @@
 
 A standalone Windows PKCS#11 provider based on Mozilla's historical `osclientcerts` project, extended for use with Thunderbird/NSS and Windows CNG-backed certificates and private keys.
 
-[![CI](https://github.com/AnatoliChe/osclientcerts/actions/workflows/ci.yml/badge.svg)](https://github.com/AnatoliChe/osclientcerts/actions/workflows/ci.yml)
+[![Rust checks](https://github.com/AnatoliChe/osclientcerts/actions/workflows/rust.yml/badge.svg)](https://github.com/AnatoliChe/osclientcerts/actions/workflows/rust.yml)
+[![Windows build](https://github.com/AnatoliChe/osclientcerts/actions/workflows/windows.yml/badge.svg)](https://github.com/AnatoliChe/osclientcerts/actions/workflows/windows.yml)
 
 > **Project status:** working. The provider builds as a standalone Windows x64 DLL and implements RSA signing, encryption and decryption (PKCS#1 v1.5 and OAEP) as well as RSA-PSS and ECDSA signing on top of the original signing-only upstream code. Real-world Thunderbird S/MIME interoperability (signing, sending encrypted mail and decrypting received mail with non-exportable CNG keys) has been validated. The RSA cipher mechanism parsing, the PKCS#11 operation state machines and the error-code mapping are covered by a unit test suite that runs in CI on every push.
 
@@ -302,19 +303,24 @@ inside Windows CNG, not in this provider, so they cannot be unit-tested at the p
 
 ## Continuous integration
 
-GitHub Actions run on every push to `trunk` and on pull requests (`.github/workflows/ci.yml`):
+GitHub Actions run on every push to `trunk` and on pull requests:
 
-| Job | Runner | What it does |
+| Workflow | Runner | Checks |
 |---|---|---|
-| `test` | `ubuntu-latest` | Runs the unit test suite (`cargo test --release`, host target via the stub backend) |
-| `build-windows` | `windows-latest` | Native MSVC build of `osclientcerts.dll`; the DLL is uploaded as a workflow artifact for inspection |
-| `release` | `windows-latest` | On a pushed tag `v*`: builds the DLL and attaches it to a GitHub release |
+| `.github/workflows/rust.yml` | `ubuntu-latest` | `cargo fmt --all -- --check`; `cargo test --all-targets`; `cargo clippy --all-targets --all-features -- -D warnings` |
+| `.github/workflows/windows.yml` | `windows-latest` | Native MSVC build of `osclientcerts.dll` (uploaded as a workflow artifact); `cargo test --all-targets` on the host target; on a pushed `v*` tag the DLL is attached to a GitHub release |
 
 Notes:
 
+- The unit tests that depend on the stub backend's deterministic behavior run only on
+  non-Windows/non-macOS targets; the mechanism-parsing and error-mapping tests run everywhere,
+  including the Windows runner.
 - The native Windows runner build uses whatever MSVC/Rust versions GitHub installs, so its
   artifact is convenient but **not** the canonical release binary. Release DLLs are built with the
   pinned Docker toolchain described above; CI release automation exists as a fallback/convenience.
+- Dependabot keeps Cargo dependencies (weekly) and GitHub Actions (monthly) up to date via PRs;
+  updates are proposed, never auto-merged, because a crate update can change ABI, MSRV, FFI types
+  or bindgen behavior.
 
 ## Important upstream/research repositories
 
