@@ -1249,34 +1249,82 @@ mod smime_regression_tests {
     /// certificate context; the caller must release it via `CertFreeCertificateContext`.
     unsafe fn find_store_cert(friendly_name: &str) -> *const winapi::um::wincrypt::CERT_CONTEXT {
         use winapi::um::wincrypt::{
-            self, CERT_FIND_SUBJECT_STR, CertCloseStore, CertFindCertificateInStore,
-            PKCS_7_ASN_ENCODING, X509_ASN_ENCODING,
+            self, CERT_FIND_ANY, CERT_FIND_HAS_PRIVATE_KEY, CERT_FRIENDLY_NAME_PROP_ID,
+            CERT_STORE_OPEN_EXISTING_FLAG, CERT_STORE_PROV_SYSTEM_REGISTRY_A,
+            CERT_STORE_READONLY_FLAG, CERT_SYSTEM_STORE_CURRENT_USER, CertCloseStore,
+            CertFindCertificateInStore, CertGetCertificateContextProperty, X509_ASN_ENCODING,
         };
 
-        eprintln!("assoc: looking up 'CN={friendly_name}' in CurrentUser\\My...");
-        let store = wincrypt::CertOpenSystemStoreW(0, wide("My").as_ptr());
+        // Mirrors the provider's own enumeration (backend_windows::list_objects): open the
+        // current-user "My" store read-only and iterate certificates that carry a private key.
+        let location_flags = CERT_SYSTEM_STORE_CURRENT_USER
+            | CERT_STORE_OPEN_EXISTING_FLAG
+            | CERT_STORE_READONLY_FLAG;
+        let store_name = wide("My");
+        let store = wincrypt::CertOpenStore(
+            CERT_STORE_PROV_SYSTEM_REGISTRY_A,
+            0,
+            0,
+            location_flags,
+            store_name.as_ptr() as *const _,
+        );
         assert!(
             !store.is_null(),
             "failed to open the personal certificate store"
         );
-        let subject = wide(&format!("CN={friendly_name}"));
-        let found = CertFindCertificateInStore(
-            store,
-            (X509_ASN_ENCODING | PKCS_7_ASN_ENCODING) as u32,
-            0,
-            CERT_FIND_SUBJECT_STR,
-            subject.as_ptr() as *const _,
-            std::ptr::null_mut(),
-        );
-        assert!(
-            !found.is_null(),
-            "provisioned certificate 'CN={friendly_name}' not found in CurrentUser\\My"
-        );
-        // The found context is independently reference-counted; closing the store does not
-        // invalidate it. Ownership passes to the caller, who must call CertFreeCertificateContext.
-        CertCloseStore(store, 0);
-        eprintln!("assoc: found 'CN={friendly_name}'");
-        found
+
+        let expected: Vec<u16> = friendly_name.encode_utf16().collect();
+        let mut cursor: *const winapi::um::wincrypt::CERT_CONTEXT = std::ptr::null();
+        loop {
+            cursor = CertFindCertificateInStore(
+                store,
+                X509_ASN_ENCODING,
+                CERT_FIND_HAS_PRIVATE_KEY,
+                CERT_FIND_ANY,
+                std::ptr::null(),
+                cursor,
+            );
+            if cursor.is_null() {
+                panic!("provisioned certificate '{friendly_name}' not found in CurrentUser\\My");
+            }
+
+            let mut len = 0u32;
+            if CertGetCertificateContextProperty(
+                cursor,
+                CERT_FRIENDLY_NAME_PROP_ID,
+                std::ptr::null_mut(),
+                &mut len,
+            ) == 0
+                || len == 0
+            {
+                continue;
+            }
+            // cbResult counts the bytes of the NUL-terminated UTF-16 property value.
+            let mut buf = vec![0u8; len as usize];
+            if CertGetCertificateContextProperty(
+                cursor,
+                CERT_FRIENDLY_NAME_PROP_ID,
+                buf.as_mut_ptr() as *mut _,
+                &mut len,
+            ) == 0
+            {
+                continue;
+            }
+            let name: Vec<u16> = buf
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .take_while(|&v| v != 0)
+                .collect();
+            if name != expected {
+                continue;
+            }
+
+            eprintln!("assoc: found '{friendly_name}'");
+            // The found context is independently reference-counted, so closing the store does not
+            // invalidate it. Ownership passes to the caller (CertFreeCertificateContext).
+            CertCloseStore(store, 0);
+            return cursor;
+        }
     }
 
     /// Asserts the certificate carries an accessible private key that is a CNG/NCrypt key of the
