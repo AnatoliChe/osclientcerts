@@ -41,9 +41,7 @@ impl RsaCipherMechanism {
     /// Map a PKCS #11 hash algorithm identifier onto its CNG algorithm identifier string. Only the
     /// Windows backend calls this (the stub backend performs no real crypto).
     #[allow(dead_code)]
-    pub(crate) fn hash_algorithm_string(
-        hash_alg: CK_MECHANISM_TYPE,
-    ) -> Result<&'static [u16], ()> {
+    pub(crate) fn hash_algorithm_string(hash_alg: CK_MECHANISM_TYPE) -> Result<&'static [u16], ()> {
         match hash_alg {
             CKM_SHA_1 => Ok(SHA1_ALGORITHM_STRING),
             CKM_SHA256 => Ok(SHA256_ALGORITHM_STRING),
@@ -143,7 +141,9 @@ pub fn parse_rsa_cipher_mechanism(
     };
     debug!(
         "{}: OAEP parameters: hash {}, label {} bytes",
-        function_name, hash_alg, label.len()
+        function_name,
+        hash_alg,
+        label.len()
     );
     Ok(RsaCipherMechanism::Oaep { hash_alg, label })
 }

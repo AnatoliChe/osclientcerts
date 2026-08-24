@@ -144,15 +144,15 @@ impl Cert {
             CertCreateCertificateContext(
                 X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
                 self.value.as_ptr(),
-                self.value.len().try_into().map_err(|_| CryptoError::OperationFailed)?,
+                self.value
+                    .len()
+                    .try_into()
+                    .map_err(|_| CryptoError::OperationFailed)?,
             )
         };
         if cert_context.is_null() {
             let last_error = unsafe { GetLastError() };
-            error!(
-                "CertCreateCertificateContext failed: {:#010x}",
-                last_error
-            );
+            error!("CertCreateCertificateContext failed: {:#010x}", last_error);
             return Err(CryptoError::Windows(last_error));
         }
         Ok(CertContext(cert_context))
@@ -215,8 +215,9 @@ impl Cert {
     }
 
     fn matches(&self, attrs: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)]) -> bool {
-        attrs.iter().all(|(attr_type, attr_value)| {
-            match *attr_type {
+        attrs
+            .iter()
+            .all(|(attr_type, attr_value)| match *attr_type {
                 CKA_TOKEN => bool_attr_matches(self.token(), attr_value),
                 CKA_SERIAL_NUMBER => serial_number_matches(self.serial_number(), attr_value),
                 _ => {
@@ -231,8 +232,7 @@ impl Cert {
                     };
                     attr_value.as_slice() == comparison
                 }
-            }
-        })
+            })
     }
 
     fn get_attribute(&self, attribute: CK_ATTRIBUTE_TYPE) -> Option<&[u8]> {
@@ -277,7 +277,10 @@ impl CertContext {
             BCryptEncrypt(
                 *key,
                 input.as_mut_ptr(),
-                input.len().try_into().map_err(|_| CryptoError::OperationFailed)?,
+                input
+                    .len()
+                    .try_into()
+                    .map_err(|_| CryptoError::OperationFailed)?,
                 padding_info.params_ptr() as *mut _,
                 std::ptr::null_mut(),
                 0,
@@ -303,7 +306,10 @@ impl CertContext {
             BCryptEncrypt(
                 *key,
                 input.as_mut_ptr(),
-                input.len().try_into().map_err(|_| CryptoError::OperationFailed)?,
+                input
+                    .len()
+                    .try_into()
+                    .map_err(|_| CryptoError::OperationFailed)?,
                 padding_info.params_ptr() as *mut _,
                 std::ptr::null_mut(),
                 0,
@@ -407,9 +413,8 @@ impl BCryptPublicKeyHandle {
         let mut key_handle: BCRYPT_KEY_HANDLE = std::ptr::null_mut();
         // Extract the subject public key info from the certificate.
         let pccert: PCCERT_CONTEXT = **cert;
-        let public_key_info: &CERT_PUBLIC_KEY_INFO = unsafe {
-            &(*(*pccert).pCertInfo).SubjectPublicKeyInfo
-        };
+        let public_key_info: &CERT_PUBLIC_KEY_INFO =
+            unsafe { &(*(*pccert).pCertInfo).SubjectPublicKeyInfo };
         let imported = unsafe {
             CryptImportPublicKeyInfoEx2(
                 X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
@@ -692,8 +697,9 @@ impl Key {
     }
 
     fn matches(&self, attrs: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)]) -> bool {
-        attrs.iter().all(|(attr_type, attr_value)| {
-            match *attr_type {
+        attrs
+            .iter()
+            .all(|(attr_type, attr_value)| match *attr_type {
                 CKA_TOKEN => bool_attr_matches(self.token(), attr_value),
                 CKA_PRIVATE => bool_attr_matches(self.private(), attr_value),
                 _ => {
@@ -719,8 +725,7 @@ impl Key {
                     };
                     attr_value.as_slice() == comparison
                 }
-            }
-        })
+            })
     }
 
     fn get_attribute(&self, attribute: CK_ATTRIBUTE_TYPE) -> Option<&[u8]> {
@@ -767,8 +772,8 @@ impl Key {
         // Acquiring a handle on the key can cause the OS to show some UI to the user, so we do this
         // as late as possible (i.e. here).
         let key = NCryptKeyHandle::from_cert(&self.cert)?;
-        let mut sign_params =
-            SignParams::new(self.key_type_enum, params).map_err(|_| CryptoError::OperationFailed)?;
+        let mut sign_params = SignParams::new(self.key_type_enum, params)
+            .map_err(|_| CryptoError::OperationFailed)?;
         let params_ptr = sign_params.params_ptr();
         let flags = sign_params.flags();
         let mut data = data.to_vec();
@@ -780,7 +785,9 @@ impl Key {
                 *key,
                 params_ptr,
                 data.as_mut_ptr(),
-                data.len().try_into().map_err(|_| CryptoError::OperationFailed)?,
+                data.len()
+                    .try_into()
+                    .map_err(|_| CryptoError::OperationFailed)?,
                 std::ptr::null_mut(),
                 0,
                 &mut signature_len,
@@ -805,7 +812,9 @@ impl Key {
                 *key,
                 params_ptr,
                 data.as_mut_ptr(),
-                data.len().try_into().map_err(|_| CryptoError::OperationFailed)?,
+                data.len()
+                    .try_into()
+                    .map_err(|_| CryptoError::OperationFailed)?,
                 signature.as_mut_ptr(),
                 signature_len,
                 &mut final_signature_len,
@@ -872,7 +881,9 @@ impl Key {
             NCryptDecrypt(
                 *key,
                 data.as_ptr() as *mut u8,
-                data.len().try_into().map_err(|_| CryptoError::OperationFailed)?,
+                data.len()
+                    .try_into()
+                    .map_err(|_| CryptoError::OperationFailed)?,
                 padding_info.params_ptr(),
                 std::ptr::null_mut(),
                 0,
@@ -896,7 +907,9 @@ impl Key {
             NCryptDecrypt(
                 *key,
                 data.as_ptr() as *mut u8,
-                data.len().try_into().map_err(|_| CryptoError::OperationFailed)?,
+                data.len()
+                    .try_into()
+                    .map_err(|_| CryptoError::OperationFailed)?,
                 padding_info.params_ptr(),
                 decrypted.as_mut_ptr(),
                 decrypted_len,
