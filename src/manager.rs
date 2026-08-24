@@ -900,6 +900,7 @@ mod tests {
 #[cfg(all(test, target_os = "windows"))]
 mod smime_regression_tests {
     use super::*;
+    use crate::util::serialize_uint;
     use sha2::{Digest, Sha256};
 
     /// Friendly-name / subject markers of the certificates created by
@@ -1042,11 +1043,9 @@ mod smime_regression_tests {
             .collect::<Vec<u8>>();
 
         manager.start_sign(session, key_handle, None).unwrap();
-        let len = manager
-            .get_signature_length(session, digest_info.clone())
-            .unwrap();
+        let len = manager.get_signature_length(session, &digest_info).unwrap();
         assert_eq!(len, 256);
-        let signature = manager.sign(session, digest_info).unwrap();
+        let signature = manager.sign(session, &digest_info).unwrap();
 
         // Structural EMSA-PKCS1-v1_5 check: 00 01 FF..FF 00 || DigestInfo.
         assert_eq!(signature.len(), 256);
@@ -1083,11 +1082,9 @@ mod smime_regression_tests {
         manager
             .start_sign(session, key_handle, Some(params))
             .unwrap();
-        let len = manager
-            .get_signature_length(session, digest.clone())
-            .unwrap();
+        let len = manager.get_signature_length(session, &digest).unwrap();
         assert_eq!(len, 256);
-        let signature = manager.sign(session, digest).unwrap();
+        let signature = manager.sign(session, &digest).unwrap();
         assert_eq!(signature.len(), 256);
         // PSS-encoded messages always end with the fixed trailer byte 0xBC.
         assert_eq!(*signature.last().unwrap(), 0xBC);
@@ -1104,13 +1101,13 @@ mod smime_regression_tests {
         manager
             .start_encrypt(session, key_handle, RsaCipherMechanism::Pkcs1v15)
             .unwrap();
-        let ciphertext = manager.encrypt(session, plaintext.clone()).unwrap();
+        let ciphertext = manager.encrypt(session, &plaintext).unwrap();
         assert_ne!(ciphertext, plaintext);
 
         manager
             .start_decrypt(session, key_handle, RsaCipherMechanism::Pkcs1v15)
             .unwrap();
-        let decrypted = manager.decrypt(session, ciphertext).unwrap();
+        let decrypted = manager.decrypt(session, &ciphertext).unwrap();
         assert_eq!(decrypted, plaintext);
     }
 
@@ -1133,7 +1130,7 @@ mod smime_regression_tests {
                 },
             )
             .unwrap();
-        let ciphertext = manager.encrypt(session, plaintext.clone()).unwrap();
+        let ciphertext = manager.encrypt(session, &plaintext).unwrap();
         manager
             .start_decrypt(
                 session,
@@ -1144,7 +1141,7 @@ mod smime_regression_tests {
                 },
             )
             .unwrap();
-        let decrypted = manager.decrypt(session, ciphertext).unwrap();
+        let decrypted = manager.decrypt(session, &ciphertext).unwrap();
         assert_eq!(decrypted, plaintext);
     }
 
@@ -1158,11 +1155,9 @@ mod smime_regression_tests {
         // ECDSA over P-256 signs the bare SHA-256 digest.
         let digest = Sha256::digest(b"smime regression ecdsa").to_vec();
         manager.start_sign(session, key_handle, None).unwrap();
-        let len = manager
-            .get_signature_length(session, digest.clone())
-            .unwrap();
+        let len = manager.get_signature_length(session, &digest).unwrap();
         assert!(len >= 64, "ECDSA signature cannot be shorter than r||s");
-        let signature = manager.sign(session, digest).unwrap();
+        let signature = manager.sign(session, &digest).unwrap();
         // NSS-style DER encoding: SEQUENCE { r INTEGER, s INTEGER } (~70-72 bytes for P-256).
         assert_eq!(signature[0], 0x30);
         assert!((68..=73).contains(&signature.len()));
@@ -1178,7 +1173,7 @@ mod smime_regression_tests {
             .start_decrypt(session, key_handle, RsaCipherMechanism::Pkcs1v15)
             .unwrap();
         manager.close_session(session).unwrap();
-        let result = manager.decrypt(session, vec![0x00; 256]);
+        let result = manager.decrypt(session, &[0x00; 256]);
         assert!(matches!(result, Err(CryptoError::OperationFailed)));
     }
 }
