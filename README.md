@@ -386,6 +386,16 @@ The current provider is intentionally narrow.
 
 ## Release notes
 
+### 0.3.3
+
+- Internal quality release; no functional changes to the provider.
+- Codebase formatted with `rustfmt` (edition 2024 defaults) and made clean under
+  `cargo clippy --all-targets --all-features -- -D warnings`.
+- CI quality gates on every push/PR: rustfmt check, unit tests, clippy (Linux) and a native MSVC
+  Windows build with tests plus automated DLL artifacts/tag releases (Windows).
+- Dependabot enabled for Cargo dependencies (weekly PRs) and GitHub Actions versions (monthly).
+- The DLL in this release is rebuilt from the reformatted sources; behavior is identical to 0.3.2.
+
 ### 0.3.2
 
 - Added a unit test suite (40 tests) that runs on the Linux build host inside the existing Docker
