@@ -1260,7 +1260,7 @@ mod smime_regression_tests {
             "failed to open the personal certificate store"
         );
 
-        let expected = wide(friendly_name);
+        let expected: Vec<u16> = friendly_name.encode_utf16().collect();
         let mut cursor: *const wincrypt::CERT_CONTEXT = std::ptr::null();
         loop {
             // The enumeration takes ownership of `cursor` and frees it when advancing.
