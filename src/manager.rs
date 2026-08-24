@@ -1062,21 +1062,34 @@ mod smime_regression_tests {
         let signature = manager.sign(session, &digest_info).unwrap();
         dump("pkcs1", &signature);
 
-        // Structural EMSA-PKCS1-v1_5 check: 00 01 FF..FF 00 || DigestInfo.
+        // The returned value is the opaque RSA signature (the result of the private-key
+        // operation), so its bytes look random. PKCS#1 v1.5 encoding is deterministic though,
+        // which lets us pin down both the mechanism and the exact input without a public-key
+        // verification implementation: re-signing identical data must reproduce the signature
+        // byte-for-byte, and different data must produce a different one.
         assert_eq!(signature.len(), 256);
-        assert_eq!(signature[0], 0x00);
-        assert_eq!(signature[1], 0x01);
-        let padding_end = signature[2..].iter().position(|&b| b != 0xFF).unwrap() + 2;
-        assert!(padding_end >= 10, "insufficient PS padding");
-        assert_eq!(signature[padding_end], 0x00);
-        let rebuilt = SHA256_DIGEST_INFO_PREFIX
+
+        manager.start_sign(session, key_handle, None).unwrap();
+        manager.get_signature_length(session, &digest_info).unwrap();
+        let repeat = manager.sign(session, &digest_info).unwrap();
+        assert_eq!(
+            signature, repeat,
+            "RSA PKCS#1 v1.5 signatures must be deterministic"
+        );
+
+        let other_digest_info = SHA256_DIGEST_INFO_PREFIX
             .iter()
             .copied()
-            .chain(Sha256::digest(b"smime regression pkcs1"))
+            .chain(Sha256::digest(b"smime regression pkcs1 v2"))
             .collect::<Vec<u8>>();
-        assert_eq!(
-            &signature[signature.len() - rebuilt.len()..],
-            rebuilt.as_slice()
+        manager.start_sign(session, key_handle, None).unwrap();
+        manager
+            .get_signature_length(session, &other_digest_info)
+            .unwrap();
+        let other = manager.sign(session, &other_digest_info).unwrap();
+        assert_ne!(
+            signature, other,
+            "different DigestInfo inputs must yield different signatures"
         );
     }
 
@@ -1101,9 +1114,19 @@ mod smime_regression_tests {
         assert_eq!(len, 256);
         let signature = manager.sign(session, &digest).unwrap();
         dump("pss", &signature);
+        // Again an opaque RSA signature of modulus size; PSS randomizes its salt, so unlike
+        // PKCS#1 v1.5, re-signing the same data must produce a different signature.
         assert_eq!(signature.len(), 256);
-        // PSS-encoded messages always end with the fixed trailer byte 0xBC.
-        assert_eq!(*signature.last().unwrap(), 0xBC);
+
+        manager
+            .start_sign(session, key_handle, Some(params))
+            .unwrap();
+        manager.get_signature_length(session, &digest).unwrap();
+        let repeat = manager.sign(session, &digest).unwrap();
+        assert_ne!(
+            signature, repeat,
+            "RSA-PSS signatures are randomized and must differ between runs"
+        );
     }
 
     #[test]
@@ -1175,9 +1198,27 @@ mod smime_regression_tests {
         assert!(len >= 64, "ECDSA signature cannot be shorter than r||s");
         let signature = manager.sign(session, &digest).unwrap();
         dump("ecdsa", &signature);
-        // NSS-style DER encoding: SEQUENCE { r INTEGER, s INTEGER } (~70-72 bytes for P-256).
-        assert_eq!(signature[0], 0x30);
-        assert!((68..=73).contains(&signature.len()));
+        // PKCS#11 CKM_ECDSA mandates the raw fixed-width big-endian concatenation r || s
+        // (32 + 32 bytes for P-256); DER wrapping is the caller's job. ECDSA randomizes k,
+        // so re-signing yields a different pair for the same digest.
+        assert_eq!(
+            signature.len(),
+            64,
+            "P-256 ECDSA signature must be r||s of 64 bytes"
+        );
+        assert!(
+            signature[..32].iter().any(|&b| b != 0),
+            "r must be non-zero"
+        );
+        assert!(
+            signature[32..].iter().any(|&b| b != 0),
+            "s must be non-zero"
+        );
+
+        manager.start_sign(session, key_handle, None).unwrap();
+        manager.get_signature_length(session, &digest).unwrap();
+        let repeat = manager.sign(session, &digest).unwrap();
+        assert_ne!(signature, repeat, "ECDSA signatures are randomized per k");
     }
 
     #[test]
