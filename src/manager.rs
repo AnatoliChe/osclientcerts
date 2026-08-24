@@ -1234,4 +1234,147 @@ mod smime_regression_tests {
         let result = manager.decrypt(session, &[0x00; 256]);
         assert!(matches!(result, Err(CryptoError::OperationFailed)));
     }
+
+    // Store-level association checks. Unlike the tests above these deliberately bypass the
+    // provider and talk to crypt32/NCrypt directly: they verify that provisioning produced a
+    // certificate whose private key exists AND is a CNG/NCrypt key (the provider refuses legacy
+    // CryptoAPI keys outright), independently of any provider-side bugs.
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// Finds the provisioned test certificate in the current user's personal store by friendly
+    /// name (the same property the provider matches against CKA_LABEL) and returns a duplicated
+    /// certificate context; the caller must release it via `CertFreeCertificateContext`.
+    unsafe fn find_store_cert(friendly_name: &str) -> *const winapi::um::wincrypt::CERT_CONTEXT {
+        use winapi::um::wincrypt::{
+            self, CERT_FIND_ANY, CERT_FIND_HAS_PRIVATE_KEY, CERT_FRIENDLY_NAME_PROP_ID,
+            CERT_STORE_OPEN_EXISTING_FLAG, CERT_STORE_PROV_SYSTEM_REGISTRY_A,
+            CERT_STORE_READONLY_FLAG, CERT_SYSTEM_STORE_CURRENT_USER, CertCloseStore,
+            CertFindCertificateInStore, CertGetCertificateContextProperty, X509_ASN_ENCODING,
+        };
+
+        // Mirrors the provider's own enumeration (backend_windows::list_objects): open the
+        // current-user "My" store read-only and iterate certificates that carry a private key.
+        let location_flags = CERT_SYSTEM_STORE_CURRENT_USER
+            | CERT_STORE_OPEN_EXISTING_FLAG
+            | CERT_STORE_READONLY_FLAG;
+        // The _A provider variant expects an ANSI store name.
+        let store_name = b"My\0";
+        let store = wincrypt::CertOpenStore(
+            CERT_STORE_PROV_SYSTEM_REGISTRY_A,
+            0,
+            0,
+            location_flags,
+            store_name.as_ptr() as *const _,
+        );
+        assert!(
+            !store.is_null(),
+            "failed to open the personal certificate store"
+        );
+
+        let expected: Vec<u16> = friendly_name.encode_utf16().collect();
+        let mut cursor: *const winapi::um::wincrypt::CERT_CONTEXT = std::ptr::null();
+        loop {
+            cursor = CertFindCertificateInStore(
+                store,
+                X509_ASN_ENCODING,
+                CERT_FIND_HAS_PRIVATE_KEY,
+                CERT_FIND_ANY,
+                std::ptr::null(),
+                cursor,
+            );
+            if cursor.is_null() {
+                panic!("provisioned certificate '{friendly_name}' not found in CurrentUser\\My");
+            }
+
+            let mut len = 0u32;
+            if CertGetCertificateContextProperty(
+                cursor,
+                CERT_FRIENDLY_NAME_PROP_ID,
+                std::ptr::null_mut(),
+                &mut len,
+            ) == 0
+                || len == 0
+            {
+                continue;
+            }
+            // cbResult counts the bytes of the NUL-terminated UTF-16 property value.
+            let mut buf = vec![0u8; len as usize];
+            if CertGetCertificateContextProperty(
+                cursor,
+                CERT_FRIENDLY_NAME_PROP_ID,
+                buf.as_mut_ptr() as *mut _,
+                &mut len,
+            ) == 0
+            {
+                continue;
+            }
+            let name: Vec<u16> = buf
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .take_while(|&v| v != 0)
+                .collect();
+            if name != expected {
+                continue;
+            }
+
+            eprintln!("assoc: found '{friendly_name}'");
+            // The found context is independently reference-counted, so closing the store does not
+            // invalidate it. Ownership passes to the caller (CertFreeCertificateContext).
+            CertCloseStore(store, 0);
+            return cursor;
+        }
+    }
+
+    /// Asserts the certificate carries an accessible private key that is a CNG/NCrypt key, then
+    /// frees all acquired resources. The key algorithm itself is exercised by the provider-level
+    /// sign/decrypt tests above.
+    unsafe fn assert_cng_private_key(cert: *const winapi::um::wincrypt::CERT_CONTEXT) {
+        use winapi::um::wincrypt::{
+            CERT_NCRYPT_KEY_SPEC, CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG, CertFreeCertificateContext,
+            CryptAcquireCertificatePrivateKey,
+        };
+        let mut key_handle: usize = 0;
+        let mut key_spec = 0u32;
+        let mut caller_free = 0i32;
+        let ok = CryptAcquireCertificatePrivateKey(
+            cert,
+            CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG,
+            std::ptr::null_mut(),
+            &mut key_handle,
+            &mut key_spec,
+            &mut caller_free,
+        );
+        eprintln!("assoc: acquire ok={ok} spec={key_spec:#x}");
+        assert_ne!(ok, 0, "certificate must have an accessible private key");
+        assert_eq!(
+            key_spec, CERT_NCRYPT_KEY_SPEC,
+            "private key must be reachable through NCrypt (CNG), not legacy CryptoAPI"
+        );
+
+        if caller_free != 0 && key_handle != 0 {
+            winapi::um::ncrypt::NCryptFreeObject(key_handle as winapi::um::ncrypt::NCRYPT_HANDLE);
+        }
+        CertFreeCertificateContext(cert);
+    }
+
+    #[test]
+    fn smime_rsa_certificate_has_cng_private_key() {
+        unsafe {
+            let cert = find_store_cert("osclientcerts-smime-rsa");
+            assert_cng_private_key(cert);
+        }
+    }
+
+    #[test]
+    fn smime_ec_certificate_has_cng_private_key() {
+        // This guards the KeySpec-less ECDSA provisioning path: the certificate must still end up
+        // associated with a discoverable P-256 CNG key.
+        unsafe {
+            let cert = find_store_cert("osclientcerts-smime-ec");
+            assert_cng_private_key(cert);
+        }
+    }
 }

@@ -195,7 +195,12 @@ historical regression classes listed above at a higher level:
 - RSA-PSS signatures (SHA-256, MGF1, 32-byte salt; randomized per signature);
 - ECDSA P-256 signatures returned as raw `r || s` per the PKCS#11 `CKM_ECDSA` spec;
 - RSA PKCS#1 v1.5 and OAEP (SHA-256, label) encrypt/decrypt roundtrips;
-- closing a session terminates an in-progress real signing operation.
+- closing a session terminates an in-progress real signing operation;
+- store-level private-key association for both provisioned certificates, verified directly via
+  crypt32 (`CryptAcquireCertificatePrivateKey` with `CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG`) without
+  involving the provider: the certificate must exist in `CurrentUser\My`, carry an accessible
+  private key, and that key must be reported as `CERT_NCRYPT_KEY_SPEC` (CNG/NCrypt), guarding
+  against provisioning changes that would leave a certificate without a discoverable CNG key.
 
 Because signatures are opaque values (the result of the private-key operation), structural checks
 rely on mechanism-level properties - deterministic vs randomized encodings and exact output sizes -
