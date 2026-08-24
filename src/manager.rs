@@ -8,16 +8,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(target_os = "macos")]
 use crate::backend_macos as backend;
-#[cfg(target_os = "windows")]
-use crate::backend_windows as backend;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use crate::backend_other as backend;
+#[cfg(target_os = "windows")]
+use crate::backend_windows as backend;
 use backend::*;
 
-use crate::util::hex_encode;
 use crate::util::CryptoError;
+use crate::util::hex_encode;
 
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -320,7 +320,11 @@ impl ManagerProxy {
         )
     }
 
-    pub fn sign(&mut self, session: CK_SESSION_HANDLE, data: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
+    pub fn sign(
+        &mut self,
+        session: CK_SESSION_HANDLE,
+        data: Vec<u8>,
+    ) -> Result<Vec<u8>, CryptoError> {
         manager_proxy_fn_impl!(
             self,
             ManagerArguments::Sign(session, data),
@@ -353,7 +357,11 @@ impl ManagerProxy {
         )
     }
 
-    pub fn decrypt(&mut self, session: CK_SESSION_HANDLE, data: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
+    pub fn decrypt(
+        &mut self,
+        session: CK_SESSION_HANDLE,
+        data: Vec<u8>,
+    ) -> Result<Vec<u8>, CryptoError> {
         manager_proxy_fn_impl!(
             self,
             ManagerArguments::Decrypt(session, data),
@@ -386,7 +394,11 @@ impl ManagerProxy {
         )
     }
 
-    pub fn encrypt(&mut self, session: CK_SESSION_HANDLE, data: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
+    pub fn encrypt(
+        &mut self,
+        session: CK_SESSION_HANDLE,
+        data: Vec<u8>,
+    ) -> Result<Vec<u8>, CryptoError> {
         manager_proxy_fn_impl!(
             self,
             ManagerArguments::Encrypt(session, data),
@@ -495,10 +507,7 @@ impl Manager {
                     );
                 }
                 Object::Key(key) => {
-                    debug!(
-                        "key: id {}",
-                        hex_encode(key.id()),
-                    );
+                    debug!("key: id {}", hex_encode(key.id()),);
                 }
             }
         }
@@ -685,7 +694,11 @@ impl Manager {
         key.get_signature_length(data, params)
     }
 
-    pub fn sign(&mut self, session: CK_SESSION_HANDLE, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    pub fn sign(
+        &mut self,
+        session: CK_SESSION_HANDLE,
+        data: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
         // Performing the signature (via C_Sign, which is the only way we support) finishes the sign
         // operation, so it needs to be removed here.
         let (key_handle, params) = match self.signs.remove(&session) {
@@ -733,7 +746,11 @@ impl Manager {
         key.decrypt_length(data, mechanism)
     }
 
-    pub fn decrypt(&mut self, session: CK_SESSION_HANDLE, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    pub fn decrypt(
+        &mut self,
+        session: CK_SESSION_HANDLE,
+        data: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
         // Performing the decryption (via C_Decrypt, which is the only way we support) finishes the
         // decrypt operation, so it needs to be removed here.
         let (key_handle, mechanism) = match self.decrypts.remove(&session) {
@@ -782,7 +799,11 @@ impl Manager {
         }
     }
 
-    pub fn encrypt(&mut self, session: CK_SESSION_HANDLE, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    pub fn encrypt(
+        &mut self,
+        session: CK_SESSION_HANDLE,
+        data: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
         // Performing the encryption (via C_Encrypt, which is the only way we support) finishes the
         // encrypt operation, so it needs to be removed here.
         let (object_handle, mechanism) = match self.encrypts.remove(&session) {
@@ -811,9 +832,7 @@ mod tests {
                 &[(CKA_CLASS, serialize_uint(CKO_PRIVATE_KEY).unwrap())],
             )
             .expect("start_search failed");
-        let handles = manager
-            .search(search_session, 10)
-            .expect("search failed");
+        let handles = manager.search(search_session, 10).expect("search failed");
         manager.clear_search(search_session).unwrap();
         assert_eq!(handles.len(), 1);
         handles[0]

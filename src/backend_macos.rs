@@ -772,8 +772,8 @@ impl Key {
         data: &[u8],
         params: &Option<CK_RSA_PKCS_PSS_PARAMS>,
     ) -> Result<Vec<u8>, CryptoError> {
-        let key = sec_identity_copy_private_key(&self.identity)
-            .map_err(|_| CryptoError::InvalidKey)?;
+        let key =
+            sec_identity_copy_private_key(&self.identity).map_err(|_| CryptoError::InvalidKey)?;
         let sign_params = SignParams::new(self.key_type_enum, data.len(), params)
             .map_err(|_| CryptoError::OperationFailed)?;
         let signing_algorithm = sign_params.get_algorithm();
@@ -787,8 +787,8 @@ impl Key {
                 // concatenation of r and s, the coordinates of the point on
                 // the curve. r and s must be 0-padded to be coordinate_width
                 // total bytes.
-                let (r, s) = read_ec_sig_point(signature.bytes())
-                    .map_err(|_| CryptoError::InvalidData)?;
+                let (r, s) =
+                    read_ec_sig_point(signature.bytes()).map_err(|_| CryptoError::InvalidData)?;
                 if r.len() > coordinate_width || s.len() > coordinate_width {
                     return Err(CryptoError::InvalidData);
                 }
