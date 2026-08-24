@@ -449,15 +449,15 @@ impl Deref for BCryptPublicKeyHandle {
 // &'static str constant provided by the winapi crate, create an OsString from it, encode it as wide
 // characters, and collect it into a Vec<u16>. However, since the implementation that provides this
 // functionality isn't constant, we would have to manage the memory this creates and uses. Since
-// rust structures generally can't be self-referrential, this memory would have to live elsewhere,
+// rust structures generally can't be self-referential, this memory would have to live elsewhere,
 // and the nice abstractions we've created for this implementation start to break down. It's much
 // simpler to hard-code the identifiers we support, since there are only four of them.
-// The following arrays represent the identifiers "SHA1", "SHA256", "SHA384", and "SHA512",
-// respectively.
-const SHA1_ALGORITHM_STRING: &[u16] = &[83, 72, 65, 49, 0];
-const SHA256_ALGORITHM_STRING: &[u16] = &[83, 72, 65, 50, 53, 54, 0];
-const SHA384_ALGORITHM_STRING: &[u16] = &[83, 72, 65, 51, 56, 52, 0];
-const SHA512_ALGORITHM_STRING: &[u16] = &[83, 72, 65, 53, 49, 50, 0];
+use crate::mechanism::{
+    SHA1_ALGORITHM_STRING, SHA256_ALGORITHM_STRING, SHA384_ALGORITHM_STRING,
+    SHA512_ALGORITHM_STRING,
+};
+// Re-exported so that `use backend::*` in the manager resolves this type for every backend.
+pub use crate::mechanism::RsaCipherMechanism;
 
 enum SignParams {
     EC,
@@ -519,41 +519,6 @@ impl SignParams {
             &SignParams::EC => 0,
             &SignParams::RSA_PKCS1(_) => NCRYPT_PAD_PKCS1_FLAG,
             &SignParams::RSA_PSS(_) => NCRYPT_PAD_PSS_FLAG,
-        }
-    }
-}
-
-/// An owned representation of the mechanism used for an RSA encryption or decryption operation.
-/// This mirrors what was parsed from the PKCS #11 `C_*Init` call (raw pointers are converted to
-/// owned data so this type can safely cross threads).
-#[derive(Debug)]
-pub enum RsaCipherMechanism {
-    /// RSA PKCS#1 v1.5 padding (`CKM_RSA_PKCS`).
-    Pkcs1v15,
-    /// RSA OAEP padding (`CKM_RSA_PKCS_OAEP`). Note that CNG ties the MGF1 hash function to the
-    /// digest algorithm, so callers must have already ensured the MGF matches the hash algorithm
-    /// before constructing this variant.
-    Oaep {
-        hash_alg: CK_MECHANISM_TYPE,
-        label: Vec<u8>,
-    },
-}
-
-impl RsaCipherMechanism {
-    /// Map a PKCS #11 hash algorithm identifier onto its CNG algorithm identifier string.
-    fn hash_algorithm_string(hash_alg: CK_MECHANISM_TYPE) -> Result<&'static [u16], ()> {
-        match hash_alg {
-            CKM_SHA_1 => Ok(SHA1_ALGORITHM_STRING),
-            CKM_SHA256 => Ok(SHA256_ALGORITHM_STRING),
-            CKM_SHA384 => Ok(SHA384_ALGORITHM_STRING),
-            CKM_SHA512 => Ok(SHA512_ALGORITHM_STRING),
-            _ => {
-                error!(
-                    "unsupported hash algorithm for RSA-OAEP: {}",
-                    unsafe_packed_field_access!(hash_alg)
-                );
-                Err(())
-            }
         }
     }
 }

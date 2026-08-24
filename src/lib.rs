@@ -34,16 +34,18 @@ use std::sync::Mutex;
 mod manager;
 #[macro_use]
 mod util;
+mod mechanism;
 #[cfg(target_os = "macos")]
 mod backend_macos;
 #[cfg(target_os = "windows")]
 mod backend_windows;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+mod backend_other;
 
 use manager::ManagerProxy;
 use util::crypto_error_to_rv;
 
-#[cfg(target_os = "windows")]
-use crate::backend_windows::RsaCipherMechanism;
+use crate::mechanism::parse_rsa_cipher_mechanism;
 
 lazy_static! {
     /// The singleton `ManagerProxy` that handles state with respect to PKCS #11. Only one thread
@@ -651,99 +653,6 @@ extern "C" fn C_FindObjectsFinal(hSession: CK_SESSION_HANDLE) -> CK_RV {
     }
 }
 
-/// Parse the mechanism of an RSA encryption or decryption operation into its owned representation
-/// (`RsaCipherMechanism`). Returns an appropriate PKCS#11 return value on failure. RSA PKCS#1 v1.5
-/// (`CKM_RSA_PKCS`) and RSA-OAEP (`CKM_RSA_PKCS_OAEP`) are supported.
-#[cfg(target_os = "windows")]
-fn rsa_cipher_mechanism_from_ck_mechanism(
-    function_name: &str,
-    mechanism: &CK_MECHANISM,
-) -> Result<RsaCipherMechanism, CK_RV> {
-    let mechanism_type = unsafe_packed_field_access!(mechanism.mechanism);
-    if mechanism_type == CKM_RSA_PKCS {
-        let parameter_len = unsafe_packed_field_access!(mechanism.ulParameterLen);
-        if parameter_len != 0 || !mechanism.pParameter.is_null() {
-            error!(
-                "{}: unexpected mechanism parameters, len {}",
-                function_name, parameter_len
-            );
-            return Err(CKR_ARGUMENTS_BAD);
-        }
-        return Ok(RsaCipherMechanism::Pkcs1v15);
-    }
-    if mechanism_type != CKM_RSA_PKCS_OAEP {
-        error!(
-            "{}: unsupported mechanism: {}",
-            function_name, mechanism_type
-        );
-        return Err(CKR_MECHANISM_INVALID);
-    }
-    let parameter_len = unsafe_packed_field_access!(mechanism.ulParameterLen);
-    if parameter_len as usize != std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>()
-        || mechanism.pParameter.is_null()
-    {
-        error!(
-            "{}: invalid OAEP mechanism parameters, len {}",
-            function_name, parameter_len
-        );
-        return Err(CKR_ARGUMENTS_BAD);
-    }
-    // CK_RSA_PKCS_OAEP_PARAMS is packed, so copy its fields into local variables before using
-    // them (taking references to fields of packed structs is not allowed).
-    let params = unsafe { *(mechanism.pParameter as *const CK_RSA_PKCS_OAEP_PARAMS) };
-    let source = params.source;
-    if source != CKZ_DATA_SPECIFIED {
-        // CNG only supports labels passed directly in the parameters; there is no support for
-        // other encoding parameter sources (e.g. object handles or callbacks).
-        error!(
-            "{}: unsupported OAEP source type: {}",
-            function_name, source
-        );
-        return Err(CKR_ARGUMENTS_BAD);
-    }
-    let hash_alg = params.hashAlg;
-    let expected_mgf = match hash_alg {
-        CKM_SHA_1 => CKG_MGF1_SHA1,
-        CKM_SHA256 => CKG_MGF1_SHA256,
-        CKM_SHA384 => CKG_MGF1_SHA384,
-        CKM_SHA512 => CKG_MGF1_SHA512,
-        _ => {
-            // This includes SHA-224, which CNG does not implement.
-            error!(
-                "{}: unsupported OAEP hash algorithm: {}",
-                function_name, hash_alg
-            );
-            return Err(CKR_MECHANISM_INVALID);
-        }
-    };
-    let mgf = params.mgf;
-    if mgf != expected_mgf {
-        // CNG derives the MGF1 hash function from the digest algorithm identifier, so we cannot
-        // support an MGF that differs from the digest.
-        error!(
-            "{}: unsupported OAEP MGF: {} (CNG requires MGF1 with the same hash)",
-            function_name, mgf
-        );
-        return Err(CKR_MECHANISM_INVALID);
-    }
-    let label = if params.ulSourceDataLen == 0 || params.pSourceData.is_null() {
-        Vec::new()
-    } else {
-        unsafe {
-            std::slice::from_raw_parts(
-                params.pSourceData as *const u8,
-                params.ulSourceDataLen as usize,
-            )
-        }
-        .to_vec()
-    };
-    debug!(
-        "{}: OAEP parameters: hash {}, label {} bytes",
-        function_name, hash_alg, label.len()
-    );
-    Ok(RsaCipherMechanism::Oaep { hash_alg, label })
-}
-
 /// This gets called to set up an encrypt operation. Only RSA is supported (with PKCS#1 v1.5 or
 /// OAEP padding); encryption uses the public key of the certificate associated with the given
 /// object.
@@ -759,7 +668,7 @@ extern "C" fn C_EncryptInit(
     let mechanism = unsafe { *pMechanism };
     debug!("C_EncryptInit: mechanism is {:?}", mechanism);
     let cipher_mechanism =
-        match rsa_cipher_mechanism_from_ck_mechanism("C_EncryptInit", &mechanism) {
+        match parse_rsa_cipher_mechanism("C_EncryptInit", &mechanism) {
             Ok(cipher_mechanism) => cipher_mechanism,
             Err(rv) => return rv,
         };
@@ -887,7 +796,7 @@ extern "C" fn C_DecryptInit(
     let mechanism = unsafe { *pMechanism };
     debug!("C_DecryptInit: mechanism is {:?}", mechanism);
     let cipher_mechanism =
-        match rsa_cipher_mechanism_from_ck_mechanism("C_DecryptInit", &mechanism) {
+        match parse_rsa_cipher_mechanism("C_DecryptInit", &mechanism) {
             Ok(cipher_mechanism) => cipher_mechanism,
             Err(rv) => return rv,
         };
@@ -1480,3 +1389,280 @@ pub extern "C" fn C_GetFunctionList(ppFunctionList: CK_FUNCTION_LIST_PTR_PTR) ->
 
 #[cfg_attr(target_os = "macos", link(name = "Security", kind = "framework"))]
 unsafe extern "C" {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::util::serialize_uint;
+    use std::sync::Once;
+
+    fn ensure_initialized() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            assert_eq!(C_Initialize(std::ptr::null_mut()), CKR_OK);
+        });
+    }
+
+    fn open_session() -> CK_SESSION_HANDLE {
+        ensure_initialized();
+        let mut session: CK_SESSION_HANDLE = 0;
+        assert_eq!(
+            C_OpenSession(
+                SLOT_ID,
+                CKF_SERIAL_SESSION,
+                std::ptr::null_mut(),
+                None,
+                &mut session
+            ),
+            CKR_OK
+        );
+        session
+    }
+
+    fn find_key(session: CK_SESSION_HANDLE) -> CK_OBJECT_HANDLE {
+        let class_value = serialize_uint(CKO_PRIVATE_KEY).unwrap();
+        let mut template = [CK_ATTRIBUTE {
+            attrType: CKA_CLASS,
+            pValue: class_value.as_ptr() as CK_VOID_PTR,
+            ulValueLen: class_value.len() as CK_ULONG,
+        }];
+        assert_eq!(C_FindObjectsInit(session, template.as_mut_ptr(), 1), CKR_OK);
+        let mut handles = [0u64; 4];
+        let mut count: CK_ULONG = 0;
+        assert_eq!(
+            C_FindObjects(session, handles.as_mut_ptr(), 4, &mut count),
+            CKR_OK
+        );
+        assert_eq!(count, 1);
+        assert_eq!(C_FindObjectsFinal(session), CKR_OK);
+        handles[0]
+    }
+
+    fn pkcs1_mechanism() -> CK_MECHANISM {
+        CK_MECHANISM {
+            mechanism: CKM_RSA_PKCS,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        }
+    }
+
+    fn oaep_mechanism(hash_alg: CK_MECHANISM_TYPE, mgf: CK_RSA_PKCS_MGF_TYPE) -> CK_MECHANISM {
+        let label = b"test-label".to_vec();
+        let params = Box::new(CK_RSA_PKCS_OAEP_PARAMS {
+            hashAlg: hash_alg,
+            mgf,
+            source: CKZ_DATA_SPECIFIED,
+            pSourceData: label.as_ptr() as CK_VOID_PTR,
+            ulSourceDataLen: label.len() as CK_ULONG,
+        });
+        // Leak is intentional for test brevity; the pointer must stay valid for the Init call.
+        let params_ptr = Box::into_raw(params);
+        std::mem::forget(label);
+        CK_MECHANISM {
+            mechanism: CKM_RSA_PKCS_OAEP,
+            pParameter: params_ptr as CK_VOID_PTR,
+            ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>() as CK_ULONG,
+        }
+    }
+
+    #[test]
+    fn mechanism_info_rsa_pkcs() {
+        let mut info = CK_MECHANISM_INFO::default();
+        assert_eq!(C_GetMechanismInfo(SLOT_ID, CKM_RSA_PKCS, &mut info), CKR_OK);
+        assert_eq!(
+            unsafe_packed_field_access!(info.flags),
+            CKF_SIGN | CKF_DECRYPT | CKF_ENCRYPT
+        );
+        assert_eq!(unsafe_packed_field_access!(info.ulMinKeySize), 1024);
+        assert_eq!(unsafe_packed_field_access!(info.ulMaxKeySize), 16384);
+    }
+
+    #[test]
+    fn mechanism_info_rsa_oaep() {
+        let mut info = CK_MECHANISM_INFO::default();
+        assert_eq!(
+            C_GetMechanismInfo(SLOT_ID, CKM_RSA_PKCS_OAEP, &mut info),
+            CKR_OK
+        );
+        assert_eq!(
+            unsafe_packed_field_access!(info.flags),
+            CKF_ENCRYPT | CKF_DECRYPT
+        );
+        assert_eq!(unsafe_packed_field_access!(info.ulMinKeySize), 1024);
+        assert_eq!(unsafe_packed_field_access!(info.ulMaxKeySize), 16384);
+    }
+
+    #[test]
+    fn mechanism_info_unsupported_mechanism_rejected() {
+        let mut info = CK_MECHANISM_INFO::default();
+        assert_eq!(
+            C_GetMechanismInfo(SLOT_ID, CKM_SHA256, &mut info),
+            CKR_MECHANISM_INVALID
+        );
+    }
+
+    #[test]
+    fn decrypt_init_accepts_oaep_and_rejects_bad_mgf() {
+        let session = open_session();
+        let key = find_key(session);
+        assert_eq!(
+            C_DecryptInit(session, &mut oaep_mechanism(CKM_SHA256, CKG_MGF1_SHA256), key),
+            CKR_OK
+        );
+        // The successful init above started an operation on this session; use a fresh one.
+        let session = open_session();
+        assert_eq!(
+            C_DecryptInit(session, &mut oaep_mechanism(CKM_SHA256, CKG_MGF1_SHA1), key),
+            CKR_MECHANISM_INVALID
+        );
+    }
+
+    #[test]
+    fn buffer_too_small_preserves_decrypt_operation() {
+        let session = open_session();
+        let key = find_key(session);
+        assert_eq!(
+            C_DecryptInit(session, &mut pkcs1_mechanism(), key),
+            CKR_OK
+        );
+        // Inputs shorter than the stub threshold make length queries fail with
+        // CKR_BUFFER_TOO_SMALL; this must not terminate the operation.
+        let mut short_input = [0xEE_u8; 32];
+        let mut out_len: CK_ULONG = 0;
+        assert_eq!(
+            C_Decrypt(
+                session,
+                short_input.as_mut_ptr(),
+                short_input.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                &mut out_len
+            ),
+            CKR_BUFFER_TOO_SMALL
+        );
+        let mut small_out = [0u8; 16];
+        let mut out_len: CK_ULONG = small_out.len() as CK_ULONG;
+        assert_eq!(
+            C_Decrypt(
+                session,
+                short_input.as_mut_ptr(),
+                short_input.len() as CK_ULONG,
+                small_out.as_mut_ptr(),
+                &mut out_len
+            ),
+            CKR_BUFFER_TOO_SMALL
+        );
+        // The operation is still active: a well-formed request now succeeds.
+        let mut long_input = [0x5A_u8; 128];
+        let mut big_out = [0u8; 256];
+        let mut out_len: CK_ULONG = big_out.len() as CK_ULONG;
+        assert_eq!(
+            C_Decrypt(
+                session,
+                long_input.as_mut_ptr(),
+                long_input.len() as CK_ULONG,
+                big_out.as_mut_ptr(),
+                &mut out_len
+            ),
+            CKR_OK
+        );
+        assert_eq!(out_len, 128);
+        assert!(big_out[..128].iter().all(|&b| b == 0xAB));
+        // A successful C_Decrypt consumes the operation; another attempt fails.
+        let mut out_len: CK_ULONG = big_out.len() as CK_ULONG;
+        assert_eq!(
+            C_Decrypt(
+                session,
+                long_input.as_mut_ptr(),
+                long_input.len() as CK_ULONG,
+                big_out.as_mut_ptr(),
+                &mut out_len
+            ),
+            CKR_FUNCTION_FAILED
+        );
+    }
+
+    #[test]
+    fn buffer_too_small_preserves_encrypt_operation() {
+        let session = open_session();
+        let key = find_key(session);
+        assert_eq!(
+            C_EncryptInit(session, &mut pkcs1_mechanism(), key),
+            CKR_OK
+        );
+        let mut short_input = [0xEE_u8; 32];
+        let mut out_len: CK_ULONG = 0;
+        assert_eq!(
+            C_Encrypt(
+                session,
+                short_input.as_mut_ptr(),
+                short_input.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                &mut out_len
+            ),
+            CKR_BUFFER_TOO_SMALL
+        );
+        let mut long_input = [0x5A_u8; 128];
+        let mut big_out = [0u8; 256];
+        let mut out_len: CK_ULONG = big_out.len() as CK_ULONG;
+        assert_eq!(
+            C_Encrypt(
+                session,
+                long_input.as_mut_ptr(),
+                long_input.len() as CK_ULONG,
+                big_out.as_mut_ptr(),
+                &mut out_len
+            ),
+            CKR_OK
+        );
+        assert_eq!(out_len, 128);
+        assert!(big_out[..128].iter().all(|&b| b == 0xCD));
+    }
+
+    #[test]
+    fn close_session_clears_decrypt_operation() {
+        let session = open_session();
+        let key = find_key(session);
+        assert_eq!(
+            C_DecryptInit(session, &mut pkcs1_mechanism(), key),
+            CKR_OK
+        );
+        assert_eq!(C_CloseSession(session), CKR_OK);
+        let mut long_input = [0x5A_u8; 128];
+        let mut big_out = [0u8; 256];
+        let mut out_len: CK_ULONG = big_out.len() as CK_ULONG;
+        assert_eq!(
+            C_Decrypt(
+                session,
+                long_input.as_mut_ptr(),
+                long_input.len() as CK_ULONG,
+                big_out.as_mut_ptr(),
+                &mut out_len
+            ),
+            CKR_FUNCTION_FAILED
+        );
+    }
+
+    #[test]
+    fn close_session_clears_encrypt_operation() {
+        let session = open_session();
+        let key = find_key(session);
+        assert_eq!(
+            C_EncryptInit(session, &mut pkcs1_mechanism(), key),
+            CKR_OK
+        );
+        assert_eq!(C_CloseSession(session), CKR_OK);
+        let mut long_input = [0x5A_u8; 128];
+        let mut big_out = [0u8; 256];
+        let mut out_len: CK_ULONG = big_out.len() as CK_ULONG;
+        assert_eq!(
+            C_Encrypt(
+                session,
+                long_input.as_mut_ptr(),
+                long_input.len() as CK_ULONG,
+                big_out.as_mut_ptr(),
+                &mut out_len
+            ),
+            CKR_FUNCTION_FAILED
+        );
+    }
+}

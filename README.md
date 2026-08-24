@@ -265,6 +265,39 @@ out/osclientcerts.dll
 
 from the crate sources using the Docker-based toolchain described above.
 
+## Unit tests
+
+The crate includes a unit test suite that runs on an ordinary development host (Linux) inside the
+same Docker image used for the Windows cross-build. To make this possible, the RSA cipher
+mechanism parsing lives in a platform-neutral module (`src/mechanism.rs`), and a deterministic
+stub backend (`src/backend_other.rs`, compiled only for platforms without a real backend) lets the
+manager and the PKCS#11 FFI layer be exercised end-to-end without OS crypto APIs:
+
+```text
+test-fork-osclientcerts.sh   # cargo test --release in the Docker image
+```
+
+Current coverage (40 tests):
+
+- `src/mechanism.rs` - OAEP/PKCS#1 mechanism parsing: SHA-1/256/384/512 parameter sets, label
+  handling, mismatched MGF rejection, unsupported digest rejection, invalid source rejection,
+  malformed parameter length/pointer rejection.
+- `src/lib.rs` (FFI level) - `C_GetMechanismInfo` for `CKM_RSA_PKCS` and `CKM_RSA_PKCS_OAEP`;
+  OAEP accepted by `C_DecryptInit` while bad MGF is rejected; `CKR_BUFFER_TOO_SMALL` from
+  `C_Decrypt` / `C_Encrypt` does not terminate the active operation (PKCS#11 retry semantics);
+  closing a session terminates active decrypt/encrypt operations.
+- `src/manager.rs` - session-close cleanup of decrypt/encrypt state; failed length queries do not
+  consume operations.
+- `src/util.rs` - `CryptoError` to `CK_RV` mapping (platform-specific CNG status mappings are
+  asserted on Windows builds), DER helpers.
+
+The stub backend intentionally fails length queries for inputs shorter than 64 bytes with
+`CryptoError::BufferTooSmall(128)` and returns fixed-pattern output otherwise, which makes the
+buffer-retry state machines deterministically testable.
+
+Note: plaintext/ciphertext size boundaries (RSA PKCS#1 v1.5 `k-11`, OAEP `k-2-2hLen`) are enforced
+inside Windows CNG, not in this provider, so they cannot be unit-tested at the provider layer.
+
 ## Important upstream/research repositories
 
 ### Mozilla historical osclientcerts
@@ -325,6 +358,16 @@ The current provider is intentionally narrow.
 - The provider currently focuses on the Windows user's `My` certificate store.
 
 ## Release notes
+
+### 0.3.2
+
+- Added a unit test suite (40 tests) that runs on the Linux build host inside the existing Docker
+  image (`cargo test`): OAEP/PKCS#1 mechanism parsing, `C_GetMechanismInfo` advertisement,
+  PKCS#11 buffer-too-small retry semantics for decrypt/encrypt, session-close operation cleanup,
+  and error-code mapping.
+- Refactored RSA cipher mechanism parsing into the platform-neutral `src/mechanism.rs` module and
+  added a deterministic stub backend (`src/backend_other.rs`) so the manager and FFI layers
+  compile and run on non-Windows/non-macOS hosts. No changes to Windows runtime behavior.
 
 ### 0.3.1
 
