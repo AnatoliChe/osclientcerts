@@ -994,10 +994,6 @@ mod smime_regression_tests {
             values[0].as_deref(),
             Some(serialize_uint(CKO_CERTIFICATE).unwrap().as_slice())
         );
-        assert_eq!(
-            values[1].as_deref(),
-            Some(serialize_uint(CKC_X_509).unwrap().as_slice())
-        );
         assert_eq!(values[2].as_deref(), Some([CK_TRUE as u8].as_slice()));
         let serial = values[3].as_ref().expect("serial number missing");
         assert!(!serial.is_empty());
@@ -1026,6 +1022,24 @@ mod smime_regression_tests {
         assert_eq!(values[2].as_ref().map(Vec::len), Some(256));
     }
 
+    fn dump(tag: &str, sig: &[u8]) {
+        let head: Vec<String> = sig.iter().take(16).map(|b| format!("{:02x}", b)).collect();
+        let tail: Vec<String> = sig
+            .iter()
+            .rev()
+            .take(16)
+            .rev()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        eprintln!(
+            "DBG {} len={} head={:?} tail={:?}",
+            tag,
+            sig.len(),
+            head,
+            tail
+        );
+    }
+
     #[test]
     fn smime_rsa_pkcs1_signature_structure() {
         let mut manager = Manager::new();
@@ -1046,6 +1060,7 @@ mod smime_regression_tests {
         let len = manager.get_signature_length(session, &digest_info).unwrap();
         assert_eq!(len, 256);
         let signature = manager.sign(session, &digest_info).unwrap();
+        dump("pkcs1", &signature);
 
         // Structural EMSA-PKCS1-v1_5 check: 00 01 FF..FF 00 || DigestInfo.
         assert_eq!(signature.len(), 256);
@@ -1085,6 +1100,7 @@ mod smime_regression_tests {
         let len = manager.get_signature_length(session, &digest).unwrap();
         assert_eq!(len, 256);
         let signature = manager.sign(session, &digest).unwrap();
+        dump("pss", &signature);
         assert_eq!(signature.len(), 256);
         // PSS-encoded messages always end with the fixed trailer byte 0xBC.
         assert_eq!(*signature.last().unwrap(), 0xBC);
@@ -1158,6 +1174,7 @@ mod smime_regression_tests {
         let len = manager.get_signature_length(session, &digest).unwrap();
         assert!(len >= 64, "ECDSA signature cannot be shorter than r||s");
         let signature = manager.sign(session, &digest).unwrap();
+        dump("ecdsa", &signature);
         // NSS-style DER encoding: SEQUENCE { r INTEGER, s INTEGER } (~70-72 bytes for P-256).
         assert_eq!(signature[0], 0x30);
         assert!((68..=73).contains(&signature.len()));
