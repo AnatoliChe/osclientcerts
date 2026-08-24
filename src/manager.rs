@@ -933,7 +933,7 @@ mod smime_regression_tests {
         let mut found = None;
         for handle in handles {
             let values = manager
-                .get_attributes(handle, &[CKA_ISSUER, CKA_ID])
+                .get_attributes(handle, vec![CKA_ISSUER, CKA_ID])
                 .expect("get_attributes failed");
             if values[0]
                 .as_ref()
@@ -981,7 +981,7 @@ mod smime_regression_tests {
         let values = manager
             .get_attributes(
                 cert_handle,
-                &[
+                vec![
                     CKA_CLASS,
                     CKA_CERTIFICATE_TYPE,
                     CKA_TOKEN,
@@ -1012,7 +1012,7 @@ mod smime_regression_tests {
         let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session, MARKER_RSA);
         let key_handle = find_key_for_cert(&mut manager, session, cert_id);
         let values = manager
-            .get_attributes(key_handle, &[CKA_CLASS, CKA_KEY_TYPE, CKA_MODULUS])
+            .get_attributes(key_handle, vec![CKA_CLASS, CKA_KEY_TYPE, CKA_MODULUS])
             .expect("key get_attributes failed");
         assert_eq!(
             values[0].as_deref(),
@@ -1060,7 +1060,7 @@ mod smime_regression_tests {
             .chain(Sha256::digest(b"smime regression pkcs1"))
             .collect::<Vec<u8>>();
         assert_eq!(
-            &signature[signature.len() - rebuilt.len()],
+            &signature[signature.len() - rebuilt.len()..],
             rebuilt.as_slice()
         );
     }
