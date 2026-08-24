@@ -1260,7 +1260,8 @@ mod smime_regression_tests {
         let location_flags = CERT_SYSTEM_STORE_CURRENT_USER
             | CERT_STORE_OPEN_EXISTING_FLAG
             | CERT_STORE_READONLY_FLAG;
-        let store_name = wide("My");
+        // The _A provider variant expects an ANSI store name.
+        let store_name = b"My\0";
         let store = wincrypt::CertOpenStore(
             CERT_STORE_PROV_SYSTEM_REGISTRY_A,
             0,
