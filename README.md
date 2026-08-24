@@ -9,6 +9,7 @@ A standalone Windows PKCS#11 provider based on Mozilla's historical `osclientcer
 >
 > Release history: [CHANGELOG.md](CHANGELOG.md)
 > Developer documentation (architecture, building, tests, CI): [DEVELOPMENT.md](DEVELOPMENT.md)
+> Troubleshooting S/MIME (combined provider + Thunderbird logs): [DEBUGGING.md](DEBUGGING.md)
 
 ## Goal
 
@@ -142,7 +143,7 @@ The current provider is intentionally narrow.
 - Multi-part `C_EncryptUpdate` / `C_EncryptFinal` and `C_DecryptUpdate` / `C_DecryptFinal` are not implemented.
 - The provider currently focuses on the Windows user's `My` certificate store.
 
-## Thunderbird testing
+## Thunderbird installing
 
 The provider is intended to be loaded by Thunderbird as a PKCS#11 security module.
 
@@ -161,16 +162,7 @@ Note that Thunderbird keeps the DLL loaded (and locked) while it runs: after reb
 remove and re-add the module in the Security Devices dialog, or simply restart Thunderbird with
 the updated file at the same path.
 
-The most useful diagnostics are the provider logs around:
-
-```text
-C_GetMechanismInfo
-C_DecryptInit
-C_Decrypt
-NCryptDecrypt
-```
-
-The Windows `SECURITY_STATUS` returned by `NCryptDecrypt` should be preserved when diagnosing failures.
+If decryption fails, see [DEBUGGING.md](DEBUGGING.md) for collecting provider and Thunderbird logs.
 
 ## Debug logging
 
@@ -202,46 +194,8 @@ The diagnostic output is intended to reveal:
 - signing/decryption operations
 - Windows CNG status codes (hexadecimal `SECURITY_STATUS` values)
 
-### Collecting combined provider and Thunderbird logs
-
-For diagnosing S/MIME problems it is useful to capture both the provider log (stderr, redirected to a
-file) and Thunderbird's own NSS/PSM logging (`MOZ_LOG` / `MOZ_LOG_FILE`). A convenient way is a small
-`.bat` launcher:
-
-```bat
-@echo off
-if not exist C:\TBLog mkdir C:\TBLog
-
-rem Make sure we start a fresh TB process (env vars only reach a new process):
-taskkill /IM thunderbird.exe >nul 2>&1
-timeout /t 2 /nobreak >nul
-
-cd /d "C:\Program Files\Mozilla Thunderbird"
-
-rem Provider log (env_logger -> stderr), redirected to a file below:
-set RUST_LOG=osclientcerts=debug
-
-rem NSS/PSM/S/MIME logs; %%PID%% passes literal %PID% which TB substitutes:
-set MOZ_LOG=pipnss:5,smime:5,certverifier:5,timestamp
-set MOZ_LOG_FILE=C:\TBLog\tb-nss-%%PID%%.log
-
-thunderbird.exe > C:\TBLog\osclientcerts.log 2>&1
-```
-
-Notes:
-
-- The provider log ends up in `C:\TBLog\osclientcerts.log`; the Thunderbird logs in
-  `C:\TBLog\tb-nss-<pid>.log` (one per process).
-- In a `.bat` file `%%PID%%` is required so that cmd passes the literal `%PID%` placeholder through;
-  Thunderbird replaces it with the actual process id.
-- `taskkill` guards against the common pitfall of attaching environment variables to an
-  already-running Thunderbird instance: a second launch just opens a window of the existing process
-  and exits, so no logs are produced.
-- `pipnss` shows PKCS#11 module loading and token operations, `smime` shows CMS parsing and the
-  S/MIME decrypt path (including whether NSS finds a matching recipient certificate before ever
-  calling into the module), `certverifier` shows chain validation.
-- Save the file in ANSI encoding if it contains non-ASCII characters; cmd on localized Windows does
-  not read UTF-8 batch files correctly.
+For diagnosing S/MIME problems you can capture the provider log together with Thunderbird's own
+NSS/PSM logs (`MOZ_LOG`) using a small `.bat` launcher - see [DEBUGGING.md](DEBUGGING.md).
 
 ## License
 
