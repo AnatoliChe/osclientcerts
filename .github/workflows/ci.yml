@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [trunk]
+    tags: ['v*']
+  pull_request:
+    branches: [trunk]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Unit tests (Linux host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run tests
+        run: cargo test --release
+
+  build-windows:
+    name: Build DLL (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release DLL
+        run: cargo build --release
+        env:
+          # bindgen needs libclang; the windows-latest image ships LLVM here.
+          LIBCLANG_PATH: 'C:\Program Files\LLVM\bin'
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: osclientcerts.dll
+          path: target/release/osclientcerts.dll
+          if-no-files-found: error
+
+  release:
+    name: Release (tag build)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download DLL built by build-windows
+        uses: actions/download-artifact@v4
+        with:
+          name: osclientcerts.dll
+
+      - name: Attach DLL to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: osclientcerts.dll
