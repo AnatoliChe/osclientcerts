@@ -2,7 +2,9 @@
 
 A standalone Windows PKCS#11 provider based on Mozilla's historical `osclientcerts` project, extended for use with Thunderbird/NSS and Windows CNG-backed certificates and private keys.
 
-> **Project status:** experimental. The provider builds as a standalone Windows x64 DLL and implements RSA signing, encryption and decryption on top of the original signing-only upstream code. Real-world Thunderbird S/MIME interoperability (signing, sending encrypted mail and decrypting received mail with non-exportable CNG keys) has been validated.
+[![CI](https://github.com/AnatoliChe/osclientcerts/actions/workflows/ci.yml/badge.svg)](https://github.com/AnatoliChe/osclientcerts/actions/workflows/ci.yml)
+
+> **Project status:** working. The provider builds as a standalone Windows x64 DLL and implements RSA signing, encryption and decryption (PKCS#1 v1.5 and OAEP) as well as RSA-PSS and ECDSA signing on top of the original signing-only upstream code. Real-world Thunderbird S/MIME interoperability (signing, sending encrypted mail and decrypting received mail with non-exportable CNG keys) has been validated. The RSA cipher mechanism parsing, the PKCS#11 operation state machines and the error-code mapping are covered by a unit test suite that runs in CI on every push.
 
 ## Goal
 
@@ -298,6 +300,22 @@ buffer-retry state machines deterministically testable.
 Note: plaintext/ciphertext size boundaries (RSA PKCS#1 v1.5 `k-11`, OAEP `k-2-2hLen`) are enforced
 inside Windows CNG, not in this provider, so they cannot be unit-tested at the provider layer.
 
+## Continuous integration
+
+GitHub Actions run on every push to `trunk` and on pull requests (`.github/workflows/ci.yml`):
+
+| Job | Runner | What it does |
+|---|---|---|
+| `test` | `ubuntu-latest` | Runs the unit test suite (`cargo test --release`, host target via the stub backend) |
+| `build-windows` | `windows-latest` | Native MSVC build of `osclientcerts.dll`; the DLL is uploaded as a workflow artifact for inspection |
+| `release` | `windows-latest` | On a pushed tag `v*`: builds the DLL and attaches it to a GitHub release |
+
+Notes:
+
+- The native Windows runner build uses whatever MSVC/Rust versions GitHub installs, so its
+  artifact is convenient but **not** the canonical release binary. Release DLLs are built with the
+  pinned Docker toolchain described above; CI release automation exists as a fallback/convenience.
+
 ## Important upstream/research repositories
 
 ### Mozilla historical osclientcerts
@@ -339,6 +357,9 @@ Historical Windows PKCS#11 provider based on CryptoAPI. A prebuilt DLL was teste
 [done] PKCS#11-compliant CKR_BUFFER_TOO_SMALL handling for sign/encrypt/decrypt
 [done] Cleanup of active operations on session close
 [done] RSA-OAEP encryption and decryption (CKM_RSA_PKCS_OAEP)
+[done] Rust edition 2024
+[done] Unit test suite running in CI on every push
+[done] CI: automated Windows DLL build artifacts on GitHub Actions
 [pending] Validate RSA-OAEP with Thunderbird/NSS end-to-end
 [pending] Validate additional Windows CNG key providers/HSMs
 [pending] Consider legacy CAPI/CSP support if required
