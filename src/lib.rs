@@ -238,7 +238,7 @@ extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, pInfo: CK_TOKEN_INFO_PTR) -> CK
 }
 
 /// This gets called to determine what mechanisms a slot supports. This implementation supports
-/// ECDSA, RSA PKCS, and RSA PSS.
+/// ECDSA, RSA PKCS, RSA PSS, and RSA OAEP.
 extern "C" fn C_GetMechanismList(
     slotID: CK_SLOT_ID,
     pMechanismList: CK_MECHANISM_TYPE_PTR,
