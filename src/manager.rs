@@ -10,6 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::backend_macos as backend;
 #[cfg(target_os = "windows")]
 use crate::backend_windows as backend;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+use crate::backend_other as backend;
 use backend::*;
 
 use crate::util::hex_encode;
@@ -792,5 +794,87 @@ impl Manager {
             Some(Object::Key(key)) => key.encrypt(data, &mechanism),
             _ => Err(CryptoError::InvalidKey),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::util::serialize_uint;
+
+    /// Open a session and find the single private-key object the stub backend provides.
+    fn find_key_handle(manager: &mut Manager) -> CK_OBJECT_HANDLE {
+        let search_session = manager.open_session().expect("open_session failed");
+        manager
+            .start_search(
+                search_session,
+                &[(CKA_CLASS, serialize_uint(CKO_PRIVATE_KEY).unwrap())],
+            )
+            .expect("start_search failed");
+        let handles = manager
+            .search(search_session, 10)
+            .expect("search failed");
+        manager.clear_search(search_session).unwrap();
+        assert_eq!(handles.len(), 1);
+        handles[0]
+    }
+
+    #[test]
+    fn close_session_clears_decrypt_operation() {
+        let mut manager = Manager::new();
+        let key_handle = find_key_handle(&mut manager);
+        let session = manager.open_session().unwrap();
+        manager
+            .start_decrypt(session, key_handle, RsaCipherMechanism::Pkcs1v15)
+            .expect("start_decrypt failed");
+        // Closing the session must terminate the active operation.
+        manager.close_session(session).unwrap();
+        assert_eq!(
+            manager.get_decrypted_length(session, &[0x5A; 128]),
+            Err(CryptoError::OperationFailed)
+        );
+        assert_eq!(
+            manager.decrypt(session, &[0x5A; 128]),
+            Err(CryptoError::OperationFailed)
+        );
+    }
+
+    #[test]
+    fn close_session_clears_encrypt_operation() {
+        let mut manager = Manager::new();
+        let key_handle = find_key_handle(&mut manager);
+        let session = manager.open_session().unwrap();
+        manager
+            .start_encrypt(session, key_handle, RsaCipherMechanism::Pkcs1v15)
+            .expect("start_encrypt failed");
+        manager.close_session(session).unwrap();
+        assert_eq!(
+            manager.get_encrypted_length(session, &[0x5A; 128]),
+            Err(CryptoError::OperationFailed)
+        );
+        assert_eq!(
+            manager.encrypt(session, &[0x5A; 128]),
+            Err(CryptoError::OperationFailed)
+        );
+    }
+
+    #[test]
+    fn decrypt_operation_survives_failed_length_query() {
+        let mut manager = Manager::new();
+        let key_handle = find_key_handle(&mut manager);
+        let session = manager.open_session().unwrap();
+        manager
+            .start_decrypt(session, key_handle, RsaCipherMechanism::Pkcs1v15)
+            .unwrap();
+        // The stub backend reports BufferTooSmall for short inputs; a failed length query must
+        // not consume the operation.
+        assert_eq!(
+            manager.get_decrypted_length(session, &[0xEE; 32]),
+            Err(CryptoError::BufferTooSmall(128))
+        );
+        assert_eq!(
+            manager.decrypt(session, &[0x5A; 128]).unwrap(),
+            vec![0xAB; 128]
+        );
     }
 }

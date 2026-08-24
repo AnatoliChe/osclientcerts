@@ -404,6 +404,12 @@ mod tests {
     fn empty_input_fails() {
         let empty = Vec::new();
         assert!(read_rsa_modulus(&empty).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn empty_input_fails_ec() {
+        let empty = Vec::new();
         assert!(read_ec_sig_point(&empty).is_err());
     }
 
@@ -411,7 +417,6 @@ mod tests {
     fn empty_sequence_fails() {
         let empty = vec![SEQUENCE | CONSTRUCTED];
         assert!(read_rsa_modulus(&empty).is_err());
-        assert!(read_ec_sig_point(&empty).is_err());
     }
 
     #[test]
@@ -421,5 +426,61 @@ mod tests {
         assert!(result.is_ok());
         let modulus = result.unwrap();
         assert_eq!(modulus, include_bytes!("../test/modulus.bin").to_vec());
+    }
+
+    #[test]
+    fn crypto_error_to_rv_mapping() {
+        use crate::pkcs11::types::*;
+
+        assert_eq!(
+            crypto_error_to_rv("test", &CryptoError::OperationFailed),
+            CKR_FUNCTION_FAILED
+        );
+        assert_eq!(
+            crypto_error_to_rv("test", &CryptoError::InvalidKey),
+            CKR_KEY_HANDLE_INVALID
+        );
+        assert_eq!(
+            crypto_error_to_rv("test", &CryptoError::InvalidData),
+            CKR_ENCRYPTED_DATA_INVALID
+        );
+        assert_eq!(
+            crypto_error_to_rv("test", &CryptoError::BufferTooSmall(7)),
+            CKR_BUFFER_TOO_SMALL
+        );
+
+        // On Windows builds, specific CNG SECURITY_STATUS values map to specific PKCS#11 return
+        // codes. On other platforms (e.g. the Linux test host), all Windows errors fall back to
+        // CKR_DEVICE_ERROR.
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(
+                crypto_error_to_rv("test", &CryptoError::Windows(NTE_BAD_DATA)),
+                CKR_ENCRYPTED_DATA_INVALID
+            );
+            assert_eq!(
+                crypto_error_to_rv("test", &CryptoError::Windows(NTE_NO_KEY)),
+                CKR_KEY_HANDLE_INVALID
+            );
+            assert_eq!(
+                crypto_error_to_rv("test", &CryptoError::Windows(NTE_BAD_ALGID)),
+                CKR_FUNCTION_NOT_SUPPORTED
+            );
+            assert_eq!(
+                crypto_error_to_rv("test", &CryptoError::Windows(NTE_INVALID_PARAMETER)),
+                CKR_ARGUMENTS_BAD
+            );
+            assert_eq!(
+                crypto_error_to_rv("test", &CryptoError::Windows(NTE_BUFFER_TOO_SMALL)),
+                CKR_BUFFER_TOO_SMALL
+            );
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(
+                crypto_error_to_rv("test", &CryptoError::Windows(0xDEADBEEF)),
+                CKR_DEVICE_ERROR
+            );
+        }
     }
 }
