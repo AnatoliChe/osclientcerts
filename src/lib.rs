@@ -1380,7 +1380,9 @@ pub extern "C" fn C_GetFunctionList(ppFunctionList: CK_FUNCTION_LIST_PTR_PTR) ->
 #[cfg_attr(target_os = "macos", link(name = "Security", kind = "framework"))]
 unsafe extern "C" {}
 
-#[cfg(test)]
+// These tests exercise the stub backend semantics (deterministic key discovery and
+// cipher outputs), which only exists on platforms without a real backend.
+#[cfg(all(test, not(any(target_os = "macos", target_os = "windows"))))]
 mod tests {
     use super::*;
     use crate::util::serialize_uint;

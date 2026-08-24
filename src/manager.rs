@@ -809,7 +809,9 @@ impl Manager {
     }
 }
 
-#[cfg(test)]
+// These tests exercise the stub backend semantics (deterministic key discovery and
+// cipher outputs), which only exists on platforms without a real backend.
+#[cfg(all(test, not(any(target_os = "macos", target_os = "windows"))))]
 mod tests {
     use super::*;
     use crate::util::serialize_uint;
