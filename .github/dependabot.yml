@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Cargo dependencies: weekly PRs. Updates are proposed, never auto-merged - a crate update
+  # can change ABI, MSRV, FFI types or bindgen behavior, so each PR needs review and a green CI.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # GitHub Actions versions: monthly PRs (checkout, rust-toolchain, upload/download-artifact,
+  # gh-release).
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
