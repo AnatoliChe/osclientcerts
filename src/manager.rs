@@ -616,6 +616,9 @@ struct Manager {
     /// A set of key identifiers (not the same as handles). For each id in this set, there should be
     /// a corresponding identical id in the `cert_ids` set, and vice-versa.
     key_ids: BTreeSet<Vec<u8>>,
+    /// A set of trust-record identifiers (not the same as handles, and not related to
+    /// `cert_ids`/`key_ids` -- see `Trust::id`).
+    trust_ids: BTreeSet<Vec<u8>>,
     /// The next session handle to hand out.
     next_session: CK_SESSION_HANDLE,
     /// The next object handle to hand out.
@@ -636,6 +639,7 @@ impl Manager {
             objects: BTreeMap::new(),
             cert_ids: BTreeSet::new(),
             key_ids: BTreeSet::new(),
+            trust_ids: BTreeSet::new(),
             next_session: 1,
             next_handle: 1,
             last_scan_time: None,
@@ -672,6 +676,13 @@ impl Manager {
                 Object::Key(key) => {
                     debug!("key: id {}", hex_encode(key.id()),);
                 }
+                Object::Trust(trust) => {
+                    debug!(
+                        "trust: issuer {}, serial {}",
+                        hex_encode(trust.issuer()),
+                        hex_encode(trust.serial_number()),
+                    );
+                }
             }
         }
         for object in objects {
@@ -689,6 +700,14 @@ impl Manager {
                         continue;
                     }
                     self.key_ids.insert(key.id().to_vec());
+                    let handle = self.get_next_handle();
+                    self.objects.insert(handle, object);
+                }
+                Object::Trust(trust) => {
+                    if self.trust_ids.contains(&trust.id()) {
+                        continue;
+                    }
+                    self.trust_ids.insert(trust.id());
                     let handle = self.get_next_handle();
                     self.objects.insert(handle, object);
                 }

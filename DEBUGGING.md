@@ -113,5 +113,11 @@ appears at all for the send attempt (with `RUST_LOG=osclientcerts=debug` it's al
 
   This shows up for certificates from an internal/corporate CA that Windows trusts (so
   `CryptAcquireCertificatePrivateKey`/CNG and Thunderbird's "Test" button work fine) but that
-  hasn't been imported and marked trusted in Thunderbird's own certificate store -- see
-  [the installation notes in the README](README.md#thunderbird-installing) for the fix.
+  Thunderbird's own NSS certificate store doesn't consider trusted for email. As of this version,
+  the provider itself bridges this automatically for CAs present in Windows' "Trusted Root
+  Certification Authorities" store (see "Certificate trust: Windows vs. Thunderbird" in
+  [README.md](README.md#thunderbird-installing)) -- check the provider log for `granting NSS
+  email trust to Windows-trusted root CA "..."`. If that line is missing for your CA, either it
+  isn't in the Windows ROOT store specifically, or its EKU excludes email protection (both logged
+  at `debug` level); either way, the manual Thunderbird import documented in the README is the
+  fallback.

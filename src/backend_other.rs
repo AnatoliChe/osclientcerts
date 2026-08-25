@@ -179,11 +179,35 @@ impl Key {
     }
 }
 
-/// A helper enum that represents the two types of PKCS #11 objects we support: certificates and
-/// keys.
+/// A stand-in for the Windows backend's `Trust` (Windows-root-trusted-CA email trust record).
+/// This stub backend never constructs one -- it exists only so shared code in `manager.rs` that
+/// matches on all three `Object` variants compiles the same way on every platform.
+pub struct Trust {
+    attrs: Attrs,
+}
+
+impl Trust {
+    pub fn issuer(&self) -> &[u8] {
+        self.attrs.get(CKA_ISSUER).unwrap()
+    }
+
+    pub fn serial_number(&self) -> &[u8] {
+        self.attrs.get(CKA_SERIAL_NUMBER).unwrap()
+    }
+
+    pub fn id(&self) -> Vec<u8> {
+        let mut id = self.issuer().to_vec();
+        id.extend_from_slice(self.serial_number());
+        id
+    }
+}
+
+/// A helper enum that represents the types of PKCS #11 objects we support: certificates, keys,
+/// and (Windows-only) trust records.
 pub enum Object {
     Cert(Cert),
     Key(Key),
+    Trust(Trust),
 }
 
 impl Object {
@@ -191,6 +215,7 @@ impl Object {
         match self {
             Object::Cert(cert) => cert.attrs.matches(attrs),
             Object::Key(key) => key.attrs.matches(attrs),
+            Object::Trust(trust) => trust.attrs.matches(attrs),
         }
     }
 
@@ -198,6 +223,7 @@ impl Object {
         match self {
             Object::Cert(cert) => cert.attrs.get(attribute),
             Object::Key(key) => key.attrs.get(attribute),
+            Object::Trust(trust) => trust.attrs.get(attribute),
         }
     }
 }

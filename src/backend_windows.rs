@@ -251,6 +251,147 @@ impl Cert {
     }
 }
 
+// NSS-specific (vendor) PKCS #11 object class, attribute types and trust values. These are not
+// part of the base PKCS #11 spec covered by the `pkcs11` crate; the numeric values are taken
+// directly from NSS's own `security/nss/lib/util/pkcs11n.h`. They're used only to build the
+// synthetic `CKO_NSS_TRUST` objects below.
+// Not exported by the `pkcs11` crate (it has no notion of trust objects at all).
+type CK_TRUST = CK_ULONG;
+
+const NSSCK_VENDOR_NSS: CK_ATTRIBUTE_TYPE = 0x4E53_4350; // "NSCP"
+const CKO_NSS: CK_OBJECT_CLASS = CKO_VENDOR_DEFINED | (NSSCK_VENDOR_NSS as CK_OBJECT_CLASS);
+const CKO_NSS_TRUST: CK_OBJECT_CLASS = CKO_NSS + 3;
+const CKA_NSS: CK_ATTRIBUTE_TYPE = CKA_VENDOR_DEFINED | NSSCK_VENDOR_NSS;
+const CKA_NSS_TRUST_BASE: CK_ATTRIBUTE_TYPE = CKA_NSS + 0x2000;
+const CKA_NSS_TRUST_SERVER_AUTH: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 8;
+const CKA_NSS_TRUST_CLIENT_AUTH: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 9;
+const CKA_NSS_TRUST_CODE_SIGNING: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 10;
+const CKA_NSS_TRUST_EMAIL_PROTECTION: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 11;
+const CKA_NSS_TRUST_STEP_UP_APPROVED: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 16;
+const CKT_VENDOR_DEFINED: CK_TRUST = 0x8000_0000;
+const CKT_NSS: CK_TRUST = CKT_VENDOR_DEFINED | (NSSCK_VENDOR_NSS as CK_TRUST);
+const CKT_NSS_TRUSTED_DELEGATOR: CK_TRUST = CKT_NSS + 2;
+const CKT_NSS_TRUST_UNKNOWN: CK_TRUST = CKT_NSS + 5;
+
+/// A synthetic `CKO_NSS_TRUST` object that grants NSS's `certUsageEmailRecipient` trust to a CA
+/// certificate. NSS's CMS signing code (`NSS_CMSSignerInfo_AddSMIMEEncKeyPrefs`) requires the
+/// sender's own certificate to verify as trusted for that usage *before it ever calls into a
+/// PKCS #11 module to sign anything* -- and by default it looks for trust not just in its own
+/// certificate database, but in a `CKO_NSS_TRUST` object on any loaded PKCS #11 module (see
+/// `nssToken_FindTrustForCertificate` in NSS's `lib/dev/devtoken.c`), searched by the target
+/// certificate's own issuer + serial number.
+///
+/// This module emits one of these for a CA certificate when: it is present in the Windows
+/// "Trusted Root Certification Authorities" store for the current user (i.e. Windows itself
+/// already trusts it as a root), and its own ExtendedKeyUsage extension does not exclude email
+/// protection (absent EKU or an EKU that includes `1.3.6.1.5.5.7.3.4` both count). This lets
+/// S/MIME signing work without the user separately importing and trusting the CA in
+/// Thunderbird's own certificate store.
+///
+/// Only email trust is ever granted: every other trust purpose (`CKA_NSS_TRUST_SERVER_AUTH`,
+/// `_CLIENT_AUTH`, `_CODE_SIGNING`) is left at `CKT_NSS_TRUST_UNKNOWN`, NSS's "no opinion, defer
+/// to other trust sources" value, so this never grants TLS or code-signing trust -- only enough
+/// to make S/MIME signing/encryption key-preference checks succeed.
+pub struct Trust {
+    class: Vec<u8>,
+    token: Vec<u8>,
+    issuer: Vec<u8>,
+    serial_number: Vec<u8>,
+    server_auth: Vec<u8>,
+    client_auth: Vec<u8>,
+    code_signing: Vec<u8>,
+    email_protection: Vec<u8>,
+    step_up_approved: Vec<u8>,
+}
+
+impl Trust {
+    /// `cert_context` must be the CA certificate this trust record is *about* (not the
+    /// certificate being verified) -- its own issuer and serial number are what NSS searches by.
+    fn new(cert_context: PCCERT_CONTEXT) -> Result<Trust, ()> {
+        let cert_info = unsafe { &*(*cert_context).pCertInfo };
+        let issuer = unsafe {
+            slice::from_raw_parts(cert_info.Issuer.pbData, cert_info.Issuer.cbData as usize)
+        }
+        .to_vec();
+        let mut serial_number = unsafe {
+            slice::from_raw_parts(
+                cert_info.SerialNumber.pbData,
+                cert_info.SerialNumber.cbData as usize,
+            )
+        }
+        .to_vec();
+        serial_number.reverse();
+        Ok(Trust {
+            class: serialize_uint(CKO_NSS_TRUST)?,
+            token: vec![CK_TRUE as u8],
+            issuer,
+            serial_number,
+            server_auth: serialize_uint(CKT_NSS_TRUST_UNKNOWN)?,
+            client_auth: serialize_uint(CKT_NSS_TRUST_UNKNOWN)?,
+            code_signing: serialize_uint(CKT_NSS_TRUST_UNKNOWN)?,
+            email_protection: serialize_uint(CKT_NSS_TRUSTED_DELEGATOR)?,
+            step_up_approved: vec![CK_FALSE as u8],
+        })
+    }
+
+    fn class(&self) -> &[u8] {
+        &self.class
+    }
+
+    fn token(&self) -> &[u8] {
+        &self.token
+    }
+
+    pub fn issuer(&self) -> &[u8] {
+        &self.issuer
+    }
+
+    pub fn serial_number(&self) -> &[u8] {
+        &self.serial_number
+    }
+
+    /// A synthetic but stable identifier for this trust object (there's no natural `CKA_ID` for
+    /// `CKO_NSS_TRUST` objects; this is only used for our own bookkeeping/deduplication).
+    pub fn id(&self) -> Vec<u8> {
+        let mut id = self.issuer.clone();
+        id.extend_from_slice(&self.serial_number);
+        id
+    }
+
+    fn matches(&self, attrs: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)]) -> bool {
+        attrs
+            .iter()
+            .all(|(attr_type, attr_value)| match *attr_type {
+                CKA_TOKEN => bool_attr_matches(self.token(), attr_value),
+                CKA_SERIAL_NUMBER => serial_number_matches(self.serial_number(), attr_value),
+                _ => {
+                    let comparison = match *attr_type {
+                        CKA_CLASS => self.class(),
+                        CKA_ISSUER => self.issuer(),
+                        _ => return false,
+                    };
+                    attr_value.as_slice() == comparison
+                }
+            })
+    }
+
+    fn get_attribute(&self, attribute: CK_ATTRIBUTE_TYPE) -> Option<&[u8]> {
+        let result = match attribute {
+            CKA_CLASS => self.class(),
+            CKA_TOKEN => self.token(),
+            CKA_ISSUER => self.issuer(),
+            CKA_SERIAL_NUMBER => self.serial_number(),
+            CKA_NSS_TRUST_SERVER_AUTH => &self.server_auth,
+            CKA_NSS_TRUST_CLIENT_AUTH => &self.client_auth,
+            CKA_NSS_TRUST_CODE_SIGNING => &self.code_signing,
+            CKA_NSS_TRUST_EMAIL_PROTECTION => &self.email_protection,
+            CKA_NSS_TRUST_STEP_UP_APPROVED => &self.step_up_approved,
+            _ => return None,
+        };
+        Some(result)
+    }
+}
+
 struct CertContext(PCCERT_CONTEXT);
 
 impl CertContext {
@@ -1057,11 +1198,12 @@ impl Key {
     }
 }
 
-/// A helper enum that represents the two types of PKCS #11 objects we support: certificates and
-/// keys.
+/// A helper enum that represents the types of PKCS #11 objects we support: certificates, keys,
+/// and (Windows-root-trusted CA) trust records.
 pub enum Object {
     Cert(Cert),
     Key(Key),
+    Trust(Trust),
 }
 
 impl Object {
@@ -1069,6 +1211,7 @@ impl Object {
         match self {
             Object::Cert(cert) => cert.matches(attrs),
             Object::Key(key) => key.matches(attrs),
+            Object::Trust(trust) => trust.matches(attrs),
         }
     }
 
@@ -1076,6 +1219,7 @@ impl Object {
         match self {
             Object::Cert(cert) => cert.get_attribute(attribute),
             Object::Key(key) => key.get_attribute(attribute),
+            Object::Trust(trust) => trust.get_attribute(attribute),
         }
     }
 }
@@ -1182,5 +1326,259 @@ pub fn list_objects() -> Vec<Object> {
         objects.push(Object::Cert(cert));
         objects.push(Object::Key(key));
     }
+
+    let mut known_cert_ids: std::collections::HashSet<Vec<u8>> = objects
+        .iter()
+        .filter_map(|object| match object {
+            Object::Cert(cert) => Some(cert.id().to_vec()),
+            _ => None,
+        })
+        .collect();
+    let leaf_cert_values: Vec<Vec<u8>> = objects
+        .iter()
+        .filter_map(|object| match object {
+            Object::Cert(cert) => Some(cert.value().to_vec()),
+            _ => None,
+        })
+        .collect();
+    objects.extend(list_root_trust_objects(
+        &leaf_cert_values,
+        &mut known_cert_ids,
+    ));
+
     objects
+}
+
+/// The maximum number of issuer hops walked from a leaf certificate looking for a Windows-trusted
+/// root. Real-world PKI hierarchies are rarely more than 3-4 levels deep; this just bounds the
+/// work (and guards against any pathological/cyclic chain) rather than reflecting a real limit.
+const MAX_CHAIN_DEPTH: u32 = 8;
+
+fn open_system_store(name: &str) -> Option<CertStore> {
+    let location_flags =
+        CERT_SYSTEM_STORE_CURRENT_USER | CERT_STORE_OPEN_EXISTING_FLAG | CERT_STORE_READONLY_FLAG;
+    let store_name = match CString::new(name) {
+        Ok(store_name) => store_name,
+        Err(null_error) => {
+            error!("CString::new given input with a null byte: {}", null_error);
+            return None;
+        }
+    };
+    let store = CertStore::new(unsafe {
+        CertOpenStore(
+            CERT_STORE_PROV_SYSTEM_REGISTRY_A,
+            0,
+            0,
+            location_flags,
+            store_name.as_ptr() as *const winapi::ctypes::c_void,
+        )
+    });
+    if store.is_null() {
+        error!("CertOpenStore({name}) failed: {:#010x}", unsafe {
+            GetLastError()
+        });
+        return None;
+    }
+    Some(store)
+}
+
+fn cert_der_bytes(cert_context: PCCERT_CONTEXT) -> Vec<u8> {
+    let cert = unsafe { &*cert_context };
+    unsafe { slice::from_raw_parts(cert.pbCertEncoded, cert.cbCertEncoded as usize) }.to_vec()
+}
+
+/// The certificate's subject DN, or a placeholder if it can't be read. Diagnostic use only.
+fn cert_label_or_placeholder(cert_context: PCCERT_CONTEXT) -> Vec<u8> {
+    let cert_info = unsafe { &*(*cert_context).pCertInfo };
+    get_cert_subject_dn(cert_info).unwrap_or_else(|()| b"<unreadable subject>".to_vec())
+}
+
+/// A cheap, non-cryptographic self-signed check (issuer DN bytes == subject DN bytes) used only
+/// to know when to stop walking up a chain -- NSS/mozpkix do the real signature verification.
+fn cert_is_self_signed(cert_context: PCCERT_CONTEXT) -> bool {
+    let cert_info = unsafe { &*(*cert_context).pCertInfo };
+    let issuer =
+        unsafe { slice::from_raw_parts(cert_info.Issuer.pbData, cert_info.Issuer.cbData as usize) };
+    let subject = unsafe {
+        slice::from_raw_parts(cert_info.Subject.pbData, cert_info.Subject.cbData as usize)
+    };
+    issuer == subject
+}
+
+/// Whether `cert_context` exists (byte-for-byte) in `store`.
+fn cert_exists_in_store(store: HCERTSTORE, cert_context: PCCERT_CONTEXT) -> bool {
+    let found = unsafe {
+        CertFindCertificateInStore(
+            store,
+            X509_ASN_ENCODING,
+            0,
+            CERT_FIND_EXISTING,
+            cert_context as *const winapi::ctypes::c_void,
+            std::ptr::null_mut(),
+        )
+    };
+    if found.is_null() {
+        false
+    } else {
+        unsafe {
+            CertFreeCertificateContext(found);
+        }
+        true
+    }
+}
+
+/// Returns true if `cert_context`'s ExtendedKeyUsage extension is either absent (meaning: valid
+/// for all purposes) or explicitly includes emailProtection (`1.3.6.1.5.5.7.3.4`). Used to avoid
+/// granting email trust to a Windows root that's been deliberately restricted to other purposes
+/// (e.g. code signing only).
+fn eku_permits_email_protection(cert_context: PCCERT_CONTEXT) -> bool {
+    const OID_EMAIL_PROTECTION: &[u8] = b"1.3.6.1.5.5.7.3.4\0";
+    let mut usage_len: u32 = 0;
+    if unsafe { CertGetEnhancedKeyUsage(cert_context, 0, std::ptr::null_mut(), &mut usage_len) }
+        == 0
+    {
+        // Query failed; be conservative and don't grant trust.
+        return false;
+    }
+    if usage_len == 0 {
+        return true;
+    }
+    // CERT_ENHKEY_USAGE contains a pointer, so back the buffer with u64s to guarantee alignment.
+    let mut buffer: Vec<u64> = vec![0u64; (usage_len as usize).div_ceil(8)];
+    if unsafe {
+        CertGetEnhancedKeyUsage(
+            cert_context,
+            0,
+            buffer.as_mut_ptr() as *mut CERT_ENHKEY_USAGE,
+            &mut usage_len,
+        )
+    } == 0
+    {
+        return false;
+    }
+    let usage = unsafe { &*(buffer.as_ptr() as *const CERT_ENHKEY_USAGE) };
+    if usage.cUsageIdentifier == 0 {
+        return true;
+    }
+    for i in 0..usage.cUsageIdentifier as isize {
+        let oid_ptr = unsafe { *usage.rgpszUsageIdentifier.offset(i) };
+        if oid_ptr.is_null() {
+            continue;
+        }
+        if unsafe { CStr::from_ptr(oid_ptr) }.to_bytes_with_nul() == OID_EMAIL_PROTECTION {
+            return true;
+        }
+    }
+    false
+}
+
+/// For each leaf certificate (DER bytes), walks up its issuer chain (via the union of the "My",
+/// "CA" and "ROOT" Windows certificate stores) looking for a certificate that Windows itself
+/// trusts as a root. Every CA certificate encountered along the way is exposed as a plain
+/// `Object::Cert` (needed for NSS to build the chain at all, whether or not it ends up trusted);
+/// any of them that is present in the Windows "ROOT" store and whose EKU permits it gets an
+/// `Object::Trust` granting NSS email trust. See `Trust` for why this is needed at all.
+///
+/// `known_cert_ids` should be pre-populated with the ids of certificates already exposed
+/// elsewhere (i.e. the leaf certificates themselves) and is updated as new certificates are
+/// found, so a CA shared by multiple leaves (or already present as one of our own private-key
+/// certificates) is only ever exposed/trusted once.
+fn list_root_trust_objects(
+    leaf_cert_values: &[Vec<u8>],
+    known_cert_ids: &mut std::collections::HashSet<Vec<u8>>,
+) -> Vec<Object> {
+    let mut new_objects = Vec::new();
+    let Some(my_store) = open_system_store("My") else {
+        return new_objects;
+    };
+    let Some(ca_store) = open_system_store("CA") else {
+        return new_objects;
+    };
+    let Some(root_store) = open_system_store("ROOT") else {
+        return new_objects;
+    };
+    let collection = CertStore::new(unsafe {
+        CertOpenStore(CERT_STORE_PROV_COLLECTION, 0, 0, 0, std::ptr::null())
+    });
+    if collection.is_null() {
+        error!(
+            "CertOpenStore(CERT_STORE_PROV_COLLECTION) failed: {:#010x}",
+            unsafe { GetLastError() }
+        );
+        return new_objects;
+    }
+    for store in [&my_store, &ca_store, &root_store] {
+        if unsafe { CertAddStoreToCollection(*collection, **store, 0, 0) } == 0 {
+            error!("CertAddStoreToCollection failed: {:#010x}", unsafe {
+                GetLastError()
+            });
+        }
+    }
+
+    for leaf_der in leaf_cert_values {
+        let leaf_context = unsafe {
+            CertCreateCertificateContext(
+                X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+                leaf_der.as_ptr(),
+                leaf_der.len() as u32,
+            )
+        };
+        if leaf_context.is_null() {
+            continue;
+        }
+        let mut current = CertContext(leaf_context);
+        for _ in 0..MAX_CHAIN_DEPTH {
+            let mut flags: winapi::shared::minwindef::DWORD =
+                CERT_STORE_SIGNATURE_FLAG | CERT_STORE_TIME_VALIDITY_FLAG;
+            let issuer_raw = unsafe {
+                CertGetIssuerCertificateFromStore(
+                    *collection,
+                    *current,
+                    std::ptr::null_mut(),
+                    &mut flags,
+                )
+            };
+            if issuer_raw.is_null() {
+                break;
+            }
+            let issuer = CertContext(issuer_raw);
+            let id = Sha256::digest(&cert_der_bytes(*issuer)).to_vec();
+            if !known_cert_ids.insert(id) {
+                // Already exposed (via an earlier leaf's walk, as one of our own private-key
+                // certificates, or Windows handed us the same certificate again) -- stop; this
+                // also guards against any pathological cycle.
+                break;
+            }
+            let label = cert_label_or_placeholder(*issuer);
+            if let Ok(ca_cert) = Cert::new(*issuer) {
+                new_objects.push(Object::Cert(ca_cert));
+            }
+            if cert_exists_in_store(*root_store, *issuer) {
+                if eku_permits_email_protection(*issuer) {
+                    match Trust::new(*issuer) {
+                        Ok(trust) => {
+                            info!(
+                                "granting NSS email trust to Windows-trusted root CA {:?}",
+                                String::from_utf8_lossy(&label)
+                            );
+                            new_objects.push(Object::Trust(trust));
+                        }
+                        Err(()) => error!("Trust::new failed for a Windows-trusted root CA"),
+                    }
+                } else {
+                    debug!(
+                        "CA {:?} is a Windows-trusted root but its EKU excludes email protection; \
+                         not granting NSS email trust",
+                        String::from_utf8_lossy(&label)
+                    );
+                }
+            }
+            let is_self_signed = cert_is_self_signed(*issuer);
+            current = issuer;
+            if is_self_signed {
+                break;
+            }
+        }
+    }
+    new_objects
 }

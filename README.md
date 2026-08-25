@@ -183,32 +183,45 @@ Thunderbird logs.
 
 ### Certificate trust: Windows vs. Thunderbird
 
-This provider only bridges Windows' certificate store and private keys into PKCS#11; it does not
-bridge certificate **trust**. Windows and Thunderbird each keep their own, independent trust
-store, and both need to consider the relevant CA trusted:
+Windows and Thunderbird each keep their own, independent certificate trust store, and NSS's S/MIME
+signing code checks trust in *Thunderbird's* store, not Windows'. Concretely:
 
 - **Windows** needs to trust the certificate chain for `CryptAcquireCertificatePrivateKey`/CNG to
   work at all (this is usually already the case for a corporate machine joined to the domain that
   issued the certificate, e.g. via Active Directory Certificate Services group policy).
 - **Thunderbird** (via NSS) keeps a *separate* certificate/trust database and does not consult
-  Windows' trust store. For an internal/corporate CA, this normally needs to be set up manually:
-  Settings → Privacy & Security → Manage Certificates → **Authorities** → Import the issuing CA
-  (export it from Windows first, e.g. via `certmgr.msc` → Intermediate/Trusted Root Certification
-  Authorities → Export, DER/CER), then edit its trust settings and check **"This certificate can
-  identify mail users"**. Repeat for every CA in the chain if there's more than one level.
+  Windows' trust store by default. Every outgoing *signed* S/MIME message includes a signed
+  attribute referencing the sender's own certificate for encrypted replies, and building it
+  requires the sender's certificate to verify as trusted for email in Thunderbird's own store
+  first -- so without that trust, sending a signed message fails silently (no error dialog,
+  nothing logged by this module) even though decrypting other people's messages works fine. See
+  [DEBUGGING.md](DEBUGGING.md#smime-signing-failures) for how to diagnose it if it happens.
 
-  This step is required for **signing**, not just for decrypting/verifying other people's
-  messages: every outgoing signed S/MIME message includes a signed attribute referencing the
-  sender's own certificate for encrypted replies, and building that attribute requires the
-  sender's certificate to verify as trusted in Thunderbird's own store first. Without it, sending
-  a signed message fails silently (no error dialog, nothing logged by this module) -- see
-  [DEBUGGING.md](DEBUGGING.md#smime-signing-failures) for how to diagnose it.
+**This provider bridges that gap automatically for CAs Windows already trusts as roots.** For
+every certificate it exposes, it walks the issuer chain through the Windows "My", "CA" and "ROOT"
+stores; any CA found there that is present in the current user's Windows "Trusted Root
+Certification Authorities" store (and whose own ExtendedKeyUsage doesn't exclude email
+protection) is reported to NSS as trusted for S/MIME email -- nothing to configure. With
+`RUST_LOG=osclientcerts=debug`/`=info`, look for `granting NSS email trust to Windows-trusted
+root CA "..."` in the provider log to confirm it kicked in for your CA (or, at `debug` level, a
+line explaining why a Windows-trusted root wasn't granted trust, e.g. an EKU restriction). Only
+email trust is ever granted -- this has no effect on what the CA is trusted for in TLS or code
+signing, in Windows or in Thunderbird.
 
-  **Gotcha:** importing the CA while this module is already loaded as a Security Device can
-  silently fail to set the trust flag, because Thunderbird already "knows" the CA as the issuer of
-  certificates coming from this module and skips the import. If the CA doesn't show up as
-  importable, or the import doesn't seem to stick, unload the module first (Security Devices →
-  select it → Unload), do the import + trust step above, then reload the module.
+This does **not** help if the issuing CA isn't in Windows' **Trusted Root** store specifically
+(e.g. it's only in the intermediate "CA" store, or your organization manages trust some other
+way). In that case, the trust still needs to be set up manually in Thunderbird: Settings →
+Privacy & Security → Manage Certificates → **Authorities** → Import the issuing CA (export it
+from Windows first, e.g. via `certmgr.msc` → Intermediate/Trusted Root Certification Authorities
+→ Export, DER/CER), then edit its trust settings and check **"This certificate can identify mail
+users"**. Repeat for every CA in the chain if there's more than one level.
+
+**Gotcha with the manual path:** importing a CA into Thunderbird while this module is already
+loaded as a Security Device can silently fail to set the trust flag, because Thunderbird already
+"knows" the CA as the issuer of certificates coming from this module (or, as of this version,
+because the module may already be reporting it trusted) and skips the import. If the CA doesn't
+show up as importable, or the import doesn't seem to stick, unload the module first (Security
+Devices → select it → Unload), do the import + trust step above, then reload the module.
 
 ## Debug logging
 

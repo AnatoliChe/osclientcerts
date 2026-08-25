@@ -894,9 +894,43 @@ impl Key {
     }
 }
 
+/// A stand-in for the Windows backend's `Trust` (Windows-root-trusted-CA email trust record).
+/// This backend never constructs one (the Windows-Certificate-Store-trust feature is Windows
+/// only) -- it exists only so shared code in `manager.rs` that matches on all three `Object`
+/// variants compiles the same way on every platform.
+pub struct Trust {
+    issuer: Vec<u8>,
+    serial_number: Vec<u8>,
+}
+
+impl Trust {
+    pub fn issuer(&self) -> &[u8] {
+        &self.issuer
+    }
+
+    pub fn serial_number(&self) -> &[u8] {
+        &self.serial_number
+    }
+
+    pub fn id(&self) -> Vec<u8> {
+        let mut id = self.issuer.clone();
+        id.extend_from_slice(&self.serial_number);
+        id
+    }
+
+    fn matches(&self, _attrs: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)]) -> bool {
+        false
+    }
+
+    fn get_attribute(&self, _attribute: CK_ATTRIBUTE_TYPE) -> Option<&[u8]> {
+        None
+    }
+}
+
 pub enum Object {
     Cert(Cert),
     Key(Key),
+    Trust(Trust),
 }
 
 impl Object {
@@ -904,6 +938,7 @@ impl Object {
         match self {
             Object::Cert(cert) => cert.matches(attrs),
             Object::Key(key) => key.matches(attrs),
+            Object::Trust(trust) => trust.matches(attrs),
         }
     }
 
@@ -911,6 +946,7 @@ impl Object {
         match self {
             Object::Cert(cert) => cert.get_attribute(attribute),
             Object::Key(key) => key.get_attribute(attribute),
+            Object::Trust(trust) => trust.get_attribute(attribute),
         }
     }
 }

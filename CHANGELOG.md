@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file. Pre-built DLLs 
 are published on the GitHub
 [releases page](https://github.com/AnatoliChe/osclientcerts/releases).
 
+## Unreleased
+
+- The provider now bridges CA trust for S/MIME email from Windows into NSS: for every leaf
+  certificate it exposes, it walks the issuer chain (via the "My", "CA" and "ROOT" Windows
+  certificate stores) and, for any CA certificate found there that is present in the current
+  user's Windows "Trusted Root Certification Authorities" store and whose ExtendedKeyUsage
+  doesn't exclude email protection, exposes a synthetic `CKO_NSS_TRUST` object granting NSS's
+  `certUsageEmailRecipient` trust for it (all other trust purposes are left unset). Every
+  certificate walked is also exposed as a plain `CKO_CERTIFICATE` object so NSS can build the
+  chain at all. This means S/MIME **signing** works without the user separately importing and
+  trusting the issuing CA in Thunderbird's own certificate store, for any CA Windows itself
+  already trusts as a root -- see the "S/MIME signing failures" section of `DEBUGGING.md` and
+  the "Certificate trust: Windows vs. Thunderbird" section of `README.md` for why that check
+  (`NSS_CMSSignerInfo_AddSMIMEEncKeyPrefs`) exists and what it required before this. Only email
+  trust is ever granted; this never widens what a CA is trusted for in TLS or code signing.
+
 ## 0.3.10 - 2026-08-25
 
 - Private key objects now expose `CKA_LABEL`, `CKA_SUBJECT`, `CKA_ISSUER`, and
