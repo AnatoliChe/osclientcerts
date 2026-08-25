@@ -1487,6 +1487,10 @@ fn list_root_trust_objects(
     leaf_cert_values: &[Vec<u8>],
     known_cert_ids: &mut std::collections::HashSet<Vec<u8>>,
 ) -> Vec<Object> {
+    debug!(
+        "list_root_trust_objects: walking issuer chains for {} leaf cert(s)",
+        leaf_cert_values.len()
+    );
     let mut new_objects = Vec::new();
     let Some(my_store) = open_system_store("My") else {
         return new_objects;
@@ -1507,11 +1511,14 @@ fn list_root_trust_objects(
         );
         return new_objects;
     }
-    for store in [&my_store, &ca_store, &root_store] {
+    for (name, store) in [("My", &my_store), ("CA", &ca_store), ("ROOT", &root_store)] {
         if unsafe { CertAddStoreToCollection(*collection, **store, 0, 0) } == 0 {
-            error!("CertAddStoreToCollection failed: {:#010x}", unsafe {
-                GetLastError()
-            });
+            error!(
+                "CertAddStoreToCollection({name}) failed: {:#010x}",
+                unsafe { GetLastError() }
+            );
+        } else {
+            debug!("CertAddStoreToCollection({name}): CKR_OK");
         }
     }
 
@@ -1526,6 +1533,11 @@ fn list_root_trust_objects(
         if leaf_context.is_null() {
             continue;
         }
+        let leaf_label = cert_label_or_placeholder(leaf_context);
+        debug!(
+            "list_root_trust_objects: chain walk for leaf {:?}",
+            String::from_utf8_lossy(&leaf_label)
+        );
         let mut current = CertContext(leaf_context);
         for _ in 0..MAX_CHAIN_DEPTH {
             let mut flags: winapi::shared::minwindef::DWORD =
@@ -1539,21 +1551,40 @@ fn list_root_trust_objects(
                 )
             };
             if issuer_raw.is_null() {
+                debug!(
+                    "list_root_trust_objects: no (further) issuer found, GetLastError={:#010x}",
+                    unsafe { GetLastError() }
+                );
                 break;
             }
             let issuer = CertContext(issuer_raw);
             let id = Sha256::digest(&cert_der_bytes(*issuer)).to_vec();
+            debug!(
+                "list_root_trust_objects: found issuer {:?}",
+                String::from_utf8_lossy(&cert_label_or_placeholder(*issuer))
+            );
             if !known_cert_ids.insert(id) {
                 // Already exposed (via an earlier leaf's walk, as one of our own private-key
                 // certificates, or Windows handed us the same certificate again) -- stop; this
                 // also guards against any pathological cycle.
+                debug!("list_root_trust_objects: issuer already known, stopping this walk");
                 break;
             }
             let label = cert_label_or_placeholder(*issuer);
             if let Ok(ca_cert) = Cert::new(*issuer) {
                 new_objects.push(Object::Cert(ca_cert));
+            } else {
+                error!(
+                    "Cert::new failed for issuer {:?}",
+                    String::from_utf8_lossy(&label)
+                );
             }
-            if cert_exists_in_store(*root_store, *issuer) {
+            let in_root = cert_exists_in_store(*root_store, *issuer);
+            debug!(
+                "list_root_trust_objects: issuer {:?} in ROOT store: {in_root}",
+                String::from_utf8_lossy(&label)
+            );
+            if in_root {
                 if eku_permits_email_protection(*issuer) {
                     match Trust::new(*issuer) {
                         Ok(trust) => {
