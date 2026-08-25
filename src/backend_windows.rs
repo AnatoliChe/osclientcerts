@@ -784,7 +784,7 @@ impl Key {
     }
 
     fn matches(&self, attrs: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)]) -> bool {
-        attrs
+        let result = attrs
             .iter()
             .all(|(attr_type, attr_value)| match *attr_type {
                 CKA_TOKEN => bool_attr_matches(self.token(), attr_value),
@@ -824,7 +824,39 @@ impl Key {
                     };
                     attr_value.as_slice() == comparison
                 }
-            })
+            });
+        if !result {
+            for (attr_type, attr_value) in attrs {
+                let stored = match *attr_type {
+                    CKA_CLASS => Some(self.class()),
+                    CKA_TOKEN => Some(self.token()),
+                    CKA_LABEL => Some(self.label()),
+                    CKA_SUBJECT => Some(self.subject()),
+                    CKA_ISSUER => Some(self.issuer()),
+                    CKA_ID => Some(self.id()),
+                    CKA_SERIAL_NUMBER => Some(self.serial_number()),
+                    CKA_KEY_TYPE => Some(self.key_type()),
+                    _ => None,
+                };
+                if let Some(stored_val) = stored {
+                    debug!(
+                        "Key::matches FAILED: id={}, attr=0x{:x} stored={:02x?} requested={:02x?}",
+                        hex_encode(self.id()),
+                        attr_type,
+                        stored_val,
+                        attr_value,
+                    );
+                } else {
+                    debug!(
+                        "Key::matches FAILED: id={}, attr=0x{:x} (unsupported) requested_len={}",
+                        hex_encode(self.id()),
+                        attr_type,
+                        attr_value.len(),
+                    );
+                }
+            }
+        }
+        result
     }
 
     fn get_attribute(&self, attribute: CK_ATTRIBUTE_TYPE) -> Option<&[u8]> {
@@ -1129,6 +1161,134 @@ pub const SUPPORTED_ATTRIBUTES: &[CK_ATTRIBUTE_TYPE] = &[
     CKA_LOCAL,
 ];
 
+/// Logs the X.509 KeyUsage and ExtendedKeyUsage extensions of a certificate. This is diagnostic
+/// only -- it has no effect on what the module exposes via PKCS#11 or on `Key::matches`.
+///
+/// It exists because NSS's S/MIME signing path (`CERT_CheckKeyUsage` in NSS, called from the CMS
+/// signing code) silently refuses to select a certificate/key for signing if the certificate's
+/// KeyUsage extension doesn't include `digitalSignature`, *without ever calling into the PKCS#11
+/// module* (no `C_SignInit`, nothing). The same key can work perfectly for decryption (which only
+/// needs `keyEncipherment`/`dataEncipherment`), so this failure mode looks identical to a working
+/// provider from the module's point of view: no errors, no failed operations, just an S/MIME
+/// "encoder" that silently fails on the Thunderbird/NSS side. When that happens, this is the
+/// first thing to check in the log.
+fn log_signing_diagnostics(cert_context: PCCERT_CONTEXT, label: &[u8]) {
+    let label = String::from_utf8_lossy(label).into_owned();
+    let cert_info = unsafe { &*(*cert_context).pCertInfo };
+    let mut key_usage = [0u8; 2];
+    let has_key_usage_ext = unsafe {
+        CertGetIntendedKeyUsage(
+            X509_ASN_ENCODING,
+            cert_info as *const CERT_INFO as *mut CERT_INFO,
+            key_usage.as_mut_ptr(),
+            key_usage.len() as u32,
+        )
+    } != 0;
+    let key_usage_str = if !has_key_usage_ext {
+        "none (no KeyUsage extension present -> all uses implied)".to_string()
+    } else {
+        let mut flags = Vec::new();
+        let b0 = key_usage[0];
+        if b0 & CERT_DIGITAL_SIGNATURE_KEY_USAGE as u8 != 0 {
+            flags.push("digitalSignature");
+        }
+        if b0 & CERT_NON_REPUDIATION_KEY_USAGE as u8 != 0 {
+            flags.push("nonRepudiation");
+        }
+        if b0 & CERT_KEY_ENCIPHERMENT_KEY_USAGE as u8 != 0 {
+            flags.push("keyEncipherment");
+        }
+        if b0 & CERT_DATA_ENCIPHERMENT_KEY_USAGE as u8 != 0 {
+            flags.push("dataEncipherment");
+        }
+        if b0 & CERT_KEY_AGREEMENT_KEY_USAGE as u8 != 0 {
+            flags.push("keyAgreement");
+        }
+        if b0 & CERT_KEY_CERT_SIGN_KEY_USAGE as u8 != 0 {
+            flags.push("keyCertSign");
+        }
+        if b0 & CERT_CRL_SIGN_KEY_USAGE as u8 != 0 {
+            flags.push("cRLSign");
+        }
+        if b0 & CERT_ENCIPHER_ONLY_KEY_USAGE as u8 != 0 {
+            flags.push("encipherOnly");
+        }
+        if key_usage[1] & ((CERT_DECIPHER_ONLY_KEY_USAGE >> 8) as u8) != 0 {
+            flags.push("decipherOnly");
+        }
+        if flags.is_empty() {
+            "(empty bit string -> no uses permitted)".to_string()
+        } else {
+            flags.join("|")
+        }
+    };
+    let eku_str = describe_eku(cert_context);
+    let has_digital_signature =
+        has_key_usage_ext && (key_usage[0] & CERT_DIGITAL_SIGNATURE_KEY_USAGE as u8 != 0);
+    if has_key_usage_ext && !has_digital_signature {
+        warn!(
+            "cert {label:?}: KeyUsage=[{key_usage_str}] does NOT include digitalSignature -- \
+             NSS will silently refuse to use this key for S/MIME signing even though it may work \
+             fine for decryption; EKU=[{eku_str}]"
+        );
+    } else {
+        info!("cert {label:?}: KeyUsage=[{key_usage_str}] EKU=[{eku_str}]");
+    }
+}
+
+/// Formats the ExtendedKeyUsage OIDs of a certificate. Diagnostic only, see
+/// `log_signing_diagnostics`.
+fn describe_eku(cert_context: PCCERT_CONTEXT) -> String {
+    let mut usage_len: u32 = 0;
+    if unsafe { CertGetEnhancedKeyUsage(cert_context, 0, std::ptr::null_mut(), &mut usage_len) }
+        == 0
+    {
+        return format!(
+            "<CertGetEnhancedKeyUsage size query failed: {:#010x}>",
+            unsafe { GetLastError() }
+        );
+    }
+    if usage_len == 0 {
+        return "none (no EKU restriction -> valid for all purposes)".to_string();
+    }
+    // CERT_ENHKEY_USAGE contains a pointer, so back the buffer with u64s to guarantee alignment.
+    let mut buffer: Vec<u64> = vec![0u64; (usage_len as usize + 7) / 8];
+    if unsafe {
+        CertGetEnhancedKeyUsage(
+            cert_context,
+            0,
+            buffer.as_mut_ptr() as *mut CERT_ENHKEY_USAGE,
+            &mut usage_len,
+        )
+    } == 0
+    {
+        return format!("<CertGetEnhancedKeyUsage failed: {:#010x}>", unsafe {
+            GetLastError()
+        });
+    }
+    let usage = unsafe { &*(buffer.as_ptr() as *const CERT_ENHKEY_USAGE) };
+    if usage.cUsageIdentifier == 0 {
+        return "none (no EKU restriction -> valid for all purposes)".to_string();
+    }
+    let mut oids = Vec::new();
+    for i in 0..usage.cUsageIdentifier as isize {
+        let oid_ptr = unsafe { *usage.rgpszUsageIdentifier.offset(i) };
+        if oid_ptr.is_null() {
+            continue;
+        }
+        let oid = unsafe { CStr::from_ptr(oid_ptr) }.to_string_lossy().into_owned();
+        let name = match oid.as_str() {
+            "1.3.6.1.5.5.7.3.4" => " (emailProtection)",
+            "1.3.6.1.5.5.7.3.2" => " (clientAuth)",
+            "1.3.6.1.5.5.7.3.3" => " (codeSigning)",
+            "1.3.6.1.5.5.7.3.1" => " (serverAuth)",
+            _ => "",
+        };
+        oids.push(format!("{oid}{name}"));
+    }
+    oids.join(", ")
+}
+
 /// Attempts to enumerate certificates with private keys exposed by the OS. Currently only looks in
 /// the "My" cert store of the current user. In the future this may look in more locations.
 pub fn list_objects() -> Vec<Object> {
@@ -1173,11 +1333,25 @@ pub fn list_objects() -> Vec<Object> {
         }
         let cert = match Cert::new(cert_context) {
             Ok(cert) => cert,
-            Err(()) => continue,
+            Err(()) => {
+                warn!(
+                    "Cert::new failed for a certificate with a private key in the store; \
+                     skipping it (it will not be exposed via PKCS#11 at all)"
+                );
+                continue;
+            }
         };
+        log_signing_diagnostics(cert_context, cert.label());
         let key = match Key::new(cert_context) {
             Ok(key) => key,
-            Err(()) => continue,
+            Err(()) => {
+                warn!(
+                    "Key::new failed for cert {:?}; this certificate will not be exposed via \
+                     PKCS#11 at all (no cert, no key)",
+                    String::from_utf8_lossy(cert.label())
+                );
+                continue;
+            }
         };
         objects.push(Object::Cert(cert));
         objects.push(Object::Key(key));

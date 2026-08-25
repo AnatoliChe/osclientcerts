@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file. Pre-built DLLs 
 are published on the GitHub
 [releases page](https://github.com/AnatoliChe/osclientcerts/releases).
 
+## Unreleased
+
+- Added diagnostics for S/MIME signing failures that happen without any PKCS#11 error, i.e. where
+  `C_SignInit`/`C_Sign` are never called at all (NSS decides not to use the key before reaching
+  the module). `list_objects()` now logs the `KeyUsage`/`ExtendedKeyUsage` extensions of every
+  certificate it finds, warning when `digitalSignature` is missing -- the most common cause of
+  this failure mode with corporate CA-issued certificates that separate signing and encryption
+  keys. `start_sign` now logs the key handle/ID NSS asked to sign with, `Key::matches` logs which
+  attribute comparison failed on an unsuccessful `C_FindObjectsInit`/`C_FindObjects`, and
+  `C_FindObjectsInit`/`C_GetAttributeValue` now log the full attribute list/values involved
+  instead of just the result. `Cert::new`/`Key::new` failures during store enumeration are no
+  longer silently swallowed. See `DEBUGGING.md` for how to read the new output. Investigated
+  because 0.3.9 (`CKA_SIGN`) and 0.3.10 (`CKA_LABEL`/`CKA_SUBJECT`/`CKA_ISSUER`/
+  `CKA_SERIAL_NUMBER`) did not resolve signing for all certificates -- those were real bugs, but
+  not the only cause of `nsCMSEncoder::Finish - can't finish encoder`.
+
 ## 0.3.10 - 2026-08-25
 
 - Private key objects now expose `CKA_LABEL`, `CKA_SUBJECT`, `CKA_ISSUER`, and

@@ -754,6 +754,7 @@ impl Manager {
         // saves us having to look through all of our objects.
         for (attr, _) in attrs {
             if !SUPPORTED_ATTRIBUTES.contains(attr) {
+                info!("C_FindObjectsInit: unsupported attribute 0x{:x}, returning empty", attr);
                 self.searches.insert(session, Vec::new());
                 return Ok(());
             }
@@ -764,6 +765,12 @@ impl Manager {
                 handles.push(*handle);
             }
         }
+        debug!(
+            "C_FindObjectsInit: {} attrs, {} objects, {} matches",
+            attrs.len(),
+            self.objects.len(),
+            handles.len(),
+        );
         self.searches.insert(session, handles);
         Ok(())
     }
@@ -834,11 +841,20 @@ impl Manager {
         params: Option<CK_RSA_PKCS_PSS_PARAMS>,
     ) -> Result<(), CryptoError> {
         if self.signs.contains_key(&session) {
+            error!("start_sign: session {session} already has a sign operation in progress");
             return Err(CryptoError::OperationFailed);
         }
         match self.objects.get(&key_handle) {
-            Some(Object::Key(_)) => {}
-            _ => return Err(CryptoError::InvalidKey),
+            Some(Object::Key(key)) => {
+                info!(
+                    "start_sign: session {session}, key handle {key_handle}, id {}",
+                    hex_encode(key.id()),
+                );
+            }
+            _ => {
+                error!("start_sign: handle {key_handle} is not a known key object");
+                return Err(CryptoError::InvalidKey);
+            }
         };
         self.signs.insert(session, (key_handle, params, Vec::new()));
         Ok(())

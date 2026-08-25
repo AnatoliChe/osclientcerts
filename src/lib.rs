@@ -565,7 +565,9 @@ extern "C" fn C_GetAttributeValue(
     let mut attr_types = Vec::with_capacity(ulCount as usize);
     let template = unsafe { std::slice::from_raw_parts(pTemplate, ulCount as usize) };
     for attr in template {
-        attr_types.push(attr.attrType);
+        let attr_type = unsafe_packed_field_access!(attr.attrType);
+        info!("  GetAttr handle={hObject} type=0x{:x}", attr_type);
+        attr_types.push(attr_type);
     }
     let mut manager_guard = try_to_get_manager_guard!();
     let manager = manager_guard_to_manager!(manager_guard);
@@ -601,6 +603,12 @@ extern "C" fn C_GetAttributeValue(
                 unsafe {
                     std::ptr::copy_nonoverlapping(attr_value.as_ptr(), ptr, attr_value.len());
                 }
+                info!(
+                    "  GetAttr result handle={hObject} type=0x{:x} len={} value={:02x?}",
+                    unsafe_packed_field_access!(attr.attrType),
+                    attr_value.len(),
+                    &attr_value[..],
+                );
             }
         } else {
             attr.ulValueLen = (0 - 1) as CK_ULONG; // CK_UNAVAILABLE_INFORMATION
@@ -644,7 +652,6 @@ extern "C" fn C_FindObjectsInit(
     info!("C_FindObjectsInit:");
     for i in 0..ulCount {
         let attr = unsafe { &*pTemplate.offset(i as isize) };
-        info!("  {:?}", attr);
         // CK_ATTRIBUTE may be packed depending on the target, so copy fields out before using
         // them (formatting or referencing a field of a packed struct is not allowed).
         let attr_type = attr.attrType;
@@ -662,6 +669,10 @@ extern "C" fn C_FindObjectsInit(
                 return rv;
             }
         };
+        info!(
+            "  attr[{}] type=0x{:x} len={} value={:02x?}",
+            i, attr_type, value_len, slice
+        );
         attrs.push((attr_type, slice.to_owned()));
     }
     let mut manager_guard = try_to_get_manager_guard!();
