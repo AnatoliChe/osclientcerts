@@ -219,7 +219,14 @@ historical regression classes listed above at a higher level:
   which pins down both mechanism and input);
 - RSA-PSS signatures (SHA-256, MGF1, 32-byte salt; randomized per signature);
 - ECDSA P-256 signatures returned as raw `r || s` per the PKCS#11 `CKM_ECDSA` spec;
-- RSA PKCS#1 v1.5 and OAEP (SHA-256, label) encrypt/decrypt roundtrips;
+- RSA PKCS#1 v1.5 and OAEP (SHA-256, label) encrypt/decrypt roundtrips (single-shot and
+  multipart: `encrypt_update` × 3 → `encrypt_final` → `decrypt_update` × 3 → `decrypt_final`);
+- module lifecycle: double `C_Initialize` returns `CKR_CRYPTOKI_ALREADY_INITIALIZED`,
+  `C_Finalize` without initialization returns `CKR_CRYPTOKI_NOT_INITIALIZED`, and
+  `C_Finalize` clears the manager slot so that a subsequent `C_Initialize` starts cleanly;
+- `C_GetSessionInfo` returns slot ID, session state (`CKS_RO_PUBLIC_SESSION` vs
+  `CKS_RW_PUBLIC_SESSION`), and flags (`CKF_SERIAL_SESSION` mandatory) for both read-only and
+  read-write sessions; `C_OpenSession` now rejects sessions without `CKF_SERIAL_SESSION`;
 - closing a session terminates an in-progress real signing operation;
 - store-level private-key association for both provisioned certificates, verified directly via
   crypt32 (`CryptAcquireCertificatePrivateKey` with `CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG`) without

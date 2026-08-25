@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file. Pre-built DLLs 
 are published on the GitHub
 [releases page](https://github.com/AnatoliChe/osclientcerts/releases).
 
+## Unreleased
+
+- Module lifecycle: `C_Initialize` on an already-initialized module now returns
+  `CKR_CRYPTOKI_ALREADY_INITIALIZED`; `C_Finalize` without a prior successful initialization
+  returns `CKR_CRYPTOKI_NOT_INITIALIZED`. `C_Finalize` now fully clears the manager proxy slot
+  so that a subsequent `C_Initialize` starts from a clean state instead of replacing a lingering
+  stopped proxy.
+- `C_GetSessionInfo` implemented: returns slot ID, session state (RO vs RW public session), and
+  flags (`CKF_SERIAL_SESSION` set unconditionally). `C_OpenSession` now enforces that
+  `CKF_SERIAL_SESSION` is set in the caller-supplied flags.
+- Windows CNG S/MIME suite: added multipart encrypt/decrypt roundtrip tests for RSA PKCS#1
+  v1.5 and OAEP-SHA256, covering the full path from manager-level update buffering through
+  `C_EncryptFinal`/`C_DecryptFinal` into real CNG.
+
 ## 0.3.7 - 2026-08-25
 
 - `C_EncryptUpdate` and `C_DecryptUpdate` now follow the standard output convention explicitly:
