@@ -1327,13 +1327,6 @@ pub fn list_objects() -> Vec<Object> {
         objects.push(Object::Key(key));
     }
 
-    let mut known_cert_ids: std::collections::HashSet<Vec<u8>> = objects
-        .iter()
-        .filter_map(|object| match object {
-            Object::Cert(cert) => Some(cert.id().to_vec()),
-            _ => None,
-        })
-        .collect();
     let leaf_cert_values: Vec<Vec<u8>> = objects
         .iter()
         .filter_map(|object| match object {
@@ -1341,10 +1334,7 @@ pub fn list_objects() -> Vec<Object> {
             _ => None,
         })
         .collect();
-    objects.extend(list_root_trust_objects(
-        &leaf_cert_values,
-        &mut known_cert_ids,
-    ));
+    objects.extend(list_root_trust_objects(&leaf_cert_values));
 
     objects
 }
@@ -1479,14 +1469,13 @@ fn eku_permits_email_protection(cert_context: PCCERT_CONTEXT) -> bool {
 /// any of them that is present in the Windows "ROOT" store and whose EKU permits it gets an
 /// `Object::Trust` granting NSS email trust. See `Trust` for why this is needed at all.
 ///
-/// `known_cert_ids` should be pre-populated with the ids of certificates already exposed
-/// elsewhere (i.e. the leaf certificates themselves) and is updated as new certificates are
-/// found, so a CA shared by multiple leaves (or already present as one of our own private-key
-/// certificates) is only ever exposed/trusted once.
-fn list_root_trust_objects(
-    leaf_cert_values: &[Vec<u8>],
-    known_cert_ids: &mut std::collections::HashSet<Vec<u8>>,
-) -> Vec<Object> {
+/// A CA shared by multiple leaves (or one that happens to also be one of our own private-key
+/// certificates, as can happen with a small internal CA) is only ever exposed/evaluated once per
+/// call -- but that's purely to avoid redundant work/log noise. It must *not* stop the walk from
+/// continuing further up the chain: a CA can simultaneously be a "leaf" we already expose (it has
+/// its own private key) and an intermediate we still need to walk past to reach the actual
+/// Windows-trusted root.
+fn list_root_trust_objects(leaf_cert_values: &[Vec<u8>]) -> Vec<Object> {
     debug!(
         "list_root_trust_objects: walking issuer chains for {} leaf cert(s)",
         leaf_cert_values.len()
@@ -1521,6 +1510,7 @@ fn list_root_trust_objects(
             debug!("CertAddStoreToCollection({name}): CKR_OK");
         }
     }
+    let mut processed: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
 
     for leaf_der in leaf_cert_values {
         let leaf_context = unsafe {
@@ -1558,52 +1548,56 @@ fn list_root_trust_objects(
                 break;
             }
             let issuer = CertContext(issuer_raw);
-            let id = Sha256::digest(&cert_der_bytes(*issuer)).to_vec();
+            let label = cert_label_or_placeholder(*issuer);
             debug!(
                 "list_root_trust_objects: found issuer {:?}",
-                String::from_utf8_lossy(&cert_label_or_placeholder(*issuer))
-            );
-            if !known_cert_ids.insert(id) {
-                // Already exposed (via an earlier leaf's walk, as one of our own private-key
-                // certificates, or Windows handed us the same certificate again) -- stop; this
-                // also guards against any pathological cycle.
-                debug!("list_root_trust_objects: issuer already known, stopping this walk");
-                break;
-            }
-            let label = cert_label_or_placeholder(*issuer);
-            if let Ok(ca_cert) = Cert::new(*issuer) {
-                new_objects.push(Object::Cert(ca_cert));
-            } else {
-                error!(
-                    "Cert::new failed for issuer {:?}",
-                    String::from_utf8_lossy(&label)
-                );
-            }
-            let in_root = cert_exists_in_store(*root_store, *issuer);
-            debug!(
-                "list_root_trust_objects: issuer {:?} in ROOT store: {in_root}",
                 String::from_utf8_lossy(&label)
             );
-            if in_root {
-                if eku_permits_email_protection(*issuer) {
-                    match Trust::new(*issuer) {
-                        Ok(trust) => {
-                            info!(
-                                "granting NSS email trust to Windows-trusted root CA {:?}",
-                                String::from_utf8_lossy(&label)
-                            );
-                            new_objects.push(Object::Trust(trust));
-                        }
-                        Err(()) => error!("Trust::new failed for a Windows-trusted root CA"),
-                    }
+            let id = Sha256::digest(&cert_der_bytes(*issuer)).to_vec();
+            if processed.insert(id) {
+                if let Ok(ca_cert) = Cert::new(*issuer) {
+                    new_objects.push(Object::Cert(ca_cert));
                 } else {
-                    debug!(
-                        "CA {:?} is a Windows-trusted root but its EKU excludes email protection; \
-                         not granting NSS email trust",
+                    error!(
+                        "Cert::new failed for issuer {:?}",
                         String::from_utf8_lossy(&label)
                     );
                 }
+                let in_root = cert_exists_in_store(*root_store, *issuer);
+                debug!(
+                    "list_root_trust_objects: issuer {:?} in ROOT store: {in_root}",
+                    String::from_utf8_lossy(&label)
+                );
+                if in_root {
+                    if eku_permits_email_protection(*issuer) {
+                        match Trust::new(*issuer) {
+                            Ok(trust) => {
+                                info!(
+                                    "granting NSS email trust to Windows-trusted root CA {:?}",
+                                    String::from_utf8_lossy(&label)
+                                );
+                                new_objects.push(Object::Trust(trust));
+                            }
+                            Err(()) => error!("Trust::new failed for a Windows-trusted root CA"),
+                        }
+                    } else {
+                        debug!(
+                            "CA {:?} is a Windows-trusted root but its EKU excludes email \
+                             protection; not granting NSS email trust",
+                            String::from_utf8_lossy(&label)
+                        );
+                    }
+                }
+            } else {
+                debug!(
+                    "list_root_trust_objects: issuer {:?} already processed this scan, \
+                     continuing walk past it",
+                    String::from_utf8_lossy(&label)
+                );
             }
+            // Stop once we've reached a self-signed certificate (top of chain). `MAX_CHAIN_DEPTH`
+            // above bounds the loop regardless, in case Windows ever hands back something
+            // unexpected instead of clearly signaling self-signedness.
             let is_self_signed = cert_is_self_signed(*issuer);
             current = issuer;
             if is_self_signed {
