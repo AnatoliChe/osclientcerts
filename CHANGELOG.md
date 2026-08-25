@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file. Pre-built DLLs 
 are published on the GitHub
 [releases page](https://github.com/AnatoliChe/osclientcerts/releases).
 
+## 0.3.10 - 2026-08-25
+
+- Private key objects now expose `CKA_LABEL`, `CKA_SUBJECT`, `CKA_ISSUER`, and
+  `CKA_SERIAL_NUMBER` derived from the associated certificate. Without these attributes, NSS
+  couldn't match private keys to certificates during CMS signing, causing
+  `nsCMSEncoder::Finish - can't finish encoder`.
+
 ## 0.3.9 - 2026-08-25
 
 - Private key objects now report `CKA_SIGN=TRUE`, `CKA_DECRYPT=TRUE`, `CKA_SENSITIVE=TRUE`,
