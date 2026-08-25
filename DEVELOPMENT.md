@@ -246,6 +246,11 @@ Semantics follow the PKCS #11 specification:
 - closing a session discards any buffered parts along with the operation;
 - the total amount of buffered data per operation is bounded
   (`MAX_TOTAL_OPERATION_DATA_LEN`, 64 KiB); exceeding it fails the update with `CKR_DATA_LEN_RANGE`.
+- `C_EncryptUpdate` and `C_DecryptUpdate` follow the standard output convention explicitly: they
+  never produce partial output, so on success they store zero into the caller's output-length
+  slot. That slot is mandatory - a null length pointer is rejected with `CKR_ARGUMENTS_BAD`
+  before any operation-state access. The output buffer itself may be null or of any size, since
+  an empty result fits anywhere; a failed update leaves the caller's length slot untouched.
 
 Stub-backend tests verify that multipart results equal single-shot results over the concatenated
 input, that buffer-too-small retries preserve the pending operation, and that abandoned sessions

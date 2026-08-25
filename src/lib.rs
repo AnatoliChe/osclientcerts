@@ -827,8 +827,12 @@ extern "C" fn C_EncryptUpdate(
     pPart: CK_BYTE_PTR,
     ulPartLen: CK_ULONG,
     _pEncryptedPart: CK_BYTE_PTR,
-    _pulEncryptedPartLen: CK_ULONG_PTR,
+    pulEncryptedPartLen: CK_ULONG_PTR,
 ) -> CK_RV {
+    if pulEncryptedPartLen.is_null() {
+        error!("C_EncryptUpdate: null output length pointer");
+        return CKR_ARGUMENTS_BAD;
+    }
     if ulPartLen > MAX_DATA_LEN {
         error!("C_EncryptUpdate: unreasonable data length {ulPartLen}");
         return CKR_ARGUMENTS_BAD;
@@ -848,7 +852,12 @@ extern "C" fn C_EncryptUpdate(
             return crypto_error_to_rv("C_EncryptUpdate: encrypt_update failed", &err);
         }
     }
-    debug!("C_EncryptUpdate: CKR_OK");
+    // Explicit output convention: RSA is not a streaming mechanism, so no partial output is ever
+    // produced here - the complete result is delivered by `C_EncryptFinal`. Report that through
+    // the standard output contract instead of leaving the caller's length slot untouched (an
+    // empty result fits any buffer the caller provided, including a null one).
+    unsafe { *pulEncryptedPartLen = 0 };
+    debug!("C_EncryptUpdate: CKR_OK (no partial output)");
     CKR_OK
 }
 
@@ -1043,8 +1052,12 @@ extern "C" fn C_DecryptUpdate(
     pEncryptedPart: CK_BYTE_PTR,
     ulEncryptedPartLen: CK_ULONG,
     _pPart: CK_BYTE_PTR,
-    _pulPartLen: CK_ULONG_PTR,
+    pulPartLen: CK_ULONG_PTR,
 ) -> CK_RV {
+    if pulPartLen.is_null() {
+        error!("C_DecryptUpdate: null output length pointer");
+        return CKR_ARGUMENTS_BAD;
+    }
     if ulEncryptedPartLen > MAX_DATA_LEN {
         error!("C_DecryptUpdate: unreasonable data length {ulEncryptedPartLen}");
         return CKR_ARGUMENTS_BAD;
@@ -1064,7 +1077,10 @@ extern "C" fn C_DecryptUpdate(
             return crypto_error_to_rv("C_DecryptUpdate: decrypt_update failed", &err);
         }
     }
-    debug!("C_DecryptUpdate: CKR_OK");
+    // See C_EncryptUpdate: zero-length partial output is reported through the caller's length
+    // slot rather than implied; the complete plaintext arrives via `C_DecryptFinal`.
+    unsafe { *pulPartLen = 0 };
+    debug!("C_DecryptUpdate: CKR_OK (no partial output)");
     CKR_OK
 }
 
@@ -2116,26 +2132,29 @@ mod tests {
             CKR_OK
         );
         let (p1, p2) = plaintext.split_at(37);
+        let mut partial_len: CK_ULONG = 0;
         assert_eq!(
             C_EncryptUpdate(
                 session_a,
                 p1.as_ptr() as CK_BYTE_PTR,
                 p1.len() as CK_ULONG,
                 std::ptr::null_mut(),
-                std::ptr::null_mut()
+                &mut partial_len
             ),
             CKR_OK
         );
+        assert_eq!(partial_len, 0);
         assert_eq!(
             C_EncryptUpdate(
                 session_a,
                 p2.as_ptr() as CK_BYTE_PTR,
                 p2.len() as CK_ULONG,
                 std::ptr::null_mut(),
-                std::ptr::null_mut()
+                &mut partial_len
             ),
             CKR_OK
         );
+        assert_eq!(partial_len, 0);
         let mut ct_len: CK_ULONG = 0;
         assert_eq!(
             C_EncryptFinal(session_a, std::ptr::null_mut(), &mut ct_len),
@@ -2187,6 +2206,7 @@ mod tests {
             C_DecryptInit(session_c, &mut pkcs1_mechanism(), key),
             CKR_OK
         );
+        let mut partial_len: CK_ULONG = 0;
         let half = out_len as usize / 2;
         let (c1, c2) = ciphertext_multipart[..half].split_at(half / 2);
         assert_eq!(
@@ -2195,31 +2215,35 @@ mod tests {
                 c1.as_ptr() as CK_BYTE_PTR,
                 c1.len() as CK_ULONG,
                 std::ptr::null_mut(),
-                std::ptr::null_mut()
+                &mut partial_len
             ),
             CKR_OK
         );
+        assert_eq!(partial_len, 0);
         assert_eq!(
             C_DecryptUpdate(
                 session_c,
                 c2.as_ptr() as CK_BYTE_PTR,
                 c2.len() as CK_ULONG,
                 std::ptr::null_mut(),
-                std::ptr::null_mut()
+                &mut partial_len
             ),
             CKR_OK
         );
+        assert_eq!(partial_len, 0);
         let remainder = &ciphertext_multipart[half..];
+        // The output buffer itself may be null because no partial output is ever produced.
         assert_eq!(
             C_DecryptUpdate(
                 session_c,
                 remainder.as_ptr() as CK_BYTE_PTR,
                 remainder.len() as CK_ULONG,
                 std::ptr::null_mut(),
-                std::ptr::null_mut()
+                &mut partial_len
             ),
             CKR_OK
         );
+        assert_eq!(partial_len, 0);
         let mut pt_len: CK_ULONG = 0;
         assert_eq!(
             C_DecryptFinal(session_c, std::ptr::null_mut(), &mut pt_len),
@@ -2275,26 +2299,119 @@ mod tests {
             C_SignUpdate(session, data.as_ptr() as CK_BYTE_PTR, 4),
             CKR_FUNCTION_FAILED
         );
+        let mut partial_len: CK_ULONG = 0xdead_beef;
         assert_eq!(
             C_EncryptUpdate(
                 session,
                 data.as_ptr() as CK_BYTE_PTR,
                 4,
                 std::ptr::null_mut(),
-                std::ptr::null_mut()
+                &mut partial_len
             ),
             CKR_FUNCTION_FAILED
         );
+        // A failed update must leave the caller's length slot untouched.
+        assert_eq!(partial_len, 0xdead_beef);
         assert_eq!(
             C_DecryptUpdate(
                 session,
                 data.as_ptr() as CK_BYTE_PTR,
                 4,
                 std::ptr::null_mut(),
-                std::ptr::null_mut()
+                &mut partial_len
             ),
             CKR_FUNCTION_FAILED
         );
+        assert_eq!(partial_len, 0xdead_beef);
+    }
+
+    /// The output length pointer is mandatory: without it the caller could never learn how many
+    /// bytes of partial output were produced (always zero here). Rejection happens before any
+    /// operation-state access, so it does not depend on an active operation existing.
+    #[test]
+    fn encrypt_decrypt_update_reject_null_output_length_pointer() {
+        let data = [0u8; 4];
+        assert_eq!(
+            C_EncryptUpdate(
+                1,
+                data.as_ptr() as CK_BYTE_PTR,
+                4,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            CKR_ARGUMENTS_BAD
+        );
+        assert_eq!(
+            C_DecryptUpdate(
+                1,
+                data.as_ptr() as CK_BYTE_PTR,
+                4,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            CKR_ARGUMENTS_BAD
+        );
+    }
+
+    /// Successful updates report "no partial output" by storing zero into the caller's length
+    /// slot, and accept any output buffer including a null one.
+    #[test]
+    fn successful_updates_report_zero_partial_output_length() {
+        let plaintext = [0x11_u8; 32];
+        let session = open_session();
+        let key = find_key(session);
+        assert_eq!(C_EncryptInit(session, &mut pkcs1_mechanism(), key), CKR_OK);
+        let mut partial_len: CK_ULONG = 0xdead_beef;
+        // Null output buffer is fine - no partial output is produced.
+        assert_eq!(
+            C_EncryptUpdate(
+                session,
+                plaintext.as_ptr() as CK_BYTE_PTR,
+                plaintext.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                &mut partial_len
+            ),
+            CKR_OK
+        );
+        assert_eq!(partial_len, 0);
+        // A non-null buffer of any size is equally fine and stays untouched.
+        let mut tiny_out = [0u8; 1];
+        partial_len = tiny_out.len() as CK_ULONG;
+        assert_eq!(
+            C_EncryptUpdate(
+                session,
+                plaintext.as_ptr() as CK_BYTE_PTR,
+                plaintext.len() as CK_ULONG,
+                tiny_out.as_mut_ptr(),
+                &mut partial_len
+            ),
+            CKR_OK
+        );
+        assert_eq!(partial_len, 0);
+        assert_eq!(
+            C_EncryptFinal(session, std::ptr::null_mut(), &mut partial_len),
+            CKR_OK
+        );
+
+        let ciphertext = [0x22_u8; 128];
+        let session_d = open_session();
+        assert_eq!(
+            C_DecryptInit(session_d, &mut pkcs1_mechanism(), key),
+            CKR_OK
+        );
+        let mut out = [0u8; 8];
+        partial_len = out.len() as CK_ULONG;
+        assert_eq!(
+            C_DecryptUpdate(
+                session_d,
+                ciphertext.as_ptr() as CK_BYTE_PTR,
+                ciphertext.len() as CK_ULONG,
+                out.as_mut_ptr(),
+                &mut partial_len
+            ),
+            CKR_OK
+        );
+        assert_eq!(partial_len, 0);
     }
 
     #[test]
@@ -2524,13 +2641,14 @@ mod ffi_hardening_tests {
 
     #[test]
     fn encrypt_update_rejects_null_part_with_nonzero_length() {
+        let mut partial_len: CK_ULONG = 0;
         assert_eq!(
             C_EncryptUpdate(
                 1,
                 std::ptr::null_mut(),
                 4,
                 std::ptr::null_mut(),
-                std::ptr::null_mut()
+                &mut partial_len
             ),
             CKR_ARGUMENTS_BAD
         );
@@ -2539,13 +2657,14 @@ mod ffi_hardening_tests {
     #[test]
     fn encrypt_update_rejects_huge_part_length() {
         let backing = [0u8; 4];
+        let mut partial_len: CK_ULONG = 0;
         assert_eq!(
             C_EncryptUpdate(
                 1,
                 backing.as_ptr() as CK_BYTE_PTR,
                 CK_ULONG::MAX,
                 std::ptr::null_mut(),
-                std::ptr::null_mut()
+                &mut partial_len
             ),
             CKR_ARGUMENTS_BAD
         );
@@ -2553,13 +2672,14 @@ mod ffi_hardening_tests {
 
     #[test]
     fn decrypt_update_rejects_null_part_with_nonzero_length() {
+        let mut partial_len: CK_ULONG = 0;
         assert_eq!(
             C_DecryptUpdate(
                 1,
                 std::ptr::null_mut(),
                 4,
                 std::ptr::null_mut(),
-                std::ptr::null_mut()
+                &mut partial_len
             ),
             CKR_ARGUMENTS_BAD
         );
@@ -2574,13 +2694,14 @@ mod ffi_hardening_tests {
             C_SignUpdate(1, std::ptr::null_mut(), 0),
             CKR_FUNCTION_FAILED
         );
+        let mut partial_len: CK_ULONG = 0;
         assert_eq!(
             C_EncryptUpdate(
                 1,
                 std::ptr::null_mut(),
                 0,
                 std::ptr::null_mut(),
-                std::ptr::null_mut()
+                &mut partial_len
             ),
             CKR_FUNCTION_FAILED
         );
@@ -2590,7 +2711,7 @@ mod ffi_hardening_tests {
                 std::ptr::null_mut(),
                 0,
                 std::ptr::null_mut(),
-                std::ptr::null_mut()
+                &mut partial_len
             ),
             CKR_FUNCTION_FAILED
         );
@@ -2599,13 +2720,14 @@ mod ffi_hardening_tests {
     #[test]
     fn decrypt_update_rejects_huge_part_length() {
         let backing = [0u8; 4];
+        let mut partial_len: CK_ULONG = 0;
         assert_eq!(
             C_DecryptUpdate(
                 1,
                 backing.as_ptr() as CK_BYTE_PTR,
                 CK_ULONG::MAX,
                 std::ptr::null_mut(),
-                std::ptr::null_mut()
+                &mut partial_len
             ),
             CKR_ARGUMENTS_BAD
         );
