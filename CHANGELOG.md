@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. Pre-built DLLs 
 are published on the GitHub
 [releases page](https://github.com/AnatoliChe/osclientcerts/releases).
 
+## 0.3.9 - 2026-08-25
+
+- Private key objects now report `CKA_SIGN=TRUE`, `CKA_DECRYPT=TRUE`, `CKA_SENSITIVE=TRUE`,
+  `CKA_EXTRACTABLE=FALSE`, `CKA_ALWAYS_AUTHENTICATE=FALSE`, and `CKA_LOCAL=TRUE`. Without
+  `CKA_SIGN`, NSS never called `C_SignInit`/`C_Sign`, preventing email signing.
+
 ## 0.3.8 - 2026-08-25
 
 - Module lifecycle: `C_Initialize` on an already-initialized module now returns
