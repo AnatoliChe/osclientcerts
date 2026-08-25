@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file. Pre-built DLLs 
 are published on the GitHub
 [releases page](https://github.com/AnatoliChe/osclientcerts/releases).
 
-## Unreleased
+## 0.3.7 - 2026-08-25
 
 - `C_EncryptUpdate` and `C_DecryptUpdate` now follow the standard output convention explicitly:
   on success they store zero into the caller's output-length slot (previously the slot was left
