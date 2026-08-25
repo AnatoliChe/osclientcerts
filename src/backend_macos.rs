@@ -723,27 +723,27 @@ impl Key {
         }
     }
 
-    fn sign(&self) -> &[u8] {
+    fn sign_flag(&self) -> &[u8] {
         &self.sign
     }
 
-    fn decrypt(&self) -> &[u8] {
+    fn decrypt_flag(&self) -> &[u8] {
         &self.decrypt
     }
 
-    fn sensitive(&self) -> &[u8] {
+    fn sensitive_flag(&self) -> &[u8] {
         &self.sensitive
     }
 
-    fn extractable(&self) -> &[u8] {
+    fn extractable_flag(&self) -> &[u8] {
         &self.extractable
     }
 
-    fn always_authenticate(&self) -> &[u8] {
+    fn always_authenticate_flag(&self) -> &[u8] {
         &self.always_authenticate
     }
 
-    fn local(&self) -> &[u8] {
+    fn local_flag(&self) -> &[u8] {
         &self.local
     }
 
@@ -754,12 +754,12 @@ impl Key {
                 CKA_TOKEN => self.token(),
                 CKA_ID => self.id(),
                 CKA_PRIVATE => self.private(),
-                CKA_SIGN => self.sign(),
-                CKA_DECRYPT => self.decrypt(),
-                CKA_SENSITIVE => self.sensitive(),
-                CKA_EXTRACTABLE => self.extractable(),
-                CKA_ALWAYS_AUTHENTICATE => self.always_authenticate(),
-                CKA_LOCAL => self.local(),
+                CKA_SIGN => self.sign_flag(),
+                CKA_DECRYPT => self.decrypt_flag(),
+                CKA_SENSITIVE => self.sensitive_flag(),
+                CKA_EXTRACTABLE => self.extractable_flag(),
+                CKA_ALWAYS_AUTHENTICATE => self.always_authenticate_flag(),
+                CKA_LOCAL => self.local_flag(),
                 CKA_KEY_TYPE => self.key_type(),
                 CKA_MODULUS => {
                     if let Some(modulus) = self.modulus() {
@@ -793,12 +793,12 @@ impl Key {
             CKA_KEY_TYPE => Some(self.key_type()),
             CKA_MODULUS => self.modulus(),
             CKA_EC_PARAMS => self.ec_params(),
-            CKA_SIGN => Some(self.sign()),
-            CKA_DECRYPT => Some(self.decrypt()),
-            CKA_SENSITIVE => Some(self.sensitive()),
-            CKA_EXTRACTABLE => Some(self.extractable()),
-            CKA_ALWAYS_AUTHENTICATE => Some(self.always_authenticate()),
-            CKA_LOCAL => Some(self.local()),
+            CKA_SIGN => Some(self.sign_flag()),
+            CKA_DECRYPT => Some(self.decrypt_flag()),
+            CKA_SENSITIVE => Some(self.sensitive_flag()),
+            CKA_EXTRACTABLE => Some(self.extractable_flag()),
+            CKA_ALWAYS_AUTHENTICATE => Some(self.always_authenticate_flag()),
+            CKA_LOCAL => Some(self.local_flag()),
             _ => None,
         }
     }

@@ -714,27 +714,27 @@ impl Key {
         }
     }
 
-    fn sign(&self) -> &[u8] {
+    fn sign_flag(&self) -> &[u8] {
         &self.sign
     }
 
-    fn decrypt(&self) -> &[u8] {
+    fn decrypt_flag(&self) -> &[u8] {
         &self.decrypt
     }
 
-    fn sensitive(&self) -> &[u8] {
+    fn sensitive_flag(&self) -> &[u8] {
         &self.sensitive
     }
 
-    fn extractable(&self) -> &[u8] {
+    fn extractable_flag(&self) -> &[u8] {
         &self.extractable
     }
 
-    fn always_authenticate(&self) -> &[u8] {
+    fn always_authenticate_flag(&self) -> &[u8] {
         &self.always_authenticate
     }
 
-    fn local(&self) -> &[u8] {
+    fn local_flag(&self) -> &[u8] {
         &self.local
     }
 
@@ -744,14 +744,14 @@ impl Key {
             .all(|(attr_type, attr_value)| match *attr_type {
                 CKA_TOKEN => bool_attr_matches(self.token(), attr_value),
                 CKA_PRIVATE => bool_attr_matches(self.private(), attr_value),
-                CKA_SIGN => bool_attr_matches(self.sign(), attr_value),
-                CKA_DECRYPT => bool_attr_matches(self.decrypt(), attr_value),
-                CKA_SENSITIVE => bool_attr_matches(self.sensitive(), attr_value),
-                CKA_EXTRACTABLE => bool_attr_matches(self.extractable(), attr_value),
+                CKA_SIGN => bool_attr_matches(self.sign_flag(), attr_value),
+                CKA_DECRYPT => bool_attr_matches(self.decrypt_flag(), attr_value),
+                CKA_SENSITIVE => bool_attr_matches(self.sensitive_flag(), attr_value),
+                CKA_EXTRACTABLE => bool_attr_matches(self.extractable_flag(), attr_value),
                 CKA_ALWAYS_AUTHENTICATE => {
-                    bool_attr_matches(self.always_authenticate(), attr_value)
+                    bool_attr_matches(self.always_authenticate_flag(), attr_value)
                 }
-                CKA_LOCAL => bool_attr_matches(self.local(), attr_value),
+                CKA_LOCAL => bool_attr_matches(self.local_flag(), attr_value),
                 _ => {
                     let comparison = match *attr_type {
                         CKA_CLASS => self.class(),
@@ -787,12 +787,12 @@ impl Key {
             CKA_KEY_TYPE => Some(self.key_type()),
             CKA_MODULUS => self.modulus(),
             CKA_EC_PARAMS => self.ec_params(),
-            CKA_SIGN => Some(self.sign()),
-            CKA_DECRYPT => Some(self.decrypt()),
-            CKA_SENSITIVE => Some(self.sensitive()),
-            CKA_EXTRACTABLE => Some(self.extractable()),
-            CKA_ALWAYS_AUTHENTICATE => Some(self.always_authenticate()),
-            CKA_LOCAL => Some(self.local()),
+            CKA_SIGN => Some(self.sign_flag()),
+            CKA_DECRYPT => Some(self.decrypt_flag()),
+            CKA_SENSITIVE => Some(self.sensitive_flag()),
+            CKA_EXTRACTABLE => Some(self.extractable_flag()),
+            CKA_ALWAYS_AUTHENTICATE => Some(self.always_authenticate_flag()),
+            CKA_LOCAL => Some(self.local_flag()),
             _ => None,
         }
     }
