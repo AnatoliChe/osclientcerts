@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file. Pre-built DLLs 
 are published on the GitHub
 [releases page](https://github.com/AnatoliChe/osclientcerts/releases).
 
-## Unreleased
+## 0.3.8 - 2026-08-25
 
 - Module lifecycle: `C_Initialize` on an already-initialized module now returns
   `CKR_CRYPTOKI_ALREADY_INITIALIZED`; `C_Finalize` without a prior successful initialization
