@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file. Pre-built DLLs 
 are published on the GitHub
 [releases page](https://github.com/AnatoliChe/osclientcerts/releases).
 
-## Unreleased
+## 0.3.6 - 2026-08-25
 
 - Soundness: caller-supplied input buffers are now converted to slices through a single
   `input_slice` helper that accepts a null pointer only for zero-length buffers. Previously the
