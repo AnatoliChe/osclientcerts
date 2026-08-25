@@ -4,7 +4,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use pkcs11::types::*;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 #[cfg(target_os = "macos")]
 use crate::backend_macos as backend;
@@ -32,7 +32,7 @@ type ManagerReturnValueReceiver = Receiver<ManagerReturnValue>;
 /// `ManagerArguments::Stop` is a special variant that stops the background thread and drops the
 /// `Manager`.
 enum ManagerArguments {
-    OpenSession,
+    OpenSession(CK_FLAGS),
     CloseSession(CK_SESSION_HANDLE),
     CloseAllSessions,
     StartSearch(CK_SESSION_HANDLE, Vec<(CK_ATTRIBUTE_TYPE, Vec<u8>)>),
@@ -61,6 +61,7 @@ enum ManagerArguments {
     EncryptUpdate(CK_SESSION_HANDLE, Vec<u8>),
     GetFinalEncryptedLength(CK_SESSION_HANDLE),
     EncryptFinal(CK_SESSION_HANDLE),
+    GetSessionInfo(CK_SESSION_HANDLE),
     Stop,
 }
 
@@ -69,6 +70,7 @@ enum ManagerArguments {
 /// `Manager` will stop.
 enum ManagerReturnValue {
     OpenSession(Result<CK_SESSION_HANDLE, ()>),
+    GetSessionInfo(Result<CK_FLAGS, ()>),
     CloseSession(Result<(), ()>),
     CloseAllSessions(Result<(), ()>),
     StartSearch(Result<(), ()>),
@@ -138,8 +140,8 @@ impl ManagerProxy {
                     }
                 };
                 let results = match arguments {
-                    ManagerArguments::OpenSession => {
-                        ManagerReturnValue::OpenSession(real_manager.open_session())
+                    ManagerArguments::OpenSession(flags) => {
+                        ManagerReturnValue::OpenSession(real_manager.open_session(flags))
                     }
                     ManagerArguments::CloseSession(session_handle) => {
                         ManagerReturnValue::CloseSession(real_manager.close_session(session_handle))
@@ -237,6 +239,9 @@ impl ManagerProxy {
                     ManagerArguments::EncryptFinal(session) => {
                         ManagerReturnValue::EncryptFinal(real_manager.encrypt_final(session))
                     }
+                    ManagerArguments::GetSessionInfo(session) => {
+                        ManagerReturnValue::GetSessionInfo(real_manager.get_session_info(session))
+                    }
                     ManagerArguments::Stop => {
                         debug!("ManagerArguments::Stop received - stopping Manager thread.");
                         ManagerReturnValue::Stop(Ok(()))
@@ -280,11 +285,19 @@ impl ManagerProxy {
         Ok(result)
     }
 
-    pub fn open_session(&mut self) -> Result<CK_SESSION_HANDLE, ()> {
+    pub fn open_session(&mut self, flags: CK_FLAGS) -> Result<CK_SESSION_HANDLE, ()> {
         manager_proxy_fn_impl!(
             self,
-            ManagerArguments::OpenSession,
+            ManagerArguments::OpenSession(flags),
             ManagerReturnValue::OpenSession
+        )
+    }
+
+    pub fn get_session_info(&mut self, session: CK_SESSION_HANDLE) -> Result<CK_FLAGS, ()> {
+        manager_proxy_fn_impl!(
+            self,
+            ManagerArguments::GetSessionInfo(session),
+            ManagerReturnValue::GetSessionInfo
         )
     }
 
@@ -575,9 +588,13 @@ impl ManagerProxy {
 /// The `Manager` keeps track of the state of this module with respect to the PKCS #11
 /// specification. This includes what sessions are open, which search and sign operations are
 /// ongoing, and what objects are known and by what handle.
+#[cfg(test)]
+const TEST_SESSION_FLAGS: CK_FLAGS = CKF_SERIAL_SESSION | CKF_RW_SESSION;
+
 struct Manager {
-    /// A set of sessions. Sessions can be created (opened) and later closed.
-    sessions: BTreeSet<CK_SESSION_HANDLE>,
+    /// A map of open sessions to the flags they were opened with. Sessions can be created
+    /// (opened) and later closed.
+    sessions: HashMap<CK_SESSION_HANDLE, CK_FLAGS>,
     /// A map of searches to PKCS #11 object handles that match those searches.
     searches: BTreeMap<CK_SESSION_HANDLE, Vec<CK_OBJECT_HANDLE>>,
     /// A map of sign operations to a triple of the object handle, optionally some params being
@@ -611,7 +628,7 @@ struct Manager {
 impl Manager {
     pub fn new() -> Manager {
         let mut manager = Manager {
-            sessions: BTreeSet::new(),
+            sessions: HashMap::new(),
             searches: BTreeMap::new(),
             signs: BTreeMap::new(),
             decrypts: BTreeMap::new(),
@@ -679,16 +696,22 @@ impl Manager {
         }
     }
 
-    pub fn open_session(&mut self) -> Result<CK_SESSION_HANDLE, ()> {
+    pub fn open_session(&mut self, flags: CK_FLAGS) -> Result<CK_SESSION_HANDLE, ()> {
         self.maybe_find_new_objects();
         let next_session = self.next_session;
         self.next_session += 1;
-        self.sessions.insert(next_session);
+        self.sessions.insert(next_session, flags);
         Ok(next_session)
     }
 
+    /// Returns the flags the given session was opened with, or an error if the session handle is
+    /// not currently open. The caller derives the PKCS #11 session state from the flags.
+    pub fn get_session_info(&mut self, session: CK_SESSION_HANDLE) -> Result<CK_FLAGS, ()> {
+        self.sessions.get(&session).copied().ok_or(())
+    }
+
     pub fn close_session(&mut self, session: CK_SESSION_HANDLE) -> Result<(), ()> {
-        if self.sessions.remove(&session) {
+        if self.sessions.remove(&session).is_some() {
             // Per PKCS #11, closing a session terminates any active operations on it.
             self.searches.remove(&session);
             self.signs.remove(&session);
@@ -1118,7 +1141,9 @@ mod tests {
 
     /// Open a session and find the single private-key object the stub backend provides.
     fn find_key_handle(manager: &mut Manager) -> CK_OBJECT_HANDLE {
-        let search_session = manager.open_session().expect("open_session failed");
+        let search_session = manager
+            .open_session(TEST_SESSION_FLAGS)
+            .expect("open_session failed");
         manager
             .start_search(
                 search_session,
@@ -1135,7 +1160,7 @@ mod tests {
     fn close_session_clears_decrypt_operation() {
         let mut manager = Manager::new();
         let key_handle = find_key_handle(&mut manager);
-        let session = manager.open_session().unwrap();
+        let session = manager.open_session(TEST_SESSION_FLAGS).unwrap();
         manager
             .start_decrypt(session, key_handle, RsaCipherMechanism::Pkcs1v15)
             .expect("start_decrypt failed");
@@ -1155,7 +1180,7 @@ mod tests {
     fn close_session_clears_encrypt_operation() {
         let mut manager = Manager::new();
         let key_handle = find_key_handle(&mut manager);
-        let session = manager.open_session().unwrap();
+        let session = manager.open_session(TEST_SESSION_FLAGS).unwrap();
         manager
             .start_encrypt(session, key_handle, RsaCipherMechanism::Pkcs1v15)
             .expect("start_encrypt failed");
@@ -1174,7 +1199,7 @@ mod tests {
     fn decrypt_operation_survives_failed_length_query() {
         let mut manager = Manager::new();
         let key_handle = find_key_handle(&mut manager);
-        let session = manager.open_session().unwrap();
+        let session = manager.open_session(TEST_SESSION_FLAGS).unwrap();
         manager
             .start_decrypt(session, key_handle, RsaCipherMechanism::Pkcs1v15)
             .unwrap();
@@ -1276,7 +1301,7 @@ mod smime_regression_tests {
     #[test]
     fn smime_rsa_cert_discovery_and_attributes() {
         let mut manager = Manager::new();
-        let session = manager.open_session().unwrap();
+        let session = manager.open_session(TEST_SESSION_FLAGS).unwrap();
         let (cert_handle, _id) = find_marker_cert(&mut manager, session, MARKER_RSA);
         let values = manager
             .get_attributes(
@@ -1304,7 +1329,7 @@ mod smime_regression_tests {
     #[test]
     fn smime_key_matches_certificate_by_id() {
         let mut manager = Manager::new();
-        let session = manager.open_session().unwrap();
+        let session = manager.open_session(TEST_SESSION_FLAGS).unwrap();
         let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session, MARKER_RSA);
         let key_handle = find_key_for_cert(&mut manager, session, cert_id);
         let values = manager
@@ -1343,7 +1368,7 @@ mod smime_regression_tests {
     #[test]
     fn smime_rsa_pkcs1_signature_structure() {
         let mut manager = Manager::new();
-        let session = manager.open_session().unwrap();
+        let session = manager.open_session(TEST_SESSION_FLAGS).unwrap();
         let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session, MARKER_RSA);
         let key_handle = find_key_for_cert(&mut manager, session, cert_id);
 
@@ -1396,7 +1421,7 @@ mod smime_regression_tests {
     #[test]
     fn smime_rsa_multipart_signature_matches_single_shot() {
         let mut manager = Manager::new();
-        let session = manager.open_session().unwrap();
+        let session = manager.open_session(TEST_SESSION_FLAGS).unwrap();
         let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session, MARKER_RSA);
         let key_handle = find_key_for_cert(&mut manager, session, cert_id);
 
@@ -1431,7 +1456,7 @@ mod smime_regression_tests {
     #[test]
     fn smime_rsa_pss_signature_structure() {
         let mut manager = Manager::new();
-        let session = manager.open_session().unwrap();
+        let session = manager.open_session(TEST_SESSION_FLAGS).unwrap();
         let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session, MARKER_RSA);
         let key_handle = find_key_for_cert(&mut manager, session, cert_id);
 
@@ -1464,10 +1489,41 @@ mod smime_regression_tests {
         );
     }
 
+    /// Feeds `data` to the session's pending encrypt operation in three uneven parts.
+    fn multipart_encrypt(
+        manager: &mut Manager,
+        session: CK_SESSION_HANDLE,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let (a, rest) = data.split_at(data.len() / 3);
+        let (b, c) = rest.split_at(rest.len() / 2);
+        for part in [a, b, c] {
+            manager.encrypt_update(session, part).unwrap();
+        }
+        let len = manager.get_final_encrypted_length(session).unwrap();
+        assert_eq!(len, 256, "RSA-2048 output must be exactly 256 bytes");
+        manager.encrypt_final(session).unwrap()
+    }
+
+    /// Feeds `data` to the session's pending decrypt operation in three uneven parts and
+    /// returns the complete plaintext from C_DecryptFinal.
+    fn multipart_decrypt(
+        manager: &mut Manager,
+        session: CK_SESSION_HANDLE,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let (a, rest) = data.split_at(data.len() / 2);
+        let (b, c) = rest.split_at(rest.len() / 2);
+        for part in [a, b, c] {
+            manager.decrypt_update(session, part).unwrap();
+        }
+        manager.decrypt_final(session).unwrap()
+    }
+
     #[test]
     fn smime_rsa_pkcs1_encrypt_decrypt_roundtrip() {
         let mut manager = Manager::new();
-        let session = manager.open_session().unwrap();
+        let session = manager.open_session(TEST_SESSION_FLAGS).unwrap();
         let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session, MARKER_RSA);
         let key_handle = find_key_for_cert(&mut manager, session, cert_id);
 
@@ -1488,7 +1544,7 @@ mod smime_regression_tests {
     #[test]
     fn smime_rsa_oaep_sha256_roundtrip_with_label() {
         let mut manager = Manager::new();
-        let session = manager.open_session().unwrap();
+        let session = manager.open_session(TEST_SESSION_FLAGS).unwrap();
         let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session, MARKER_RSA);
         let key_handle = find_key_for_cert(&mut manager, session, cert_id);
 
@@ -1520,9 +1576,67 @@ mod smime_regression_tests {
     }
 
     #[test]
+    #[test]
+    fn smime_rsa_multipart_pkcs1_encrypt_decrypt_roundtrip() {
+        let mut manager = Manager::new();
+        let session_e = manager.open_session(TEST_SESSION_FLAGS).unwrap();
+        let session_d = manager.open_session(TEST_SESSION_FLAGS).unwrap();
+        let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session_e, MARKER_RSA);
+        let key_handle = find_key_for_cert(&mut manager, session_e, cert_id);
+
+        let plaintext: Vec<u8> = (0..100u8).collect();
+        manager
+            .start_encrypt(session_e, key_handle, RsaCipherMechanism::Pkcs1v15)
+            .unwrap();
+        let ciphertext = multipart_encrypt(&mut manager, session_e, &plaintext);
+        assert_ne!(ciphertext, plaintext);
+
+        manager
+            .start_decrypt(session_d, key_handle, RsaCipherMechanism::Pkcs1v15)
+            .unwrap();
+        let decrypted = multipart_decrypt(&mut manager, session_d, &ciphertext);
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn smime_rsa_multipart_oaep_sha256_encrypt_decrypt_roundtrip() {
+        let mut manager = Manager::new();
+        let session_e = manager.open_session(TEST_SESSION_FLAGS).unwrap();
+        let session_d = manager.open_session(TEST_SESSION_FLAGS).unwrap();
+        let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session_e, MARKER_RSA);
+        let key_handle = find_key_for_cert(&mut manager, session_e, cert_id);
+
+        let label = b"smime-multipart-oaep".to_vec();
+        let plaintext: Vec<u8> = (0..100u8).rev().collect();
+        manager
+            .start_encrypt(
+                session_e,
+                key_handle,
+                RsaCipherMechanism::Oaep {
+                    hash_alg: CKM_SHA256,
+                    label: label.clone(),
+                },
+            )
+            .unwrap();
+        let ciphertext = multipart_encrypt(&mut manager, session_e, &plaintext);
+
+        manager
+            .start_decrypt(
+                session_d,
+                key_handle,
+                RsaCipherMechanism::Oaep {
+                    hash_alg: CKM_SHA256,
+                    label,
+                },
+            )
+            .unwrap();
+        let decrypted = multipart_decrypt(&mut manager, session_d, &ciphertext);
+        assert_eq!(decrypted, plaintext);
+    }
+
     fn smime_ecdsa_signature_structure() {
         let mut manager = Manager::new();
-        let session = manager.open_session().unwrap();
+        let session = manager.open_session(TEST_SESSION_FLAGS).unwrap();
         let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session, MARKER_EC);
         let key_handle = find_key_for_cert(&mut manager, session, cert_id);
 
@@ -1559,7 +1673,7 @@ mod smime_regression_tests {
     #[test]
     fn smime_close_session_terminates_real_operation() {
         let mut manager = Manager::new();
-        let session = manager.open_session().unwrap();
+        let session = manager.open_session(TEST_SESSION_FLAGS).unwrap();
         let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session, MARKER_RSA);
         let key_handle = find_key_for_cert(&mut manager, session, cert_id);
         manager

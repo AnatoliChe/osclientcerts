@@ -92,39 +92,38 @@ macro_rules! manager_guard_to_manager {
 /// This gets called to initialize the module. For this implementation, this consists of
 /// instantiating the `ManagerProxy`.
 extern "C" fn C_Initialize(_pInitArgs: CK_C_INITIALIZE_ARGS_PTR) -> CK_RV {
-    // This will fail if this has already been called, but this isn't a problem because either way,
-    // logging has been initialized.
     let _ = env_logger::try_init();
     let mut manager_guard = try_to_get_manager_guard!();
-    if let Some(_unexpected_previous_manager) = manager_guard.replace(ManagerProxy::new()) {
-        #[cfg(target_os = "macos")]
-        {
-            info!(
-                "C_Initialize: manager previously set (this is expected on macOS - replacing it)"
-            );
-        }
-        #[cfg(target_os = "windows")]
-        {
-            warn!(
-                "C_Initialize: manager unexpectedly previously set (bravely continuing by replacing it)"
-            );
-        }
+    // Per PKCS #11, initializing an already-initialized module is an error; the caller must call
+    // C_Finalize first. (The manager left behind by C_Finalize is always fully stopped and taken
+    // out of the proxy slot, so a fresh C_Install here starts from a clean slate.)
+    if manager_guard.is_some() {
+        error!("C_Initialize: module already initialized");
+        return CKR_CRYPTOKI_ALREADY_INITIALIZED;
     }
+    *manager_guard = Some(ManagerProxy::new());
     debug!("C_Initialize: CKR_OK");
     CKR_OK
 }
 
 extern "C" fn C_Finalize(_pReserved: CK_VOID_PTR) -> CK_RV {
     let mut manager_guard = try_to_get_manager_guard!();
-    let manager = manager_guard_to_manager!(manager_guard);
-    match manager.stop() {
-        Ok(()) => {
-            debug!("C_Finalize: CKR_OK");
-            CKR_OK
-        }
-        Err(()) => {
-            debug!("C_Finalize: CKR_DEVICE_ERROR");
-            CKR_DEVICE_ERROR
+    // Take the manager proxy out of the slot before stopping it: after C_Finalize returns, the
+    // module is uninitialized and a subsequent C_Initialize must find no leftover state.
+    match manager_guard.take() {
+        Some(mut manager) => match manager.stop() {
+            Ok(()) => {
+                debug!("C_Finalize: CKR_OK");
+                CKR_OK
+            }
+            Err(()) => {
+                debug!("C_Finalize: CKR_DEVICE_ERROR");
+                CKR_DEVICE_ERROR
+            }
+        },
+        None => {
+            error!("C_Finalize: module not initialized");
+            CKR_CRYPTOKI_NOT_INITIALIZED
         }
     }
 }
@@ -379,18 +378,19 @@ extern "C" fn C_SetPIN(
 /// this.
 extern "C" fn C_OpenSession(
     slotID: CK_SLOT_ID,
-    _flags: CK_FLAGS,
+    flags: CK_FLAGS,
     _pApplication: CK_VOID_PTR,
     _Notify: CK_NOTIFY,
     phSession: CK_SESSION_HANDLE_PTR,
 ) -> CK_RV {
-    if slotID != SLOT_ID || phSession.is_null() {
+    // The specification requires the serial-session flag on every session.
+    if slotID != SLOT_ID || phSession.is_null() || flags & CKF_SERIAL_SESSION == 0 {
         error!("C_OpenSession: CKR_ARGUMENTS_BAD");
         return CKR_ARGUMENTS_BAD;
     }
     let mut manager_guard = try_to_get_manager_guard!();
     let manager = manager_guard_to_manager!(manager_guard);
-    let session_handle = match manager.open_session() {
+    let session_handle = match manager.open_session(flags) {
         Ok(session_handle) => session_handle,
         Err(()) => {
             error!("C_OpenSession: open_session failed");
@@ -436,9 +436,37 @@ extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
     }
 }
 
-extern "C" fn C_GetSessionInfo(_hSession: CK_SESSION_HANDLE, _pInfo: CK_SESSION_INFO_PTR) -> CK_RV {
-    error!("C_GetSessionInfo: CKR_FUNCTION_NOT_SUPPORTED");
-    CKR_FUNCTION_NOT_SUPPORTED
+/// This gets called to obtain information about a session. The provider never implements
+/// C_Login, so every session is a public session; the read-only vs read-write distinction and the
+/// flags reported come from what the session was opened with via C_OpenSession.
+extern "C" fn C_GetSessionInfo(hSession: CK_SESSION_HANDLE, pInfo: CK_SESSION_INFO_PTR) -> CK_RV {
+    if pInfo.is_null() {
+        error!("C_GetSessionInfo: CKR_ARGUMENTS_BAD");
+        return CKR_ARGUMENTS_BAD;
+    }
+    let mut manager_guard = try_to_get_manager_guard!();
+    let manager = manager_guard_to_manager!(manager_guard);
+    let flags = match manager.get_session_info(hSession) {
+        Ok(flags) => flags,
+        Err(()) => {
+            error!("C_GetSessionInfo: CKR_SESSION_HANDLE_INVALID");
+            return CKR_SESSION_HANDLE_INVALID;
+        }
+    };
+    // SAFETY: pInfo was checked non-null above; the caller warrants it points to writable memory
+    // of at least size_of::<CK_SESSION_INFO>(), as required by the C calling convention.
+    unsafe {
+        (*pInfo).slotID = SLOT_ID;
+        (*pInfo).state = if flags & CKF_RW_SESSION != 0 {
+            CKS_RW_PUBLIC_SESSION
+        } else {
+            CKS_RO_PUBLIC_SESSION
+        };
+        (*pInfo).flags = flags | CKF_SERIAL_SESSION;
+        (*pInfo).ulDeviceError = 0;
+    }
+    debug!("C_GetSessionInfo: CKR_OK (session {hSession}, flags {flags:#x})");
+    CKR_OK
 }
 
 extern "C" fn C_GetOperationState(
@@ -1740,7 +1768,7 @@ mod ffi_test_support {
         assert_eq!(
             C_OpenSession(
                 SLOT_ID,
-                CKF_SERIAL_SESSION,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
                 std::ptr::null_mut(),
                 None,
                 &mut session
@@ -1757,6 +1785,64 @@ mod ffi_test_support {
 mod tests {
     use super::*;
     use crate::ffi_test_support::open_session;
+
+    #[test]
+    fn get_session_info_reports_flags_state_and_slot() {
+        let mut info = CK_SESSION_INFO {
+            slotID: 0,
+            state: 0,
+            flags: 0,
+            ulDeviceError: 99,
+        };
+        let rw_session = open_session();
+        assert_eq!(C_GetSessionInfo(rw_session, &mut info), CKR_OK);
+        assert_eq!(info.slotID, SLOT_ID);
+        assert_eq!(info.state, CKS_RW_PUBLIC_SESSION);
+        assert_eq!(info.flags, CKF_SERIAL_SESSION | CKF_RW_SESSION);
+        assert_eq!(info.ulDeviceError, 0);
+
+        let mut ro_session: CK_SESSION_HANDLE = 0;
+        assert_eq!(
+            C_OpenSession(
+                SLOT_ID,
+                CKF_SERIAL_SESSION,
+                std::ptr::null_mut(),
+                None,
+                &mut ro_session
+            ),
+            CKR_OK
+        );
+        assert_eq!(C_GetSessionInfo(ro_session, &mut info), CKR_OK);
+        assert_eq!(info.state, CKS_RO_PUBLIC_SESSION);
+        assert_eq!(info.flags, CKF_SERIAL_SESSION);
+        assert_eq!(info.ulDeviceError, 0);
+
+        assert_eq!(C_CloseSession(ro_session), CKR_OK);
+        assert_eq!(
+            C_GetSessionInfo(ro_session, &mut info),
+            CKR_SESSION_HANDLE_INVALID
+        );
+        assert_eq!(
+            C_GetSessionInfo(rw_session, std::ptr::null_mut()),
+            CKR_ARGUMENTS_BAD
+        );
+        assert_eq!(C_CloseSession(rw_session), CKR_OK);
+    }
+
+    #[test]
+    fn open_session_requires_serial_flag() {
+        let mut session: CK_SESSION_HANDLE = 0;
+        assert_eq!(
+            C_OpenSession(
+                SLOT_ID,
+                CKF_RW_SESSION,
+                std::ptr::null_mut(),
+                None,
+                &mut session
+            ),
+            CKR_ARGUMENTS_BAD
+        );
+    }
     use crate::util::MAX_TOTAL_OPERATION_DATA_LEN;
     use crate::util::serialize_uint;
 
@@ -2446,6 +2532,52 @@ mod tests {
 mod ffi_hardening_tests {
     use super::*;
     use crate::ffi_test_support::open_session;
+
+    /// Verifies the full module lifecycle in an isolated subprocess (so it cannot interfere with
+    /// other tests sharing this process's manager): double initialization is rejected, finalize
+    /// really empties the manager slot, finalizing twice fails, and the module can be
+    /// re-initialized cleanly afterwards.
+    #[test]
+    fn initialize_finalize_lifecycle() {
+        if std::env::var("OSCLIENTCERTS_LIFECYCLE_CHILD").is_ok() {
+            // Child branch: fresh process, nothing has been initialized yet.
+            assert_eq!(
+                C_Finalize(std::ptr::null_mut()),
+                CKR_CRYPTOKI_NOT_INITIALIZED
+            );
+            assert_eq!(C_Initialize(std::ptr::null_mut()), CKR_OK);
+            assert_eq!(
+                C_Initialize(std::ptr::null_mut()),
+                CKR_CRYPTOKI_ALREADY_INITIALIZED
+            );
+            let mut session: CK_SESSION_HANDLE = 0;
+            assert_eq!(
+                C_OpenSession(
+                    SLOT_ID,
+                    CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                    std::ptr::null_mut(),
+                    None,
+                    &mut session
+                ),
+                CKR_OK
+            );
+            assert_eq!(C_CloseSession(session), CKR_OK);
+            assert_eq!(C_Finalize(std::ptr::null_mut()), CKR_OK);
+            assert_eq!(
+                C_Finalize(std::ptr::null_mut()),
+                CKR_CRYPTOKI_NOT_INITIALIZED
+            );
+            assert_eq!(C_Initialize(std::ptr::null_mut()), CKR_OK);
+            return;
+        }
+        let exe = std::env::current_exe().expect("cannot locate test executable");
+        let status = std::process::Command::new(exe)
+            .args(["initialize_finalize_lifecycle", "--nocapture"])
+            .env("OSCLIENTCERTS_LIFECYCLE_CHILD", "1")
+            .status()
+            .expect("cannot spawn lifecycle subprocess");
+        assert!(status.success(), "lifecycle subprocess failed: {status}");
+    }
 
     fn dummy_template() -> [CK_ATTRIBUTE; 1] {
         [CK_ATTRIBUTE {
