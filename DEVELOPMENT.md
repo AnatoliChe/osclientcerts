@@ -75,12 +75,36 @@ The fork has been updated to modernize the dependency stack while keeping the or
 Current relevant dependencies include:
 
 ```text
-Rust edition: 2018
-pkcs11:      0.5
-bindgen:     0.72
-winapi:      0.3
-sha2:        0.8
+Rust edition: 2024
+pkcs11:      0.5   (0.5.0)
+bindgen:     0.72  (0.72.1)
+winapi:      0.3   (0.3.9)
+sha2:        0.8   (0.8.2)
+byteorder:   1.3
+env_logger:  0.6   (default-features = false, see below)
+log:         0.4
+lazy_static: 1
 ```
+
+### Dependency version policy
+
+Several dependency lines look old next to edition 2024 - this is deliberate:
+
+- **Upstream parity.** The dependency set is inherited from Mozilla's original project; keeping
+  the same major/minor lines minimizes divergence from upstream when porting fixes.
+- **`winapi` 0.3 is not an "old version"** - it is the final published line of an archived crate
+  (its successor is `windows-sys`). "Updating" would mean rewriting all FFI declarations in the
+  Windows backend, which carries real regression risk for zero user-visible benefit; it is
+  deliberately deferred.
+- **`env_logger` stays on 0.6 with `default-features = false`** so the `regex` engine is not
+  compiled into the DLL (binary size). Newer majors would require re-validating size and logging
+  behavior.
+- **`sha2` is used for a single fixed purpose** (SHA-256 over certificate DER for `CKA_ID`
+  derivation), so there has been no motivation to take on API churn from the 0.10 refactor.
+
+Dependency updates arrive as weekly Dependabot proposals and are reviewed individually - never
+auto-merged, because a crate update can change ABI, MSRV, FFI types or bindgen behavior. Any
+accepted update changes the shipped DLL and therefore goes through the normal release process.
 
 The migration also replaces legacy `static mut` reference patterns with safer raw-pointer/address-of handling where required by newer Rust versions.
 
