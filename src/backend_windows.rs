@@ -613,6 +613,18 @@ pub struct Key {
     ec_params: Option<Vec<u8>>,
     /// An enum identifying this key's type.
     key_type_enum: KeyType,
+    /// Whether this key can be used for signing. Always `CK_TRUE`.
+    sign: Vec<u8>,
+    /// Whether this key can be used for decryption. Always `CK_TRUE`.
+    decrypt: Vec<u8>,
+    /// Whether this key is sensitive (non-exportable). Always `CK_TRUE`.
+    sensitive: Vec<u8>,
+    /// Whether this key is extractable. Always `CK_FALSE`.
+    extractable: Vec<u8>,
+    /// Whether this key always requires authentication before use. Always `CK_FALSE`.
+    always_authenticate: Vec<u8>,
+    /// Whether this key was generated/owned by the local token. Always `CK_TRUE`.
+    local: Vec<u8>,
 }
 
 impl Key {
@@ -659,6 +671,12 @@ impl Key {
             modulus,
             ec_params,
             key_type_enum,
+            sign: vec![CK_TRUE as u8],
+            decrypt: vec![CK_TRUE as u8],
+            sensitive: vec![CK_TRUE as u8],
+            extractable: vec![CK_FALSE as u8],
+            always_authenticate: vec![CK_FALSE as u8],
+            local: vec![CK_TRUE as u8],
         })
     }
 
@@ -696,12 +714,44 @@ impl Key {
         }
     }
 
+    fn sign_flag(&self) -> &[u8] {
+        &self.sign
+    }
+
+    fn decrypt_flag(&self) -> &[u8] {
+        &self.decrypt
+    }
+
+    fn sensitive_flag(&self) -> &[u8] {
+        &self.sensitive
+    }
+
+    fn extractable_flag(&self) -> &[u8] {
+        &self.extractable
+    }
+
+    fn always_authenticate_flag(&self) -> &[u8] {
+        &self.always_authenticate
+    }
+
+    fn local_flag(&self) -> &[u8] {
+        &self.local
+    }
+
     fn matches(&self, attrs: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)]) -> bool {
         attrs
             .iter()
             .all(|(attr_type, attr_value)| match *attr_type {
                 CKA_TOKEN => bool_attr_matches(self.token(), attr_value),
                 CKA_PRIVATE => bool_attr_matches(self.private(), attr_value),
+                CKA_SIGN => bool_attr_matches(self.sign_flag(), attr_value),
+                CKA_DECRYPT => bool_attr_matches(self.decrypt_flag(), attr_value),
+                CKA_SENSITIVE => bool_attr_matches(self.sensitive_flag(), attr_value),
+                CKA_EXTRACTABLE => bool_attr_matches(self.extractable_flag(), attr_value),
+                CKA_ALWAYS_AUTHENTICATE => {
+                    bool_attr_matches(self.always_authenticate_flag(), attr_value)
+                }
+                CKA_LOCAL => bool_attr_matches(self.local_flag(), attr_value),
                 _ => {
                     let comparison = match *attr_type {
                         CKA_CLASS => self.class(),
@@ -737,6 +787,12 @@ impl Key {
             CKA_KEY_TYPE => Some(self.key_type()),
             CKA_MODULUS => self.modulus(),
             CKA_EC_PARAMS => self.ec_params(),
+            CKA_SIGN => Some(self.sign_flag()),
+            CKA_DECRYPT => Some(self.decrypt_flag()),
+            CKA_SENSITIVE => Some(self.sensitive_flag()),
+            CKA_EXTRACTABLE => Some(self.extractable_flag()),
+            CKA_ALWAYS_AUTHENTICATE => Some(self.always_authenticate_flag()),
+            CKA_LOCAL => Some(self.local_flag()),
             _ => None,
         }
     }
@@ -1012,6 +1068,12 @@ pub const SUPPORTED_ATTRIBUTES: &[CK_ATTRIBUTE_TYPE] = &[
     CKA_KEY_TYPE,
     CKA_MODULUS,
     CKA_EC_PARAMS,
+    CKA_SIGN,
+    CKA_DECRYPT,
+    CKA_SENSITIVE,
+    CKA_EXTRACTABLE,
+    CKA_ALWAYS_AUTHENTICATE,
+    CKA_LOCAL,
 ];
 
 /// Attempts to enumerate certificates with private keys exposed by the OS. Currently only looks in

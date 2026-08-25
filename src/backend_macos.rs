@@ -618,6 +618,12 @@ pub struct Key {
     modulus: Option<Vec<u8>>,
     ec_params: Option<Vec<u8>>,
     key_type_enum: KeyType,
+    sign: Vec<u8>,
+    decrypt: Vec<u8>,
+    sensitive: Vec<u8>,
+    extractable: Vec<u8>,
+    always_authenticate: Vec<u8>,
+    local: Vec<u8>,
 }
 
 impl Key {
@@ -674,6 +680,12 @@ impl Key {
             modulus,
             ec_params,
             key_type_enum,
+            sign: vec![CK_TRUE as u8],
+            decrypt: vec![CK_TRUE as u8],
+            sensitive: vec![CK_TRUE as u8],
+            extractable: vec![CK_FALSE as u8],
+            always_authenticate: vec![CK_FALSE as u8],
+            local: vec![CK_TRUE as u8],
         })
     }
 
@@ -711,6 +723,30 @@ impl Key {
         }
     }
 
+    fn sign_flag(&self) -> &[u8] {
+        &self.sign
+    }
+
+    fn decrypt_flag(&self) -> &[u8] {
+        &self.decrypt
+    }
+
+    fn sensitive_flag(&self) -> &[u8] {
+        &self.sensitive
+    }
+
+    fn extractable_flag(&self) -> &[u8] {
+        &self.extractable
+    }
+
+    fn always_authenticate_flag(&self) -> &[u8] {
+        &self.always_authenticate
+    }
+
+    fn local_flag(&self) -> &[u8] {
+        &self.local
+    }
+
     fn matches(&self, attrs: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)]) -> bool {
         for (attr_type, attr_value) in attrs {
             let comparison = match *attr_type {
@@ -718,6 +754,12 @@ impl Key {
                 CKA_TOKEN => self.token(),
                 CKA_ID => self.id(),
                 CKA_PRIVATE => self.private(),
+                CKA_SIGN => self.sign_flag(),
+                CKA_DECRYPT => self.decrypt_flag(),
+                CKA_SENSITIVE => self.sensitive_flag(),
+                CKA_EXTRACTABLE => self.extractable_flag(),
+                CKA_ALWAYS_AUTHENTICATE => self.always_authenticate_flag(),
+                CKA_LOCAL => self.local_flag(),
                 CKA_KEY_TYPE => self.key_type(),
                 CKA_MODULUS => {
                     if let Some(modulus) = self.modulus() {
@@ -751,6 +793,12 @@ impl Key {
             CKA_KEY_TYPE => Some(self.key_type()),
             CKA_MODULUS => self.modulus(),
             CKA_EC_PARAMS => self.ec_params(),
+            CKA_SIGN => Some(self.sign_flag()),
+            CKA_DECRYPT => Some(self.decrypt_flag()),
+            CKA_SENSITIVE => Some(self.sensitive_flag()),
+            CKA_EXTRACTABLE => Some(self.extractable_flag()),
+            CKA_ALWAYS_AUTHENTICATE => Some(self.always_authenticate_flag()),
+            CKA_LOCAL => Some(self.local_flag()),
             _ => None,
         }
     }
@@ -841,6 +889,12 @@ pub const SUPPORTED_ATTRIBUTES: &[CK_ATTRIBUTE_TYPE] = &[
     CKA_KEY_TYPE,
     CKA_MODULUS,
     CKA_EC_PARAMS,
+    CKA_SIGN,
+    CKA_DECRYPT,
+    CKA_SENSITIVE,
+    CKA_EXTRACTABLE,
+    CKA_ALWAYS_AUTHENTICATE,
+    CKA_LOCAL,
 ];
 
 pub fn list_objects() -> Vec<Object> {

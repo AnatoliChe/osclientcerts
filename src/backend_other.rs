@@ -31,6 +31,12 @@ pub const SUPPORTED_ATTRIBUTES: &[CK_ATTRIBUTE_TYPE] = &[
     CKA_KEY_TYPE,
     CKA_MODULUS,
     CKA_EC_PARAMS,
+    CKA_SIGN,
+    CKA_DECRYPT,
+    CKA_SENSITIVE,
+    CKA_EXTRACTABLE,
+    CKA_ALWAYS_AUTHENTICATE,
+    CKA_LOCAL,
 ];
 
 /// The size (in bytes) of plaintext/ciphertext produced by the stub operations.
@@ -220,6 +226,12 @@ fn key_attrs() -> Attrs {
             CKA_MODULUS,
             (0u8..16).map(|i| 0xA0 + i).collect::<Vec<u8>>(),
         ),
+        (CKA_SIGN, vec![1]),
+        (CKA_DECRYPT, vec![1]),
+        (CKA_SENSITIVE, vec![1]),
+        (CKA_EXTRACTABLE, vec![0]),
+        (CKA_ALWAYS_AUTHENTICATE, vec![0]),
+        (CKA_LOCAL, vec![1]),
     ])
 }
 
