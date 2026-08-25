@@ -69,7 +69,15 @@ denied (e.g. a PIN prompt that was cancelled on a hardware token).
 ## S/MIME signing failures
 
 Signing failures tend to look nothing like decrypt failures: there is usually no error and no
-failed PKCS#11 call at all. In the Thunderbird/`smime:5` log you'll see something like:
+failed PKCS#11 call at all. Include `CMS:5` in `MOZ_LOG` (the actual Gecko log module backing the
+`D/CMS ...` lines is named `smime`, but the `CMS:5` category has also been seen to be needed for
+some of the more specific `nsCMSMessage::*` failure messages to show up -- include both):
+
+```text
+set MOZ_LOG=pipnss:5,smime:5,CMS:5,certverifier:5,timestamp
+```
+
+Without a specific reason logged, you'll just see:
 
 ```text
 D/CMS nsCMSMessage::CreateSigned
@@ -77,6 +85,61 @@ D/CMS nsCMSEncoder::Start
 D/CMS nsCMSEncoder::Finish
 D/CMS nsCMSEncoder::Finish - can't finish encoder
 ```
+
+With `CMS:5` enabled, the actual reason can show up right after `CreateSigned` instead, e.g.:
+
+```text
+D/CMS nsCMSMessage::CreateSigned
+D/CMS nsCMSMessage::CreateSigned - can't add smime enc key prefs
+```
+
+### `can't add smime enc key prefs`
+
+Confirmed root cause (2026-08-25 reproduction, both with the certificate's own KeyUsage/EKU fine
+and with Thunderbird's `cert9.db` wiped so no stale/duplicate cert entries were in play -- see
+below): this comes from `NSS_CMSSignerInfo_AddSMIMEEncKeyPrefs()`
+(`security/nss/lib/smime/cmssiginfo.c`):
+
+```c
+SECStatus
+NSS_CMSSignerInfo_AddSMIMEEncKeyPrefs(NSSCMSSignerInfo *signerinfo, CERTCertificate *cert, CERTCertDBHandle *certdb)
+{
+    /* verify this cert for encryption */
+    if (CERT_VerifyCert(certdb, cert, PR_TRUE, certUsageEmailRecipient, PR_Now(), ...) != SECSuccess) {
+        return SECFailure;
+    }
+    ...
+```
+
+Every outgoing *signed* S/MIME message (regardless of whether it's also encrypted) gets an
+`SMIMEEncryptionKeyPreference` signed attribute added, telling the recipient which certificate to
+use when replying encrypted. Adding it requires the sender's own certificate to pass a full chain
+verification with usage `certUsageEmailRecipient` -- **before any private-key operation**, which
+is why `C_SignInit` is never called and this module never sees an error: the failure is entirely
+on the NSS/Thunderbird side, in NSS's own (separate from the OS) certificate trust store.
+
+This is expected for certificates from an internal/corporate CA (recognizable by `ldap:///CN=...`
+CRL Distribution Point / Authority Information Access URLs, i.e. Active Directory Certificate
+Services) that Windows trusts (so `CryptAcquireCertificatePrivateKey`/CNG and Thunderbird's
+"Test" button work fine) but that Thunderbird's own NSS trust store does not, since Thunderbird
+does not consult the Windows trusted-root store for this check.
+
+Fix (not in this module -- in Thunderbird's certificate store):
+
+1. Settings -> Privacy & Security -> Manage Certificates -> **Authorities** tab.
+2. Check whether the issuing CA (and any root above it) is listed. If not, export it from Windows
+   (`certmgr.msc` -> Intermediate/Trusted Root Certification Authorities -> Export, DER/CER) and
+   **Import** it here.
+3. Open its trust settings and check **"This certificate can identify mail users"** -- this is
+   exactly the trust bit `certUsageEmailRecipient` checks. Repeat for every CA in the chain.
+4. If the CDP/AIA URLs are `ldap://` (AD CS), NSS's own revocation checking may not be able to
+   fetch them at all; if the error persists after fixing trust, check whether it's now a
+   revocation-check failure rather than a trust failure.
+
+This was reproduced with `cert9.db` deleted entirely (so there was no possibility of a
+stale/duplicate cached cert pointing PK11 at the wrong slot -- an earlier, now-ruled-out theory)
+and with `KeyUsage=[digitalSignature|keyEncipherment]` confirmed present on the certificate in
+use, so those are not the cause here; this CA-trust check is.
 
 and the *first* thing to check in the provider log is whether `C_SignInit` appears at all:
 

@@ -18,16 +18,19 @@ are published on the GitHub
   0.3.10 (`CKA_LABEL`/`CKA_SUBJECT`/`CKA_ISSUER`/`CKA_SERIAL_NUMBER`) did not resolve signing for
   all certificates -- those were real bugs, but not the only cause of `nsCMSEncoder::Finish -
   can't finish encoder`.
-- Root-caused (pending confirmation) via the NSS source directly: `PK11_FindKeyByAnyCert`, which
-  the CMS signing path uses to get the private key, only searches the PKCS#11 slot already cached
-  on the in-memory `CERTCertificate` (`cert->slot`) if one is set, and never falls back to
-  searching other loaded modules. If the same certificate also has a slot-less/keyless copy
-  cached in Thunderbird's own NSS database, signing silently fails this way with zero errors from
-  this module, while decryption is unaffected (its key lookup isn't slot-cached the same way). See
-  the "S/MIME signing failures" section of `DEBUGGING.md` for how to check for and clear this.
-  KeyUsage was ruled out as the cause in the reproduction that led to this: all four certificates
-  in the test store had `digitalSignature` set, and `NSS_CMSSignerInfo_Sign` in this NSS tree
-  doesn't call `CERT_CheckKeyUsage` at all.
+- The stale/duplicate-cert-slot theory from the previous entry was ruled out by reproducing with
+  Thunderbird's `cert9.db` deleted entirely (so no other module/copy of the certificate could be
+  involved) -- signing still failed the same way.
+- **Root-caused**, with `CMS:5` added to `MOZ_LOG` surfacing the actual NSS-side reason: sending a
+  *signed* S/MIME message always makes NSS try to add an `SMIMEEncryptionKeyPreference` attribute
+  to the signature (`NSS_CMSSignerInfo_AddSMIMEEncKeyPrefs` in
+  `security/nss/lib/smime/cmssiginfo.c`), which requires the sender's own certificate to pass
+  `CERT_VerifyCert(..., certUsageEmailRecipient, ...)` -- a full chain-trust check in
+  **Thunderbird's own NSS certificate store**, independent of Windows' trust store and before any
+  private-key operation. This fails, with `can't add smime enc key prefs` logged, for certificates
+  from an internal/AD-CS CA that Windows trusts but that hasn't been imported and marked "trusted
+  to identify email users" in Thunderbird's own Certificate Manager -> Authorities. Not a bug in
+  this module; see `DEBUGGING.md` for the fix (import + trust the issuing CA in Thunderbird).
 
 ## 0.3.10 - 2026-08-25
 
