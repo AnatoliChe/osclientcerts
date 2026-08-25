@@ -220,6 +220,10 @@ fn key_attrs() -> Attrs {
         (CKA_CLASS, serialize_uint(CKO_PRIVATE_KEY).unwrap()),
         (CKA_TOKEN, vec![1]),
         (CKA_ID, vec![0x42]),
+        (CKA_LABEL, b"test-cert".to_vec()),
+        (CKA_SUBJECT, b"CN=Test Cert".to_vec()),
+        (CKA_ISSUER, b"CN=Test CA".to_vec()),
+        (CKA_SERIAL_NUMBER, vec![0x03, 0x02, 0x01]),
         (CKA_PRIVATE, vec![1]),
         (CKA_KEY_TYPE, serialize_uint(CKK_RSA).unwrap()),
         (

@@ -602,6 +602,14 @@ pub struct Key {
     token: Vec<u8>,
     /// An identifier unique to this key. Must be the same as the ID for the certificate.
     id: Vec<u8>,
+    /// Human-readable label, taken from the certificate's subject DN string.
+    label: Vec<u8>,
+    /// DER-encoded subject name from the associated certificate (CKA_SUBJECT).
+    subject: Vec<u8>,
+    /// DER-encoded issuer name from the associated certificate (CKA_ISSUER).
+    issuer: Vec<u8>,
+    /// Big-endian serial number from the associated certificate (CKA_SERIAL_NUMBER).
+    serial_number: Vec<u8>,
     /// Whether or not this key is "private" (can it be exported?). Will be CK_TRUE (it can't be
     /// exported).
     private: Vec<u8>,
@@ -635,6 +643,23 @@ impl Key {
         let id = Sha256::digest(cert_der).to_vec();
         let id = id.to_vec();
         let cert_info = unsafe { &*cert.pCertInfo };
+        let label = get_cert_subject_dn(&cert_info)?;
+        let subject = unsafe {
+            slice::from_raw_parts(cert_info.Subject.pbData, cert_info.Subject.cbData as usize)
+        };
+        let subject = subject.to_vec();
+        let issuer = unsafe {
+            slice::from_raw_parts(cert_info.Issuer.pbData, cert_info.Issuer.cbData as usize)
+        };
+        let issuer = issuer.to_vec();
+        let serial_number = unsafe {
+            slice::from_raw_parts(
+                cert_info.SerialNumber.pbData,
+                cert_info.SerialNumber.cbData as usize,
+            )
+        };
+        let mut serial_number = serial_number.to_vec();
+        serial_number.reverse();
         let mut modulus = None;
         let mut ec_params = None;
         let spki = &cert_info.SubjectPublicKeyInfo;
@@ -666,6 +691,10 @@ impl Key {
             class: serialize_uint(CKO_PRIVATE_KEY)?,
             token: vec![CK_TRUE as u8],
             id,
+            label,
+            subject,
+            issuer,
+            serial_number,
             private: vec![CK_TRUE as u8],
             key_type: serialize_uint(key_type_attribute)?,
             modulus,
@@ -690,6 +719,22 @@ impl Key {
 
     pub fn id(&self) -> &[u8] {
         &self.id
+    }
+
+    fn label(&self) -> &[u8] {
+        &self.label
+    }
+
+    fn subject(&self) -> &[u8] {
+        &self.subject
+    }
+
+    pub fn issuer(&self) -> &[u8] {
+        &self.issuer
+    }
+
+    pub fn serial_number(&self) -> &[u8] {
+        &self.serial_number
     }
 
     fn private(&self) -> &[u8] {
@@ -752,9 +797,13 @@ impl Key {
                     bool_attr_matches(self.always_authenticate_flag(), attr_value)
                 }
                 CKA_LOCAL => bool_attr_matches(self.local_flag(), attr_value),
+                CKA_SERIAL_NUMBER => serial_number_matches(self.serial_number(), attr_value),
                 _ => {
                     let comparison = match *attr_type {
                         CKA_CLASS => self.class(),
+                        CKA_LABEL => self.label(),
+                        CKA_SUBJECT => self.subject(),
+                        CKA_ISSUER => self.issuer(),
                         CKA_ID => self.id(),
                         CKA_KEY_TYPE => self.key_type(),
                         CKA_MODULUS => {
@@ -782,6 +831,10 @@ impl Key {
         match attribute {
             CKA_CLASS => Some(self.class()),
             CKA_TOKEN => Some(self.token()),
+            CKA_LABEL => Some(self.label()),
+            CKA_SUBJECT => Some(self.subject()),
+            CKA_ISSUER => Some(self.issuer()),
+            CKA_SERIAL_NUMBER => Some(self.serial_number()),
             CKA_ID => Some(self.id()),
             CKA_PRIVATE => Some(self.private()),
             CKA_KEY_TYPE => Some(self.key_type()),
