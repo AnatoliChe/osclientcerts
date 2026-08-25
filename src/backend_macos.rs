@@ -613,6 +613,10 @@ pub struct Key {
     class: Vec<u8>,
     token: Vec<u8>,
     id: Vec<u8>,
+    label: Vec<u8>,
+    subject: Vec<u8>,
+    issuer: Vec<u8>,
+    serial_number: Vec<u8>,
     private: Vec<u8>,
     key_type: Vec<u8>,
     modulus: Option<Vec<u8>>,
@@ -631,6 +635,13 @@ impl Key {
         let certificate = sec_identity_copy_certificate(identity)?;
         let der = sec_certificate_copy_data(&certificate)?;
         let id = Sha256::digest(der.bytes()).to_vec();
+        let label = sec_certificate_copy_subject_summary(&certificate)?;
+        let subject =
+            SECURITY_FRAMEWORK.sec_certificate_copy_normalized_subject_sequence(&certificate)?;
+        let issuer =
+            SECURITY_FRAMEWORK.sec_certificate_copy_normalized_issuer_sequence(&certificate)?;
+        let serial_number =
+            SECURITY_FRAMEWORK.sec_certificate_copy_serial_number_data(&certificate)?;
         let key = SECURITY_FRAMEWORK.sec_certificate_copy_key(&certificate)?;
         let key_type: CFString = get_key_attribute(&key, unsafe { kSecAttrKeyType })?;
         let key_size_in_bits: CFNumber = get_key_attribute(&key, unsafe { kSecAttrKeySizeInBits })?;
@@ -675,6 +686,10 @@ impl Key {
             class: serialize_uint(CKO_PRIVATE_KEY)?,
             token: serialize_uint(CK_TRUE)?,
             id,
+            label: label.to_string().into_bytes(),
+            subject: subject.bytes().to_vec(),
+            issuer: issuer.bytes().to_vec(),
+            serial_number: serial_number.bytes().to_vec(),
             private: serialize_uint(CK_TRUE)?,
             key_type: serialize_uint(key_type_attribute)?,
             modulus,
@@ -699,6 +714,22 @@ impl Key {
 
     pub fn id(&self) -> &[u8] {
         &self.id
+    }
+
+    fn label(&self) -> &[u8] {
+        &self.label
+    }
+
+    fn subject(&self) -> &[u8] {
+        &self.subject
+    }
+
+    pub fn issuer(&self) -> &[u8] {
+        &self.issuer
+    }
+
+    pub fn serial_number(&self) -> &[u8] {
+        &self.serial_number
     }
 
     fn private(&self) -> &[u8] {
@@ -752,6 +783,10 @@ impl Key {
             let comparison = match *attr_type {
                 CKA_CLASS => self.class(),
                 CKA_TOKEN => self.token(),
+                CKA_LABEL => self.label(),
+                CKA_SUBJECT => self.subject(),
+                CKA_ISSUER => self.issuer(),
+                CKA_SERIAL_NUMBER => self.serial_number(),
                 CKA_ID => self.id(),
                 CKA_PRIVATE => self.private(),
                 CKA_SIGN => self.sign_flag(),
@@ -788,6 +823,10 @@ impl Key {
         match attribute {
             CKA_CLASS => Some(self.class()),
             CKA_TOKEN => Some(self.token()),
+            CKA_LABEL => Some(self.label()),
+            CKA_SUBJECT => Some(self.subject()),
+            CKA_ISSUER => Some(self.issuer()),
+            CKA_SERIAL_NUMBER => Some(self.serial_number()),
             CKA_ID => Some(self.id()),
             CKA_PRIVATE => Some(self.private()),
             CKA_KEY_TYPE => Some(self.key_type()),
