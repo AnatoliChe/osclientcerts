@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file. Pre-built DLLs 
 are published on the GitHub
 [releases page](https://github.com/AnatoliChe/osclientcerts/releases).
 
+## Unreleased
+
+- Soundness: caller-supplied input buffers are now converted to slices through a single
+  `input_slice` helper that accepts a null pointer only for zero-length buffers. Previously the
+  multipart update functions and search-template attribute handling could pass a null pointer to
+  `slice::from_raw_parts` with a zero length, which violates the function's safety contract even
+  though no dereference occurs. No behavior change beyond this formal fix; two tests added.
+
 ## 0.3.5 - 2026-08-25
 
 - Added multipart operation support: `C_SignUpdate`/`C_SignFinal`,

@@ -267,7 +267,11 @@ crashing:
   (zero-count match-all searches, unsupported attribute types, duplicate types);
 - `C_Encrypt` / `C_Decrypt` / `C_Sign`: oversized input buffers;
 - `C_EncryptUpdate` / `C_DecryptUpdate` / `C_SignUpdate`: null parts with non-zero lengths and
-  oversized parts, exactly as for their single-shot counterparts.
+  oversized parts, exactly as for their single-shot counterparts. A null part with a zero length
+  is accepted as an empty buffer; all input buffers are converted through a central
+  `input_slice` helper so the null/zero-length combination never reaches
+  `slice::from_raw_parts`, which requires a non-null pointer even for zero lengths (a formal
+  undefined-behavior edge that earlier code only avoided in practice).
 
 The corresponding bounds live in constants next to the FFI layer (`MAX_TEMPLATE_COUNT = 128`,
 `MAX_ATTRIBUTE_VALUE_LEN = 64 KiB`, `MAX_DATA_LEN = 64 KiB`, `MAX_OAEP_LABEL_LEN = 8 KiB`) and
