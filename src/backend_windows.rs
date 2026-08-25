@@ -1354,9 +1354,16 @@ fn open_system_store(name: &str) -> Option<CertStore> {
             return None;
         }
     };
+    // CERT_STORE_PROV_SYSTEM (unlike CERT_STORE_PROV_SYSTEM_REGISTRY, used elsewhere in this file
+    // for the personal "My" store) opens the *composite* logical system store: the raw registry
+    // location plus anything layered on top of it (Group Policy-pushed roots, enterprise roots,
+    // Windows Update-delivered roots, ...). For "ROOT"/"CA" this is what actually matches what
+    // certmgr.msc shows and what CryptoAPI's own chain builder consults -- the registry-only
+    // provider misses any certificate that isn't in that one specific physical store, even though
+    // it's still a trusted root as far as Windows itself is concerned.
     let store = CertStore::new(unsafe {
         CertOpenStore(
-            CERT_STORE_PROV_SYSTEM_REGISTRY_A,
+            CERT_STORE_PROV_SYSTEM_A,
             0,
             0,
             location_flags,
