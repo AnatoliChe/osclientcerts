@@ -181,8 +181,9 @@ manager and the PKCS#11 FFI layer be exercised end-to-end without OS crypto APIs
 test-fork-osclientcerts.sh   # cargo test --release in the Docker image
 ```
 
-Current coverage (40 tests on Linux; the Windows runner additionally executes a
-Windows-only regression suite, see below):
+Current coverage (the suite grows with every feature change, so no test counts are listed here;
+run `cargo test --all-targets` or check the CI logs for the current set - the Windows runner
+additionally executes a Windows-only regression suite, see below):
 
 - `src/mechanism.rs` - OAEP/PKCS#1 mechanism parsing: SHA-1/256/384/512 parameter sets, label
   handling, mismatched MGF rejection, unsupported digest rejection, invalid source rejection,
