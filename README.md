@@ -5,7 +5,7 @@ A standalone Windows PKCS#11 provider based on Mozilla's historical `osclientcer
 [![Rust checks](https://github.com/AnatoliChe/osclientcerts/actions/workflows/rust.yml/badge.svg)](https://github.com/AnatoliChe/osclientcerts/actions/workflows/rust.yml)
 [![Windows build](https://github.com/AnatoliChe/osclientcerts/actions/workflows/windows.yml/badge.svg)](https://github.com/AnatoliChe/osclientcerts/actions/workflows/windows.yml)
 
-> **Project status:** working. The provider builds as a standalone Windows x64 DLL and implements RSA signing, encryption and decryption (PKCS#1 v1.5 and OAEP) as well as RSA-PSS and ECDSA signing on top of the original signing-only upstream code. Real-world Thunderbird S/MIME interoperability (signing, sending encrypted mail and decrypting received mail with non-exportable CNG keys) has been validated. The RSA cipher mechanism parsing, the PKCS#11 operation state machines and the error-code mapping are covered by a unit test suite that runs in CI on every push.
+> **Project status:** working. The provider builds as a standalone Windows x64 DLL and implements RSA signing, encryption and decryption (PKCS#1 v1.5 and OAEP) as well as RSA-PSS and ECDSA signing on top of the original signing-only upstream code - each operation in both single-shot and multipart form. Real-world Thunderbird S/MIME interoperability (signing, sending encrypted mail and decrypting received mail with non-exportable CNG keys) has been validated. The provider is covered by a two-tier test suite that runs in CI on every push: a platform-neutral unit test suite (mechanism parsing, PKCS#11 operation state machines, error-code mapping, hostile-input guards at the C ABI boundary) and a Windows-only S/MIME regression suite that runs against real Windows CNG keys provisioned on the CI runner.
 >
 > Release history: [CHANGELOG.md](CHANGELOG.md)
 > Developer documentation (architecture, building, tests, CI): [DEVELOPMENT.md](DEVELOPMENT.md)
@@ -102,14 +102,24 @@ RSA-OAEP restrictions imposed by Windows CNG:
 - Only the `CKZ_DATA_SPECIFIED` encoding parameter source is supported; the optional label is
   passed to CNG via `BCRYPT_OAEP_PADDING_INFO.pbLabel`.
 
-The provider currently does not implement streaming RSA operations through:
+All supported operations are available both as single-shot calls and as buffered multipart
+operations (see below).
 
-```text
-C_EncryptUpdate / C_EncryptFinal
-C_DecryptUpdate / C_DecryptFinal
-```
+### Multipart operations
 
-RSA encryption/decryption is implemented as a single-shot operation through `C_Encrypt` / `C_Decrypt`.
+The multipart families `C_SignUpdate`/`C_SignFinal`, `C_EncryptUpdate`/`C_EncryptFinal`, and
+`C_DecryptUpdate`/`C_DecryptFinal` are implemented. Because RSA and ECDSA operations require the
+complete message in one call, update parts are buffered per session and the underlying operation
+runs once at the `*Final` step. PKCS#11 semantics are preserved:
+
+- a length query (`*Final` with a null output pointer) does not consume the pending operation;
+- `CKR_BUFFER_TOO_SMALL` reports the required size and leaves the operation active for a retry;
+- closing a session discards any buffered parts along with the operation;
+- the total data accumulated per operation is bounded (64 KiB); exceeding the bound fails the
+  update with `CKR_DATA_LEN_RANGE`.
+
+The FFI boundary validates all caller-supplied counts, lengths, and pointer/length consistency
+and returns `CKR_ARGUMENTS_BAD` for malformed arguments rather than dereferencing them.
 
 ## Windows certificate and key discovery
 
@@ -140,7 +150,6 @@ The current provider is intentionally narrow.
   MGF1 to use the same hash as the digest algorithm (SHA-1/SHA-256/SHA-384/SHA-512 only), and only
   `CKZ_DATA_SPECIFIED` labels are supported.
 - EC decryption is not implemented.
-- Multi-part `C_EncryptUpdate` / `C_EncryptFinal` and `C_DecryptUpdate` / `C_DecryptFinal` are not implemented.
 - The provider currently focuses on the Windows user's `My` certificate store.
 
 ## Thunderbird installing
@@ -149,7 +158,9 @@ The provider is intended to be loaded by Thunderbird as a PKCS#11 security modul
 
 The basic workflow is:
 
-1. Build `osclientcerts.dll`.
+1. Download a pre-built `osclientcerts.dll` from the
+   [releases page](https://github.com/AnatoliChe/osclientcerts/releases) (or build it yourself -
+   see [DEVELOPMENT.md](DEVELOPMENT.md)).
 2. Copy it to a stable Windows path.
 3. Add it through Thunderbird's certificate/security-device management UI
    (Settings → Privacy & Security → Certificates → Security Devices → Load).
