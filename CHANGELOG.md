@@ -9,16 +9,25 @@ are published on the GitHub
 - Added diagnostics for S/MIME signing failures that happen without any PKCS#11 error, i.e. where
   `C_SignInit`/`C_Sign` are never called at all (NSS decides not to use the key before reaching
   the module). `list_objects()` now logs the `KeyUsage`/`ExtendedKeyUsage` extensions of every
-  certificate it finds, warning when `digitalSignature` is missing -- the most common cause of
-  this failure mode with corporate CA-issued certificates that separate signing and encryption
-  keys. `start_sign` now logs the key handle/ID NSS asked to sign with, `Key::matches` logs which
-  attribute comparison failed on an unsuccessful `C_FindObjectsInit`/`C_FindObjects`, and
-  `C_FindObjectsInit`/`C_GetAttributeValue` now log the full attribute list/values involved
-  instead of just the result. `Cert::new`/`Key::new` failures during store enumeration are no
-  longer silently swallowed. See `DEBUGGING.md` for how to read the new output. Investigated
-  because 0.3.9 (`CKA_SIGN`) and 0.3.10 (`CKA_LABEL`/`CKA_SUBJECT`/`CKA_ISSUER`/
-  `CKA_SERIAL_NUMBER`) did not resolve signing for all certificates -- those were real bugs, but
-  not the only cause of `nsCMSEncoder::Finish - can't finish encoder`.
+  certificate it finds, warning when `digitalSignature` is missing. `start_sign` now logs the key
+  handle/ID NSS asked to sign with, `Key::matches` logs which attribute comparison failed on an
+  unsuccessful `C_FindObjectsInit`/`C_FindObjects`, and `C_FindObjectsInit`/`C_GetAttributeValue`
+  now log the full attribute list/values involved instead of just the result. `Cert::new`/
+  `Key::new` failures during store enumeration are no longer silently swallowed. See
+  `DEBUGGING.md` for how to read the new output. Investigated because 0.3.9 (`CKA_SIGN`) and
+  0.3.10 (`CKA_LABEL`/`CKA_SUBJECT`/`CKA_ISSUER`/`CKA_SERIAL_NUMBER`) did not resolve signing for
+  all certificates -- those were real bugs, but not the only cause of `nsCMSEncoder::Finish -
+  can't finish encoder`.
+- Root-caused (pending confirmation) via the NSS source directly: `PK11_FindKeyByAnyCert`, which
+  the CMS signing path uses to get the private key, only searches the PKCS#11 slot already cached
+  on the in-memory `CERTCertificate` (`cert->slot`) if one is set, and never falls back to
+  searching other loaded modules. If the same certificate also has a slot-less/keyless copy
+  cached in Thunderbird's own NSS database, signing silently fails this way with zero errors from
+  this module, while decryption is unaffected (its key lookup isn't slot-cached the same way). See
+  the "S/MIME signing failures" section of `DEBUGGING.md` for how to check for and clear this.
+  KeyUsage was ruled out as the cause in the reproduction that led to this: all four certificates
+  in the test store had `digitalSignature` set, and `NSS_CMSSignerInfo_Sign` in this NSS tree
+  doesn't call `CERT_CheckKeyUsage` at all.
 
 ## 0.3.10 - 2026-08-25
 

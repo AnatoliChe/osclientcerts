@@ -80,18 +80,58 @@ D/CMS nsCMSEncoder::Finish - can't finish encoder
 
 and the *first* thing to check in the provider log is whether `C_SignInit` appears at all:
 
+- **If `C_SignInit` *does* appear but returns an error, or `C_Sign`/`NCryptSignHash` fails**, that
+  is a module-side (or CNG-side) problem; the existing `error!` logging around `NCryptSignHash`
+  (module) will show the Windows `SECURITY_STATUS`.
+
 - **If `C_SignInit`/`C_Sign` never appear in the provider log for that send attempt** (search for
   them; with `RUST_LOG=osclientcerts=debug` they're always logged), NSS decided not to use this
-  module's key before ever calling into it. This is not a bug the module can log its way out of by
-  itself, but it does narrow things down a lot: NSS's own `CERT_CheckKeyUsage` check (in the CMS
-  signing code) silently refuses to sign with a certificate whose `KeyUsage` extension doesn't
-  include `digitalSignature`/`nonRepudiation` -- and this is exactly the situation with many
-  corporate CA-issued S/MIME certificates that split "encryption" and "signing" into separate
-  certificates, or that mark the encryption certificate `keyEncipherment`-only.
+  module's key before ever calling into it. Two known causes, in order of how likely they are to
+  be it:
 
-  As of this change, `list_objects()` (called whenever the module rescans the certificate store)
-  logs a `KeyUsage=[...] EKU=[...]` line for every certificate it finds, at `warn!` level if
-  `digitalSignature` is missing:
+  **1. A stale/duplicate NSS certificate cache entry pointing at the wrong PKCS#11 slot (most
+  likely).** Traced directly in the NSS source (`security/nss/lib/`): the signing path
+  (`NSS_CMSSignerInfo_Sign` in `smime/cmssiginfo.c`) finds the private key via
+  `PK11_FindKeyByAnyCert(cert, ...)` (`pk11wrap/pk11cert.c`), which calls
+  `PK11_FindObjectForCert()`. That function's first move is:
+
+  ```c
+  if (cert->slot) {
+      certHandle = PK11_FindCertInSlot(cert->slot, cert, wincx);
+      if (certHandle != CK_INVALID_HANDLE) {
+          *pSlot = PK11_ReferenceSlot(cert->slot);
+          return certHandle;
+      }
+  }
+  ```
+
+  i.e. if the in-memory `CERTCertificate` object already has a `slot` attached (from wherever NSS
+  first resolved this certificate -- e.g. a copy that ended up cached in Thunderbird's own
+  `cert9.db`/"Software Security Device" the same certificate is *also* sitting in, separately from
+  this module's token), it looks for the private key **only on that cached slot** and never falls
+  back to searching every loaded PKCS#11 module (ours included). If that cached slot has no
+  private key for the cert, `PK11_MatchItem(..., CKO_PRIVATE_KEY)` comes back empty,
+  `PK11_FindKeyByAnyCert` returns `NULL`, and `NSS_CMSSignerInfo_Sign` bails out via its `loser:`
+  label -- before ever touching a PKCS#11 module for the actual sign operation. This matches the
+  symptom exactly: zero errors, `C_FindObjectsInit`/`C_GetAttributeValue` still happening
+  constantly in the log for the background cert-list scan, but `C_SignInit` never called for the
+  send attempt itself. Decryption is unaffected because the recipient-key lookup for an incoming
+  message goes through a fresh issuer+serial search across all slots rather than a cached
+  `CERTCertificate->slot`, so it isn't vulnerable to this.
+
+  To check: open Thunderbird's Certificate Manager (Settings -> Privacy & Security -> Manage
+  Certificates) -> "Your Certificates", find the certificate configured for signing, and see
+  whether it's listed more than once -- once under this module's security device/token, and again
+  under "Software Security Device" (NSS's internal database). If it appears twice, delete the
+  "Software Security Device" copy (it has no private key and is the one poisoning `cert->slot`);
+  keep the one exposed by this module. A more drastic fallback if that doesn't turn up a duplicate
+  is renaming/backing up the profile's `cert9.db` so NSS rebuilds its internal cert cache from
+  scratch (this also clears any manually-set trust bits on other certificates, so back it up
+  first).
+
+  **2. Certificate `KeyUsage` doesn't include `digitalSignature`.** `list_objects()` (called
+  whenever the module rescans the certificate store) logs a `KeyUsage=[...] EKU=[...]` line for
+  every certificate it finds, at `warn!` level if `digitalSignature` is missing:
 
   ```text
   [WARN  osclientcerts::backend_windows] cert "...": KeyUsage=[keyEncipherment] does NOT include
@@ -99,15 +139,10 @@ and the *first* thing to check in the provider log is whether `C_SignInit` appea
   may work fine for decryption; EKU=[1.3.6.1.5.5.7.3.4 (emailProtection)]
   ```
 
-  If the certificate configured for "Digitally Sign Message" in Thunderbird's account settings
-  shows this warning, that is almost certainly the whole problem, and the fix is outside the
-  module: either get a certificate issued with `digitalSignature` in its `KeyUsage`, or (if the CA
-  issued a separate signing certificate) make sure Thunderbird is configured to use that one for
-  signing and the encryption-only one for decryption.
-
-- **If `C_SignInit` *does* appear but returns an error, or `C_Sign`/`NCryptSignHash` fails**, that
-  is a module-side (or CNG-side) problem; the existing `error!` logging around `NCryptSignHash`
-  (module) will show the Windows `SECURITY_STATUS`.
+  Note this is *not* enforced in the version of `NSS_CMSSignerInfo_Sign` checked against
+  (`security/nss/lib/smime/cmssiginfo.c` in this tree has no `CERT_CheckKeyUsage` call at all), so
+  don't assume it's the cause without seeing the warning for the actual certificate in use --
+  check cause 1 first.
 
 Also useful: `manager.rs`'s `start_sign` now logs the PKCS#11 key handle and key ID NSS asked to
 sign with (`start_sign: session ..., key handle ..., id ...`), and `Key::matches` (used by
