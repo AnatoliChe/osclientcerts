@@ -794,24 +794,110 @@ extern "C" fn C_Encrypt(
     CKR_OK
 }
 
+/// This gets called to process one part of the plaintext of an ongoing encryption operation. The
+/// part is buffered; RSA encryption is performed over the complete message when the operation is
+/// finished via `C_EncryptFinal`. (The "return a partial result" behaviour allowed by the PKCS #11
+/// specification for streaming mechanisms does not apply here.)
 extern "C" fn C_EncryptUpdate(
-    _hSession: CK_SESSION_HANDLE,
-    _pPart: CK_BYTE_PTR,
-    _ulPartLen: CK_ULONG,
+    hSession: CK_SESSION_HANDLE,
+    pPart: CK_BYTE_PTR,
+    ulPartLen: CK_ULONG,
     _pEncryptedPart: CK_BYTE_PTR,
     _pulEncryptedPartLen: CK_ULONG_PTR,
 ) -> CK_RV {
-    error!("C_EncryptUpdate: CKR_FUNCTION_NOT_SUPPORTED");
-    CKR_FUNCTION_NOT_SUPPORTED
+    if pPart.is_null() && ulPartLen != 0 {
+        error!("C_EncryptUpdate: CKR_ARGUMENTS_BAD");
+        return CKR_ARGUMENTS_BAD;
+    }
+    if ulPartLen > MAX_DATA_LEN {
+        error!("C_EncryptUpdate: unreasonable data length {ulPartLen}");
+        return CKR_ARGUMENTS_BAD;
+    }
+    let part = unsafe { std::slice::from_raw_parts(pPart, ulPartLen as usize) };
+    let mut manager_guard = try_to_get_manager_guard!();
+    let manager = manager_guard_to_manager!(manager_guard);
+    match manager.encrypt_update(hSession, part.to_vec()) {
+        Ok(()) => {}
+        Err(err) => {
+            return crypto_error_to_rv("C_EncryptUpdate: encrypt_update failed", &err);
+        }
+    }
+    debug!("C_EncryptUpdate: CKR_OK");
+    CKR_OK
 }
 
+/// This gets called to finish an ongoing encryption operation, encrypting all of the data that has
+/// been accumulated via `C_EncryptUpdate`. As with `C_Encrypt`, if `pLastEncryptedPart` is null
+/// only the required output length is determined and the operation remains active.
 extern "C" fn C_EncryptFinal(
-    _hSession: CK_SESSION_HANDLE,
-    _pLastEncryptedPart: CK_BYTE_PTR,
-    _pulLastEncryptedPartLen: CK_ULONG_PTR,
+    hSession: CK_SESSION_HANDLE,
+    pLastEncryptedPart: CK_BYTE_PTR,
+    pulLastEncryptedPartLen: CK_ULONG_PTR,
 ) -> CK_RV {
-    error!("C_EncryptFinal: CKR_FUNCTION_NOT_SUPPORTED");
-    CKR_FUNCTION_NOT_SUPPORTED
+    if pulLastEncryptedPartLen.is_null() {
+        error!("C_EncryptFinal: CKR_ARGUMENTS_BAD");
+        return CKR_ARGUMENTS_BAD;
+    }
+    if pLastEncryptedPart.is_null() {
+        let mut manager_guard = try_to_get_manager_guard!();
+        let manager = manager_guard_to_manager!(manager_guard);
+        match manager.get_final_encrypted_length(hSession) {
+            Ok(encrypted_length) => unsafe {
+                *pulLastEncryptedPartLen = encrypted_length as CK_ULONG;
+            },
+            Err(err) => {
+                return crypto_error_to_rv(
+                    "C_EncryptFinal: get_final_encrypted_length failed",
+                    &err,
+                );
+            }
+        }
+    } else {
+        // PKCS #11 requires that CKR_BUFFER_TOO_SMALL does not terminate the active operation, so
+        // the output length must be determined (and the buffer checked) before the operation that
+        // consumes it runs.
+        let encrypted_length = {
+            let mut manager_guard = try_to_get_manager_guard!();
+            let manager = manager_guard_to_manager!(manager_guard);
+            match manager.get_final_encrypted_length(hSession) {
+                Ok(encrypted_length) => encrypted_length,
+                Err(err) => {
+                    return crypto_error_to_rv(
+                        "C_EncryptFinal: get_final_encrypted_length failed",
+                        &err,
+                    );
+                }
+            }
+        };
+        let capacity = unsafe { *pulLastEncryptedPartLen } as usize;
+        if capacity < encrypted_length {
+            unsafe {
+                *pulLastEncryptedPartLen = encrypted_length as CK_ULONG;
+            }
+            error!("C_EncryptFinal: CKR_BUFFER_TOO_SMALL");
+            return CKR_BUFFER_TOO_SMALL;
+        }
+        let ciphertext = {
+            let mut manager_guard = try_to_get_manager_guard!();
+            let manager = manager_guard_to_manager!(manager_guard);
+            match manager.encrypt_final(hSession) {
+                Ok(ciphertext) => ciphertext,
+                Err(err) => {
+                    return crypto_error_to_rv("C_EncryptFinal: encrypt_final failed", &err);
+                }
+            }
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                ciphertext.as_ptr(),
+                pLastEncryptedPart,
+                ciphertext.len(),
+            );
+            *pulLastEncryptedPartLen = ciphertext.len() as CK_ULONG;
+        }
+    }
+    debug!("C_EncryptFinal: CKR_OK");
+    CKR_OK
 }
 
 extern "C" fn C_DecryptInit(
@@ -923,24 +1009,105 @@ extern "C" fn C_Decrypt(
     CKR_OK
 }
 
+/// This gets called to process one part of the ciphertext of an ongoing decryption operation. The
+/// part is buffered; RSA decryption is performed over the complete ciphertext when the operation
+/// is finished via `C_DecryptFinal`.
 extern "C" fn C_DecryptUpdate(
-    _hSession: CK_SESSION_HANDLE,
-    _pEncryptedPart: CK_BYTE_PTR,
-    _ulEncryptedPartLen: CK_ULONG,
+    hSession: CK_SESSION_HANDLE,
+    pEncryptedPart: CK_BYTE_PTR,
+    ulEncryptedPartLen: CK_ULONG,
     _pPart: CK_BYTE_PTR,
     _pulPartLen: CK_ULONG_PTR,
 ) -> CK_RV {
-    error!("C_DecryptUpdate: CKR_FUNCTION_NOT_SUPPORTED");
-    CKR_FUNCTION_NOT_SUPPORTED
+    if pEncryptedPart.is_null() && ulEncryptedPartLen != 0 {
+        error!("C_DecryptUpdate: CKR_ARGUMENTS_BAD");
+        return CKR_ARGUMENTS_BAD;
+    }
+    if ulEncryptedPartLen > MAX_DATA_LEN {
+        error!("C_DecryptUpdate: unreasonable data length {ulEncryptedPartLen}");
+        return CKR_ARGUMENTS_BAD;
+    }
+    let part = unsafe { std::slice::from_raw_parts(pEncryptedPart, ulEncryptedPartLen as usize) };
+    let mut manager_guard = try_to_get_manager_guard!();
+    let manager = manager_guard_to_manager!(manager_guard);
+    match manager.decrypt_update(hSession, part.to_vec()) {
+        Ok(()) => {}
+        Err(err) => {
+            return crypto_error_to_rv("C_DecryptUpdate: decrypt_update failed", &err);
+        }
+    }
+    debug!("C_DecryptUpdate: CKR_OK");
+    CKR_OK
 }
 
+/// This gets called to finish an ongoing decryption operation, decrypting all of the ciphertext
+/// that has been accumulated via `C_DecryptUpdate`. As with `C_Decrypt`, if `pLastPart` is null
+/// only the required output length is determined and the operation remains active.
 extern "C" fn C_DecryptFinal(
-    _hSession: CK_SESSION_HANDLE,
-    _pLastPart: CK_BYTE_PTR,
-    _pulLastPartLen: CK_ULONG_PTR,
+    hSession: CK_SESSION_HANDLE,
+    pLastPart: CK_BYTE_PTR,
+    pulLastPartLen: CK_ULONG_PTR,
 ) -> CK_RV {
-    error!("C_DecryptFinal: CKR_FUNCTION_NOT_SUPPORTED");
-    CKR_FUNCTION_NOT_SUPPORTED
+    if pulLastPartLen.is_null() {
+        error!("C_DecryptFinal: CKR_ARGUMENTS_BAD");
+        return CKR_ARGUMENTS_BAD;
+    }
+    if pLastPart.is_null() {
+        let mut manager_guard = try_to_get_manager_guard!();
+        let manager = manager_guard_to_manager!(manager_guard);
+        match manager.get_final_decrypted_length(hSession) {
+            Ok(decrypted_length) => unsafe {
+                *pulLastPartLen = decrypted_length as CK_ULONG;
+            },
+            Err(err) => {
+                return crypto_error_to_rv(
+                    "C_DecryptFinal: get_final_decrypted_length failed",
+                    &err,
+                );
+            }
+        }
+    } else {
+        // PKCS #11 requires that CKR_BUFFER_TOO_SMALL does not terminate the active operation, so
+        // the output length must be determined (and the buffer checked) before the operation that
+        // consumes it runs.
+        let decrypted_length = {
+            let mut manager_guard = try_to_get_manager_guard!();
+            let manager = manager_guard_to_manager!(manager_guard);
+            match manager.get_final_decrypted_length(hSession) {
+                Ok(decrypted_length) => decrypted_length,
+                Err(err) => {
+                    return crypto_error_to_rv(
+                        "C_DecryptFinal: get_final_decrypted_length failed",
+                        &err,
+                    );
+                }
+            }
+        };
+        let capacity = unsafe { *pulLastPartLen } as usize;
+        if capacity < decrypted_length {
+            unsafe {
+                *pulLastPartLen = decrypted_length as CK_ULONG;
+            }
+            error!("C_DecryptFinal: CKR_BUFFER_TOO_SMALL");
+            return CKR_BUFFER_TOO_SMALL;
+        }
+        let plaintext = {
+            let mut manager_guard = try_to_get_manager_guard!();
+            let manager = manager_guard_to_manager!(manager_guard);
+            match manager.decrypt_final(hSession) {
+                Ok(plaintext) => plaintext,
+                Err(err) => {
+                    return crypto_error_to_rv("C_DecryptFinal: decrypt_final failed", &err);
+                }
+            }
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(plaintext.as_ptr(), pLastPart, plaintext.len());
+            *pulLastPartLen = plaintext.len() as CK_ULONG;
+        }
+    }
+    debug!("C_DecryptFinal: CKR_OK");
+    CKR_OK
 }
 
 extern "C" fn C_DigestInit(_hSession: CK_SESSION_HANDLE, _pMechanism: CK_MECHANISM_PTR) -> CK_RV {
@@ -1021,8 +1188,8 @@ extern "C" fn C_SignInit(
     CKR_OK
 }
 
-/// NSS calls this after `C_SignInit` (there are more ways in the PKCS #11 specification to sign
-/// data, but this is the only way supported by this module). The module essentially defers to the
+/// NSS calls this after `C_SignInit` to sign a message in a single part (multipart signing via
+/// `C_SignUpdate`/`C_SignFinal` is also supported). The module essentially defers to the
 /// `ManagerProxy` and copies out the resulting signature.
 extern "C" fn C_Sign(
     hSession: CK_SESSION_HANDLE,
@@ -1092,22 +1259,101 @@ extern "C" fn C_Sign(
     CKR_OK
 }
 
+/// This gets called to process one part of the message of an ongoing signing operation. The part
+/// is buffered; RSA and ECDSA signatures are computed over the complete message when the operation
+/// is finished via `C_SignFinal`.
 extern "C" fn C_SignUpdate(
-    _hSession: CK_SESSION_HANDLE,
-    _pPart: CK_BYTE_PTR,
-    _ulPartLen: CK_ULONG,
+    hSession: CK_SESSION_HANDLE,
+    pPart: CK_BYTE_PTR,
+    ulPartLen: CK_ULONG,
 ) -> CK_RV {
-    error!("C_SignUpdate: CKR_FUNCTION_NOT_SUPPORTED");
-    CKR_FUNCTION_NOT_SUPPORTED
+    if pPart.is_null() && ulPartLen != 0 {
+        error!("C_SignUpdate: CKR_ARGUMENTS_BAD");
+        return CKR_ARGUMENTS_BAD;
+    }
+    if ulPartLen > MAX_DATA_LEN {
+        error!("C_SignUpdate: unreasonable data length {ulPartLen}");
+        return CKR_ARGUMENTS_BAD;
+    }
+    let part = unsafe { std::slice::from_raw_parts(pPart, ulPartLen as usize) };
+    let mut manager_guard = try_to_get_manager_guard!();
+    let manager = manager_guard_to_manager!(manager_guard);
+    match manager.sign_update(hSession, part.to_vec()) {
+        Ok(()) => {}
+        Err(err) => {
+            return crypto_error_to_rv("C_SignUpdate: sign_update failed", &err);
+        }
+    }
+    debug!("C_SignUpdate: CKR_OK");
+    CKR_OK
 }
 
+/// This gets called to finish an ongoing signing operation, computing a signature over all of the
+/// message parts that have been accumulated via `C_SignUpdate`. As with `C_Sign`, if
+/// `pSignature` is null only the required signature length is determined and the operation remains
+/// active.
 extern "C" fn C_SignFinal(
-    _hSession: CK_SESSION_HANDLE,
-    _pSignature: CK_BYTE_PTR,
-    _pulSignatureLen: CK_ULONG_PTR,
+    hSession: CK_SESSION_HANDLE,
+    pSignature: CK_BYTE_PTR,
+    pulSignatureLen: CK_ULONG_PTR,
 ) -> CK_RV {
-    error!("C_SignFinal: CKR_FUNCTION_NOT_SUPPORTED");
-    CKR_FUNCTION_NOT_SUPPORTED
+    if pulSignatureLen.is_null() {
+        error!("C_SignFinal: CKR_ARGUMENTS_BAD");
+        return CKR_ARGUMENTS_BAD;
+    }
+    if pSignature.is_null() {
+        let mut manager_guard = try_to_get_manager_guard!();
+        let manager = manager_guard_to_manager!(manager_guard);
+        match manager.get_final_signature_length(hSession) {
+            Ok(signature_length) => unsafe {
+                *pulSignatureLen = signature_length as CK_ULONG;
+            },
+            Err(err) => {
+                return crypto_error_to_rv("C_SignFinal: get_final_signature_length failed", &err);
+            }
+        }
+    } else {
+        // PKCS #11 requires that CKR_BUFFER_TOO_SMALL does not terminate the active operation, so
+        // the output length must be determined (and the buffer checked) before the operation that
+        // consumes it runs.
+        let signature_length = {
+            let mut manager_guard = try_to_get_manager_guard!();
+            let manager = manager_guard_to_manager!(manager_guard);
+            match manager.get_final_signature_length(hSession) {
+                Ok(signature_length) => signature_length,
+                Err(err) => {
+                    return crypto_error_to_rv(
+                        "C_SignFinal: get_final_signature_length failed",
+                        &err,
+                    );
+                }
+            }
+        };
+        let capacity = unsafe { *pulSignatureLen } as usize;
+        if capacity < signature_length {
+            unsafe {
+                *pulSignatureLen = signature_length as CK_ULONG;
+            }
+            error!("C_SignFinal: CKR_BUFFER_TOO_SMALL");
+            return CKR_BUFFER_TOO_SMALL;
+        }
+        let signature = {
+            let mut manager_guard = try_to_get_manager_guard!();
+            let manager = manager_guard_to_manager!(manager_guard);
+            match manager.sign_final(hSession) {
+                Ok(signature) => signature,
+                Err(err) => {
+                    return crypto_error_to_rv("C_SignFinal: sign_final failed", &err);
+                }
+            }
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(signature.as_ptr(), pSignature, signature.len());
+            *pulSignatureLen = signature.len() as CK_ULONG;
+        }
+    }
+    debug!("C_SignFinal: CKR_OK");
+    CKR_OK
 }
 
 extern "C" fn C_SignRecoverInit(
@@ -1465,6 +1711,7 @@ mod ffi_test_support {
 mod tests {
     use super::*;
     use crate::ffi_test_support::open_session;
+    use crate::util::MAX_TOTAL_OPERATION_DATA_LEN;
     use crate::util::serialize_uint;
 
     fn find_key(session: CK_SESSION_HANDLE) -> CK_OBJECT_HANDLE {
@@ -1705,6 +1952,341 @@ mod tests {
             CKR_FUNCTION_FAILED
         );
     }
+
+    #[test]
+    fn sign_multipart_matches_single_shot() {
+        let session = open_session();
+        let key = find_key(session);
+        assert_eq!(C_SignInit(session, &mut pkcs1_mechanism(), key), CKR_OK);
+        let part1 = b"hello ";
+        let part2 = b"world";
+        assert_eq!(
+            C_SignUpdate(
+                session,
+                part1.as_ptr() as CK_BYTE_PTR,
+                part1.len() as CK_ULONG
+            ),
+            CKR_OK
+        );
+        assert_eq!(
+            C_SignUpdate(
+                session,
+                part2.as_ptr() as CK_BYTE_PTR,
+                part2.len() as CK_ULONG
+            ),
+            CKR_OK
+        );
+        // A length query must not consume the operation.
+        let mut sig_len: CK_ULONG = 0;
+        assert_eq!(
+            C_SignFinal(session, std::ptr::null_mut(), &mut sig_len),
+            CKR_OK
+        );
+        assert!(sig_len > 0);
+        let mut signature_multipart = [0u8; 256];
+        let mut multipart_len = signature_multipart.len() as CK_ULONG;
+        assert_eq!(
+            C_SignFinal(
+                session,
+                signature_multipart.as_mut_ptr(),
+                &mut multipart_len
+            ),
+            CKR_OK
+        );
+
+        let whole = b"hello world";
+        let session_b = open_session();
+        assert_eq!(C_SignInit(session_b, &mut pkcs1_mechanism(), key), CKR_OK);
+        let mut signature_single = [0u8; 256];
+        let mut single_len = signature_single.len() as CK_ULONG;
+        assert_eq!(
+            C_Sign(
+                session_b,
+                whole.as_ptr() as CK_BYTE_PTR,
+                whole.len() as CK_ULONG,
+                signature_single.as_mut_ptr(),
+                &mut single_len
+            ),
+            CKR_OK
+        );
+        assert_eq!(multipart_len, single_len);
+        assert_eq!(
+            &signature_multipart[..multipart_len as usize],
+            &signature_single[..single_len as usize]
+        );
+    }
+
+    #[test]
+    fn sign_final_buffer_too_small_keeps_operation() {
+        let session = open_session();
+        let key = find_key(session);
+        assert_eq!(C_SignInit(session, &mut pkcs1_mechanism(), key), CKR_OK);
+        let message = b"multipart buffer-too-small";
+        assert_eq!(
+            C_SignUpdate(
+                session,
+                message.as_ptr() as CK_BYTE_PTR,
+                message.len() as CK_ULONG
+            ),
+            CKR_OK
+        );
+        let mut required: CK_ULONG = 0;
+        assert_eq!(
+            C_SignFinal(session, std::ptr::null_mut(), &mut required),
+            CKR_OK
+        );
+        assert!(required > 1);
+        let mut small_out = vec![0u8; (required - 1) as usize];
+        let mut out_len = small_out.len() as CK_ULONG;
+        assert_eq!(
+            C_SignFinal(session, small_out.as_mut_ptr(), &mut out_len),
+            CKR_BUFFER_TOO_SMALL
+        );
+        assert_eq!(out_len, required);
+        // The operation is still active: a well-formed request now succeeds.
+        let mut full_out = vec![0u8; required as usize];
+        let mut out_len = full_out.len() as CK_ULONG;
+        assert_eq!(
+            C_SignFinal(session, full_out.as_mut_ptr(), &mut out_len),
+            CKR_OK
+        );
+        assert_eq!(out_len, required);
+    }
+
+    #[test]
+    fn close_session_clears_pending_sign_operation() {
+        let session = open_session();
+        let key = find_key(session);
+        assert_eq!(C_SignInit(session, &mut pkcs1_mechanism(), key), CKR_OK);
+        let message = b"will be abandoned";
+        assert_eq!(
+            C_SignUpdate(
+                session,
+                message.as_ptr() as CK_BYTE_PTR,
+                message.len() as CK_ULONG
+            ),
+            CKR_OK
+        );
+        assert_eq!(C_CloseSession(session), CKR_OK);
+        // The old session handle is gone, so finishing the operation must fail.
+        let mut sig_len: CK_ULONG = 0;
+        assert_ne!(
+            C_SignFinal(session, std::ptr::null_mut(), &mut sig_len),
+            CKR_OK
+        );
+    }
+
+    #[test]
+    fn encrypt_decrypt_multipart_matches_single_shot() {
+        let plaintext = [0x42_u8; 100];
+        let session_a = open_session();
+        let key = find_key(session_a);
+        assert_eq!(
+            C_EncryptInit(session_a, &mut pkcs1_mechanism(), key),
+            CKR_OK
+        );
+        let (p1, p2) = plaintext.split_at(37);
+        assert_eq!(
+            C_EncryptUpdate(
+                session_a,
+                p1.as_ptr() as CK_BYTE_PTR,
+                p1.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            CKR_OK
+        );
+        assert_eq!(
+            C_EncryptUpdate(
+                session_a,
+                p2.as_ptr() as CK_BYTE_PTR,
+                p2.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            CKR_OK
+        );
+        let mut ct_len: CK_ULONG = 0;
+        assert_eq!(
+            C_EncryptFinal(session_a, std::ptr::null_mut(), &mut ct_len),
+            CKR_OK
+        );
+        let mut ciphertext_multipart = vec![0u8; ct_len as usize];
+        let mut out_len = ciphertext_multipart.len() as CK_ULONG;
+        assert_eq!(
+            C_EncryptFinal(session_a, ciphertext_multipart.as_mut_ptr(), &mut out_len),
+            CKR_OK
+        );
+
+        let session_b = open_session();
+        assert_eq!(
+            C_EncryptInit(session_b, &mut pkcs1_mechanism(), key),
+            CKR_OK
+        );
+        let mut single_ct_len: CK_ULONG = 0;
+        assert_eq!(
+            C_Encrypt(
+                session_b,
+                plaintext.as_ptr() as CK_BYTE_PTR,
+                plaintext.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                &mut single_ct_len
+            ),
+            CKR_OK
+        );
+        let mut ciphertext_single = vec![0u8; single_ct_len as usize];
+        assert_eq!(
+            C_Encrypt(
+                session_b,
+                plaintext.as_ptr() as CK_BYTE_PTR,
+                plaintext.len() as CK_ULONG,
+                ciphertext_single.as_mut_ptr(),
+                &mut single_ct_len
+            ),
+            CKR_OK
+        );
+        assert_eq!(out_len, single_ct_len);
+        assert_eq!(
+            &ciphertext_multipart[..out_len as usize],
+            &ciphertext_single[..single_ct_len as usize]
+        );
+
+        // Decrypt the multipart-produced ciphertext via multipart updates.
+        let session_c = open_session();
+        assert_eq!(
+            C_DecryptInit(session_c, &mut pkcs1_mechanism(), key),
+            CKR_OK
+        );
+        let half = out_len as usize / 2;
+        let (c1, c2) = ciphertext_multipart[..half].split_at(half / 2);
+        assert_eq!(
+            C_DecryptUpdate(
+                session_c,
+                c1.as_ptr() as CK_BYTE_PTR,
+                c1.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            CKR_OK
+        );
+        assert_eq!(
+            C_DecryptUpdate(
+                session_c,
+                c2.as_ptr() as CK_BYTE_PTR,
+                c2.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            CKR_OK
+        );
+        let remainder = &ciphertext_multipart[half..];
+        assert_eq!(
+            C_DecryptUpdate(
+                session_c,
+                remainder.as_ptr() as CK_BYTE_PTR,
+                remainder.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            CKR_OK
+        );
+        let mut pt_len: CK_ULONG = 0;
+        assert_eq!(
+            C_DecryptFinal(session_c, std::ptr::null_mut(), &mut pt_len),
+            CKR_OK
+        );
+        let mut decrypted = vec![0u8; pt_len as usize];
+        let mut final_pt_len = decrypted.len() as CK_ULONG;
+        assert_eq!(
+            C_DecryptFinal(session_c, decrypted.as_mut_ptr(), &mut final_pt_len),
+            CKR_OK
+        );
+        // The stub backend decrypts to a fixed pattern; what matters is that the multipart result
+        // equals the single-shot result over the same ciphertext.
+        let session_d = open_session();
+        assert_eq!(
+            C_DecryptInit(session_d, &mut pkcs1_mechanism(), key),
+            CKR_OK
+        );
+        let mut single_pt_len: CK_ULONG = 0;
+        assert_eq!(
+            C_Decrypt(
+                session_d,
+                ciphertext_multipart.as_ptr() as CK_BYTE_PTR,
+                ciphertext_multipart.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                &mut single_pt_len
+            ),
+            CKR_OK
+        );
+        let mut decrypted_single = vec![0u8; single_pt_len as usize];
+        assert_eq!(
+            C_Decrypt(
+                session_d,
+                ciphertext_multipart.as_ptr() as CK_BYTE_PTR,
+                ciphertext_multipart.len() as CK_ULONG,
+                decrypted_single.as_mut_ptr(),
+                &mut single_pt_len
+            ),
+            CKR_OK
+        );
+        assert_eq!(final_pt_len, single_pt_len);
+        assert_eq!(
+            &decrypted[..final_pt_len as usize],
+            &decrypted_single[..single_pt_len as usize]
+        );
+    }
+
+    #[test]
+    fn multipart_update_without_active_operation_fails() {
+        let session = open_session();
+        let data = [0u8; 4];
+        assert_eq!(
+            C_SignUpdate(session, data.as_ptr() as CK_BYTE_PTR, 4),
+            CKR_FUNCTION_FAILED
+        );
+        assert_eq!(
+            C_EncryptUpdate(
+                session,
+                data.as_ptr() as CK_BYTE_PTR,
+                4,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            CKR_FUNCTION_FAILED
+        );
+        assert_eq!(
+            C_DecryptUpdate(
+                session,
+                data.as_ptr() as CK_BYTE_PTR,
+                4,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            CKR_FUNCTION_FAILED
+        );
+    }
+
+    #[test]
+    fn multipart_accumulated_data_overflow_rejected() {
+        let session = open_session();
+        let key = find_key(session);
+        assert_eq!(C_SignInit(session, &mut pkcs1_mechanism(), key), CKR_OK);
+        let chunk = vec![0u8; MAX_TOTAL_OPERATION_DATA_LEN];
+        assert_eq!(
+            C_SignUpdate(
+                session,
+                chunk.as_ptr() as CK_BYTE_PTR,
+                chunk.len() as CK_ULONG
+            ),
+            CKR_OK
+        );
+        let one_more = [0u8; 1];
+        assert_eq!(
+            C_SignUpdate(session, one_more.as_ptr() as CK_BYTE_PTR, 1),
+            CKR_DATA_LEN_RANGE
+        );
+    }
 }
 
 /// Hostile-input tests for the C ABI boundary. These exercise the argument validation of the
@@ -1872,5 +2454,77 @@ mod ffi_hardening_tests {
         assert_eq!(count, 0);
         assert_eq!(C_FindObjectsFinal(session), CKR_OK);
         assert_eq!(C_CloseSession(session), CKR_OK);
+    }
+
+    #[test]
+    fn sign_update_rejects_null_part_with_nonzero_length() {
+        assert_eq!(C_SignUpdate(1, std::ptr::null_mut(), 4), CKR_ARGUMENTS_BAD);
+    }
+
+    #[test]
+    fn sign_update_rejects_huge_part_length() {
+        let backing = [0u8; 4];
+        assert_eq!(
+            C_SignUpdate(1, backing.as_ptr() as CK_BYTE_PTR, CK_ULONG::MAX),
+            CKR_ARGUMENTS_BAD
+        );
+    }
+
+    #[test]
+    fn encrypt_update_rejects_null_part_with_nonzero_length() {
+        assert_eq!(
+            C_EncryptUpdate(
+                1,
+                std::ptr::null_mut(),
+                4,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            CKR_ARGUMENTS_BAD
+        );
+    }
+
+    #[test]
+    fn encrypt_update_rejects_huge_part_length() {
+        let backing = [0u8; 4];
+        assert_eq!(
+            C_EncryptUpdate(
+                1,
+                backing.as_ptr() as CK_BYTE_PTR,
+                CK_ULONG::MAX,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            CKR_ARGUMENTS_BAD
+        );
+    }
+
+    #[test]
+    fn decrypt_update_rejects_null_part_with_nonzero_length() {
+        assert_eq!(
+            C_DecryptUpdate(
+                1,
+                std::ptr::null_mut(),
+                4,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            CKR_ARGUMENTS_BAD
+        );
+    }
+
+    #[test]
+    fn decrypt_update_rejects_huge_part_length() {
+        let backing = [0u8; 4];
+        assert_eq!(
+            C_DecryptUpdate(
+                1,
+                backing.as_ptr() as CK_BYTE_PTR,
+                CK_ULONG::MAX,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            CKR_ARGUMENTS_BAD
+        );
     }
 }

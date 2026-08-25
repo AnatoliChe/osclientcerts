@@ -15,6 +15,7 @@ use crate::backend_windows as backend;
 use backend::*;
 
 use crate::util::CryptoError;
+use crate::util::MAX_TOTAL_OPERATION_DATA_LEN;
 use crate::util::hex_encode;
 
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -45,12 +46,21 @@ enum ManagerArguments {
     ),
     GetSignatureLength(CK_SESSION_HANDLE, Vec<u8>),
     Sign(CK_SESSION_HANDLE, Vec<u8>),
+    SignUpdate(CK_SESSION_HANDLE, Vec<u8>),
+    GetFinalSignatureLength(CK_SESSION_HANDLE),
+    SignFinal(CK_SESSION_HANDLE),
     StartDecrypt(CK_SESSION_HANDLE, CK_OBJECT_HANDLE, RsaCipherMechanism),
     GetDecryptedLength(CK_SESSION_HANDLE, Vec<u8>),
     Decrypt(CK_SESSION_HANDLE, Vec<u8>),
+    DecryptUpdate(CK_SESSION_HANDLE, Vec<u8>),
+    GetFinalDecryptedLength(CK_SESSION_HANDLE),
+    DecryptFinal(CK_SESSION_HANDLE),
     StartEncrypt(CK_SESSION_HANDLE, CK_OBJECT_HANDLE, RsaCipherMechanism),
     GetEncryptedLength(CK_SESSION_HANDLE, Vec<u8>),
     Encrypt(CK_SESSION_HANDLE, Vec<u8>),
+    EncryptUpdate(CK_SESSION_HANDLE, Vec<u8>),
+    GetFinalEncryptedLength(CK_SESSION_HANDLE),
+    EncryptFinal(CK_SESSION_HANDLE),
     Stop,
 }
 
@@ -68,12 +78,21 @@ enum ManagerReturnValue {
     StartSign(Result<(), CryptoError>),
     GetSignatureLength(Result<usize, CryptoError>),
     Sign(Result<Vec<u8>, CryptoError>),
+    SignUpdate(Result<(), CryptoError>),
+    GetFinalSignatureLength(Result<usize, CryptoError>),
+    SignFinal(Result<Vec<u8>, CryptoError>),
     StartDecrypt(Result<(), CryptoError>),
     GetDecryptedLength(Result<usize, CryptoError>),
     Decrypt(Result<Vec<u8>, CryptoError>),
+    DecryptUpdate(Result<(), CryptoError>),
+    GetFinalDecryptedLength(Result<usize, CryptoError>),
+    DecryptFinal(Result<Vec<u8>, CryptoError>),
     StartEncrypt(Result<(), CryptoError>),
     GetEncryptedLength(Result<usize, CryptoError>),
     Encrypt(Result<Vec<u8>, CryptoError>),
+    EncryptUpdate(Result<(), CryptoError>),
+    GetFinalEncryptedLength(Result<usize, CryptoError>),
+    EncryptFinal(Result<Vec<u8>, CryptoError>),
     Stop(Result<(), ()>),
 }
 
@@ -155,6 +174,17 @@ impl ManagerProxy {
                     ManagerArguments::Sign(session, data) => {
                         ManagerReturnValue::Sign(real_manager.sign(session, &data))
                     }
+                    ManagerArguments::SignUpdate(session, data) => {
+                        ManagerReturnValue::SignUpdate(real_manager.sign_update(session, &data))
+                    }
+                    ManagerArguments::GetFinalSignatureLength(session) => {
+                        ManagerReturnValue::GetFinalSignatureLength(
+                            real_manager.get_final_signature_length(session),
+                        )
+                    }
+                    ManagerArguments::SignFinal(session) => {
+                        ManagerReturnValue::SignFinal(real_manager.sign_final(session))
+                    }
                     ManagerArguments::StartDecrypt(session, key_handle, mechanism) => {
                         ManagerReturnValue::StartDecrypt(
                             real_manager.start_decrypt(session, key_handle, mechanism),
@@ -168,6 +198,19 @@ impl ManagerProxy {
                     ManagerArguments::Decrypt(session, data) => {
                         ManagerReturnValue::Decrypt(real_manager.decrypt(session, &data))
                     }
+                    ManagerArguments::DecryptUpdate(session, data) => {
+                        ManagerReturnValue::DecryptUpdate(
+                            real_manager.decrypt_update(session, &data),
+                        )
+                    }
+                    ManagerArguments::GetFinalDecryptedLength(session) => {
+                        ManagerReturnValue::GetFinalDecryptedLength(
+                            real_manager.get_final_decrypted_length(session),
+                        )
+                    }
+                    ManagerArguments::DecryptFinal(session) => {
+                        ManagerReturnValue::DecryptFinal(real_manager.decrypt_final(session))
+                    }
                     ManagerArguments::StartEncrypt(session, key_handle, mechanism) => {
                         ManagerReturnValue::StartEncrypt(
                             real_manager.start_encrypt(session, key_handle, mechanism),
@@ -180,6 +223,19 @@ impl ManagerProxy {
                     }
                     ManagerArguments::Encrypt(session, data) => {
                         ManagerReturnValue::Encrypt(real_manager.encrypt(session, &data))
+                    }
+                    ManagerArguments::EncryptUpdate(session, data) => {
+                        ManagerReturnValue::EncryptUpdate(
+                            real_manager.encrypt_update(session, &data),
+                        )
+                    }
+                    ManagerArguments::GetFinalEncryptedLength(session) => {
+                        ManagerReturnValue::GetFinalEncryptedLength(
+                            real_manager.get_final_encrypted_length(session),
+                        )
+                    }
+                    ManagerArguments::EncryptFinal(session) => {
+                        ManagerReturnValue::EncryptFinal(real_manager.encrypt_final(session))
                     }
                     ManagerArguments::Stop => {
                         debug!("ManagerArguments::Stop received - stopping Manager thread.");
@@ -329,6 +385,37 @@ impl ManagerProxy {
         )
     }
 
+    pub fn sign_update(
+        &self,
+        session: CK_SESSION_HANDLE,
+        data: Vec<u8>,
+    ) -> Result<(), CryptoError> {
+        manager_proxy_fn_impl!(
+            self,
+            ManagerArguments::SignUpdate(session, data),
+            ManagerReturnValue::SignUpdate
+        )
+    }
+
+    pub fn get_final_signature_length(
+        &self,
+        session: CK_SESSION_HANDLE,
+    ) -> Result<usize, CryptoError> {
+        manager_proxy_fn_impl!(
+            self,
+            ManagerArguments::GetFinalSignatureLength(session),
+            ManagerReturnValue::GetFinalSignatureLength
+        )
+    }
+
+    pub fn sign_final(&mut self, session: CK_SESSION_HANDLE) -> Result<Vec<u8>, CryptoError> {
+        manager_proxy_fn_impl!(
+            self,
+            ManagerArguments::SignFinal(session),
+            ManagerReturnValue::SignFinal
+        )
+    }
+
     pub fn start_decrypt(
         &mut self,
         session: CK_SESSION_HANDLE,
@@ -363,6 +450,37 @@ impl ManagerProxy {
             self,
             ManagerArguments::Decrypt(session, data),
             ManagerReturnValue::Decrypt
+        )
+    }
+
+    pub fn decrypt_update(
+        &self,
+        session: CK_SESSION_HANDLE,
+        data: Vec<u8>,
+    ) -> Result<(), CryptoError> {
+        manager_proxy_fn_impl!(
+            self,
+            ManagerArguments::DecryptUpdate(session, data),
+            ManagerReturnValue::DecryptUpdate
+        )
+    }
+
+    pub fn get_final_decrypted_length(
+        &self,
+        session: CK_SESSION_HANDLE,
+    ) -> Result<usize, CryptoError> {
+        manager_proxy_fn_impl!(
+            self,
+            ManagerArguments::GetFinalDecryptedLength(session),
+            ManagerReturnValue::GetFinalDecryptedLength
+        )
+    }
+
+    pub fn decrypt_final(&mut self, session: CK_SESSION_HANDLE) -> Result<Vec<u8>, CryptoError> {
+        manager_proxy_fn_impl!(
+            self,
+            ManagerArguments::DecryptFinal(session),
+            ManagerReturnValue::DecryptFinal
         )
     }
 
@@ -403,6 +521,37 @@ impl ManagerProxy {
         )
     }
 
+    pub fn encrypt_update(
+        &self,
+        session: CK_SESSION_HANDLE,
+        data: Vec<u8>,
+    ) -> Result<(), CryptoError> {
+        manager_proxy_fn_impl!(
+            self,
+            ManagerArguments::EncryptUpdate(session, data),
+            ManagerReturnValue::EncryptUpdate
+        )
+    }
+
+    pub fn get_final_encrypted_length(
+        &self,
+        session: CK_SESSION_HANDLE,
+    ) -> Result<usize, CryptoError> {
+        manager_proxy_fn_impl!(
+            self,
+            ManagerArguments::GetFinalEncryptedLength(session),
+            ManagerReturnValue::GetFinalEncryptedLength
+        )
+    }
+
+    pub fn encrypt_final(&mut self, session: CK_SESSION_HANDLE) -> Result<Vec<u8>, CryptoError> {
+        manager_proxy_fn_impl!(
+            self,
+            ManagerArguments::EncryptFinal(session),
+            ManagerReturnValue::EncryptFinal
+        )
+    }
+
     pub fn stop(&mut self) -> Result<(), ()> {
         manager_proxy_fn_impl!(self, ManagerArguments::Stop, ManagerReturnValue::Stop)?;
         let thread_handle = match self.thread_handle.take() {
@@ -431,15 +580,18 @@ struct Manager {
     sessions: BTreeSet<CK_SESSION_HANDLE>,
     /// A map of searches to PKCS #11 object handles that match those searches.
     searches: BTreeMap<CK_SESSION_HANDLE, Vec<CK_OBJECT_HANDLE>>,
-    /// A map of sign operations to a pair of the object handle and optionally some params being
-    /// used by each one.
-    signs: BTreeMap<CK_SESSION_HANDLE, (CK_OBJECT_HANDLE, Option<CK_RSA_PKCS_PSS_PARAMS>)>,
-    /// A map of decrypt operations to a pair of the key handle and mechanism being used by each
-    /// one.
-    decrypts: BTreeMap<CK_SESSION_HANDLE, (CK_OBJECT_HANDLE, RsaCipherMechanism)>,
-    /// A map of encrypt operations to a pair of the object handle (certificate or key) and
-    /// mechanism being used by each one.
-    encrypts: BTreeMap<CK_SESSION_HANDLE, (CK_OBJECT_HANDLE, RsaCipherMechanism)>,
+    /// A map of sign operations to a triple of the object handle, optionally some params being
+    /// used by each one, and the data accumulated so far via multipart updates. RSA and ECDSA
+    /// signatures are computed over the complete message in one go, so multipart updates are
+    /// buffered until the operation is finished.
+    signs: BTreeMap<CK_SESSION_HANDLE, (CK_OBJECT_HANDLE, Option<CK_RSA_PKCS_PSS_PARAMS>, Vec<u8>)>,
+    /// A map of decrypt operations to a triple of the key handle, mechanism being used by each
+    /// one, and the ciphertext accumulated so far via multipart updates.
+    decrypts: BTreeMap<CK_SESSION_HANDLE, (CK_OBJECT_HANDLE, RsaCipherMechanism, Vec<u8>)>,
+    /// A map of encrypt operations to a triple of the object handle (certificate or key),
+    /// mechanism being used by each one, and the plaintext accumulated so far via multipart
+    /// updates.
+    encrypts: BTreeMap<CK_SESSION_HANDLE, (CK_OBJECT_HANDLE, RsaCipherMechanism, Vec<u8>)>,
     /// A map of object handles to the underlying objects.
     objects: BTreeMap<CK_OBJECT_HANDLE, Object>,
     /// A set of certificate identifiers (not the same as handles).
@@ -665,7 +817,7 @@ impl Manager {
             Some(Object::Key(_)) => {}
             _ => return Err(CryptoError::InvalidKey),
         };
-        self.signs.insert(session, (key_handle, params));
+        self.signs.insert(session, (key_handle, params, Vec::new()));
         Ok(())
     }
 
@@ -674,8 +826,8 @@ impl Manager {
         session: CK_SESSION_HANDLE,
         data: &[u8],
     ) -> Result<usize, CryptoError> {
-        let (key_handle, params) = match self.signs.get(&session) {
-            Some((key_handle, params)) => (key_handle, params),
+        let (key_handle, params, _) = match self.signs.get(&session) {
+            Some((key_handle, params, data)) => (key_handle, params, data),
             None => return Err(CryptoError::OperationFailed),
         };
         let key = match self.objects.get(key_handle) {
@@ -692,8 +844,8 @@ impl Manager {
     ) -> Result<Vec<u8>, CryptoError> {
         // Performing the signature (via C_Sign, which is the only way we support) finishes the sign
         // operation, so it needs to be removed here.
-        let (key_handle, params) = match self.signs.remove(&session) {
-            Some((key_handle, params)) => (key_handle, params),
+        let (key_handle, params, _) = match self.signs.remove(&session) {
+            Some((key_handle, params, data)) => (key_handle, params, data),
             None => return Err(CryptoError::OperationFailed),
         };
         let key = match self.objects.get(&key_handle) {
@@ -717,7 +869,8 @@ impl Manager {
             Some(Object::Key(_)) => {}
             _ => return Err(CryptoError::InvalidKey),
         };
-        self.decrypts.insert(session, (key_handle, mechanism));
+        self.decrypts
+            .insert(session, (key_handle, mechanism, Vec::new()));
         Ok(())
     }
 
@@ -726,8 +879,8 @@ impl Manager {
         session: CK_SESSION_HANDLE,
         data: &[u8],
     ) -> Result<usize, CryptoError> {
-        let (key_handle, mechanism) = match self.decrypts.get(&session) {
-            Some((key_handle, mechanism)) => (*key_handle, mechanism),
+        let (key_handle, mechanism, _) = match self.decrypts.get(&session) {
+            Some((key_handle, mechanism, data)) => (*key_handle, mechanism, data),
             None => return Err(CryptoError::OperationFailed),
         };
         let key = match self.objects.get(&key_handle) {
@@ -744,8 +897,8 @@ impl Manager {
     ) -> Result<Vec<u8>, CryptoError> {
         // Performing the decryption (via C_Decrypt, which is the only way we support) finishes the
         // decrypt operation, so it needs to be removed here.
-        let (key_handle, mechanism) = match self.decrypts.remove(&session) {
-            Some((key_handle, mechanism)) => (key_handle, mechanism),
+        let (key_handle, mechanism, _) = match self.decrypts.remove(&session) {
+            Some((key_handle, mechanism, data)) => (key_handle, mechanism, data),
             None => return Err(CryptoError::OperationFailed),
         };
         let key = match self.objects.get(&key_handle) {
@@ -770,7 +923,8 @@ impl Manager {
             Some(Object::Cert(_)) | Some(Object::Key(_)) => {}
             _ => return Err(CryptoError::InvalidKey),
         };
-        self.encrypts.insert(session, (key_handle, mechanism));
+        self.encrypts
+            .insert(session, (key_handle, mechanism, Vec::new()));
         Ok(())
     }
 
@@ -779,8 +933,8 @@ impl Manager {
         session: CK_SESSION_HANDLE,
         data: &[u8],
     ) -> Result<usize, CryptoError> {
-        let (object_handle, mechanism) = match self.encrypts.get(&session) {
-            Some((object_handle, mechanism)) => (*object_handle, mechanism),
+        let (object_handle, mechanism, _) = match self.encrypts.get(&session) {
+            Some((object_handle, mechanism, data)) => (*object_handle, mechanism, data),
             None => return Err(CryptoError::OperationFailed),
         };
         match self.objects.get(&object_handle) {
@@ -797,13 +951,159 @@ impl Manager {
     ) -> Result<Vec<u8>, CryptoError> {
         // Performing the encryption (via C_Encrypt, which is the only way we support) finishes the
         // encrypt operation, so it needs to be removed here.
-        let (object_handle, mechanism) = match self.encrypts.remove(&session) {
-            Some((object_handle, mechanism)) => (object_handle, mechanism),
+        let (object_handle, mechanism, _) = match self.encrypts.remove(&session) {
+            Some((object_handle, mechanism, data)) => (object_handle, mechanism, data),
             None => return Err(CryptoError::OperationFailed),
         };
         match self.objects.get(&object_handle) {
             Some(Object::Cert(cert)) => cert.encrypt(data, &mechanism),
             Some(Object::Key(key)) => key.encrypt(data, &mechanism),
+            _ => Err(CryptoError::InvalidKey),
+        }
+    }
+
+    /// Appends a part of the message to the buffered data of an active sign operation. The data
+    /// is only buffered here; RSA and ECDSA signatures are computed over the complete message when
+    /// the operation is finished.
+    pub fn sign_update(
+        &mut self,
+        session: CK_SESSION_HANDLE,
+        data: &[u8],
+    ) -> Result<(), CryptoError> {
+        let buffer = match self.signs.get_mut(&session) {
+            Some((_, _, buffer)) => buffer,
+            None => return Err(CryptoError::OperationFailed),
+        };
+        if buffer.len() + data.len() > MAX_TOTAL_OPERATION_DATA_LEN {
+            return Err(CryptoError::DataTooLarge);
+        }
+        buffer.extend_from_slice(data);
+        Ok(())
+    }
+
+    /// Determines the length of the signature that would be produced by finishing the active sign
+    /// operation over all of its buffered data. This does not consume or modify the operation.
+    pub fn get_final_signature_length(
+        &self,
+        session: CK_SESSION_HANDLE,
+    ) -> Result<usize, CryptoError> {
+        let (key_handle, params, data) = match self.signs.get(&session) {
+            Some((key_handle, params, data)) => (*key_handle, params, data),
+            None => return Err(CryptoError::OperationFailed),
+        };
+        let key = match self.objects.get(&key_handle) {
+            Some(Object::Key(key)) => key,
+            _ => return Err(CryptoError::InvalidKey),
+        };
+        key.get_signature_length(data, params)
+    }
+
+    /// Finishes the active sign operation, computing and returning a signature over all of its
+    /// buffered data.
+    pub fn sign_final(&mut self, session: CK_SESSION_HANDLE) -> Result<Vec<u8>, CryptoError> {
+        let (key_handle, params, data) = match self.signs.remove(&session) {
+            Some((key_handle, params, data)) => (key_handle, params, data),
+            None => return Err(CryptoError::OperationFailed),
+        };
+        let key = match self.objects.get(&key_handle) {
+            Some(Object::Key(key)) => key,
+            _ => return Err(CryptoError::InvalidKey),
+        };
+        key.sign(&data, &params)
+    }
+
+    /// Appends a part of the ciphertext to the buffered data of an active decrypt operation.
+    pub fn decrypt_update(
+        &mut self,
+        session: CK_SESSION_HANDLE,
+        data: &[u8],
+    ) -> Result<(), CryptoError> {
+        let buffer = match self.decrypts.get_mut(&session) {
+            Some((_, _, buffer)) => buffer,
+            None => return Err(CryptoError::OperationFailed),
+        };
+        if buffer.len() + data.len() > MAX_TOTAL_OPERATION_DATA_LEN {
+            return Err(CryptoError::DataTooLarge);
+        }
+        buffer.extend_from_slice(data);
+        Ok(())
+    }
+
+    /// Determines the length of the plaintext that would be produced by finishing the active
+    /// decrypt operation over all of its buffered ciphertext. This does not consume or modify the
+    /// operation.
+    pub fn get_final_decrypted_length(
+        &self,
+        session: CK_SESSION_HANDLE,
+    ) -> Result<usize, CryptoError> {
+        let (key_handle, mechanism, data) = match self.decrypts.get(&session) {
+            Some((key_handle, mechanism, data)) => (*key_handle, mechanism, data),
+            None => return Err(CryptoError::OperationFailed),
+        };
+        let key = match self.objects.get(&key_handle) {
+            Some(Object::Key(key)) => key,
+            _ => return Err(CryptoError::InvalidKey),
+        };
+        key.decrypt_length(data, mechanism)
+    }
+
+    /// Finishes the active decrypt operation, decrypting all of its buffered ciphertext.
+    pub fn decrypt_final(&mut self, session: CK_SESSION_HANDLE) -> Result<Vec<u8>, CryptoError> {
+        let (key_handle, mechanism, data) = match self.decrypts.remove(&session) {
+            Some((key_handle, mechanism, data)) => (key_handle, mechanism, data),
+            None => return Err(CryptoError::OperationFailed),
+        };
+        let key = match self.objects.get(&key_handle) {
+            Some(Object::Key(key)) => key,
+            _ => return Err(CryptoError::InvalidKey),
+        };
+        key.decrypt(&data, &mechanism)
+    }
+
+    /// Appends a part of the plaintext to the buffered data of an active encrypt operation.
+    pub fn encrypt_update(
+        &mut self,
+        session: CK_SESSION_HANDLE,
+        data: &[u8],
+    ) -> Result<(), CryptoError> {
+        let buffer = match self.encrypts.get_mut(&session) {
+            Some((_, _, buffer)) => buffer,
+            None => return Err(CryptoError::OperationFailed),
+        };
+        if buffer.len() + data.len() > MAX_TOTAL_OPERATION_DATA_LEN {
+            return Err(CryptoError::DataTooLarge);
+        }
+        buffer.extend_from_slice(data);
+        Ok(())
+    }
+
+    /// Determines the length of the ciphertext that would be produced by finishing the active
+    /// encrypt operation over all of its buffered data. This does not consume or modify the
+    /// operation.
+    pub fn get_final_encrypted_length(
+        &self,
+        session: CK_SESSION_HANDLE,
+    ) -> Result<usize, CryptoError> {
+        let (object_handle, mechanism, data) = match self.encrypts.get(&session) {
+            Some((object_handle, mechanism, data)) => (*object_handle, mechanism, data),
+            None => return Err(CryptoError::OperationFailed),
+        };
+        match self.objects.get(&object_handle) {
+            Some(Object::Cert(cert)) => cert.encrypt_length(data, mechanism),
+            Some(Object::Key(key)) => key.encrypt_length(data, mechanism),
+            _ => Err(CryptoError::InvalidKey),
+        }
+    }
+
+    /// Finishes the active encrypt operation, encrypting all of its buffered data.
+    pub fn encrypt_final(&mut self, session: CK_SESSION_HANDLE) -> Result<Vec<u8>, CryptoError> {
+        let (object_handle, mechanism, data) = match self.encrypts.remove(&session) {
+            Some((object_handle, mechanism, data)) => (object_handle, mechanism, data),
+            None => return Err(CryptoError::OperationFailed),
+        };
+        match self.objects.get(&object_handle) {
+            Some(Object::Cert(cert)) => cert.encrypt(&data, &mechanism),
+            Some(Object::Key(key)) => key.encrypt(&data, &mechanism),
             _ => Err(CryptoError::InvalidKey),
         }
     }
@@ -1090,6 +1390,41 @@ mod smime_regression_tests {
         assert_ne!(
             signature, other,
             "different DigestInfo inputs must yield different signatures"
+        );
+    }
+
+    #[test]
+    fn smime_rsa_multipart_signature_matches_single_shot() {
+        let mut manager = Manager::new();
+        let session = manager.open_session().unwrap();
+        let (_cert_handle, cert_id) = find_marker_cert(&mut manager, session, MARKER_RSA);
+        let key_handle = find_key_for_cert(&mut manager, session, cert_id);
+
+        // NSS signs DigestInfo (not a bare hash) with CKM_RSA_PKCS; CNG with a null padding-info
+        // algorithm embeds this blob verbatim into the EMSA-PKCS1-v1_5 message.
+        let digest = Sha256::digest(b"smime regression pkcs1").to_vec();
+        let digest_info: Vec<u8> = SHA256_DIGEST_INFO_PREFIX
+            .iter()
+            .copied()
+            .chain(digest)
+            .collect();
+
+        // Multipart signing buffers the parts and must produce the exact same deterministic
+        // PKCS#1 v1.5 signature as the single-shot operation over the concatenated message.
+        manager.start_sign(session, key_handle, None).unwrap();
+        let half = digest_info.len() / 2;
+        manager.sign_update(session, &digest_info[..half]).unwrap();
+        manager.sign_update(session, &digest_info[half..]).unwrap();
+        let len = manager.get_final_signature_length(session).unwrap();
+        assert_eq!(len, 256);
+        let signature_multipart = manager.sign_final(session).unwrap();
+
+        manager.start_sign(session, key_handle, None).unwrap();
+        let signature_single = manager.sign(session, &digest_info).unwrap();
+
+        assert_eq!(
+            signature_multipart, signature_single,
+            "multipart and single-shot RSA PKCS#1 v1.5 signatures over the same message must be identical"
         );
     }
 

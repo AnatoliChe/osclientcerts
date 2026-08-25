@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file. Pre-built DLLs 
 are published on the GitHub
 [releases page](https://github.com/AnatoliChe/osclientcerts/releases).
 
+## Unreleased
+
+- Added multipart operation support: `C_SignUpdate`/`C_SignFinal`,
+  `C_EncryptUpdate`/`C_EncryptFinal`, and `C_DecryptUpdate`/`C_DecryptFinal` are now implemented
+  instead of returning `CKR_FUNCTION_NOT_SUPPORTED`. Update parts are buffered per session and the
+  RSA/ECDSA operation runs once at the `*Final` step; length queries do not consume the pending
+  operation and `CKR_BUFFER_TOO_SMALL` retries preserve it.
+- The total data accumulated per multipart operation is bounded (64 KiB); exceeding the bound
+  fails the update with `CKR_DATA_LEN_RANGE`.
+- New tests (12): stub-backend equivalence of multipart and single-shot results for sign,
+  encrypt, and decrypt; buffer-too-small retry and session-teardown semantics for pending
+  multipart operations; argument guards for the update functions; and a Windows S/MIME test
+  proving a real-CNG multipart RSA PKCS#1 v1.5 signature is byte-identical to the single-shot one.
+
 ## 0.3.4 - 2026-08-24
 
 - Hardened the C ABI boundary against hostile or buggy callers: `C_FindObjectsInit` and

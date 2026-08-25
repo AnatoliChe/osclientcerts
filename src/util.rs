@@ -46,6 +46,12 @@ pub fn serialize_uint<T: TryInto<u64>>(value: T) -> Result<Vec<u8>, ()> {
 
 /// An error that can occur while performing a cryptographic operation via the OS. This carries
 /// enough information to both log a useful diagnostic and map the failure onto the appropriate
+/// The maximum total amount of data (in bytes) that may be accumulated across the multipart
+/// updates of a single operation. RSA and ECDSA operations require the complete message anyway,
+/// and real-world messages are tiny compared to this bound; it only exists so that a hostile or
+/// buggy caller cannot exhaust memory by streaming updates.
+pub const MAX_TOTAL_OPERATION_DATA_LEN: usize = 64 * 1024;
+
 /// PKCS#11 return code for the calling application.
 // Some variants are only constructed by platform backends other than the one being compiled.
 #[allow(dead_code)]
@@ -59,6 +65,8 @@ pub enum CryptoError {
     /// The input data is invalid for the operation (e.g. an encrypted blob does not decrypt to
     /// something with valid padding).
     InvalidData,
+    /// The accumulated input data of a multipart operation exceeds the supported bound.
+    DataTooLarge,
     /// The caller-supplied output buffer is too small; the payload is the required length in
     /// bytes.
     BufferTooSmall(usize),
@@ -72,6 +80,7 @@ impl std::fmt::Display for CryptoError {
             CryptoError::OperationFailed => write!(f, "operation failed"),
             CryptoError::InvalidKey => write!(f, "invalid key"),
             CryptoError::InvalidData => write!(f, "invalid data"),
+            CryptoError::DataTooLarge => write!(f, "data too large"),
             CryptoError::BufferTooSmall(len) => {
                 write!(f, "buffer too small (need {} bytes)", len)
             }
@@ -119,6 +128,7 @@ pub fn crypto_error_to_rv(context: &str, err: &CryptoError) -> crate::pkcs11::ty
         CryptoError::OperationFailed => CKR_FUNCTION_FAILED,
         CryptoError::InvalidKey => CKR_KEY_HANDLE_INVALID,
         CryptoError::InvalidData => CKR_ENCRYPTED_DATA_INVALID,
+        CryptoError::DataTooLarge => CKR_DATA_LEN_RANGE,
         CryptoError::BufferTooSmall(_) => CKR_BUFFER_TOO_SMALL,
         CryptoError::Windows(status) => match *status {
             #[cfg(target_os = "windows")]

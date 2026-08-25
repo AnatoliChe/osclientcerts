@@ -206,6 +206,28 @@ Because signatures are opaque values (the result of the private-key operation), 
 rely on mechanism-level properties - deterministic vs randomized encodings and exact output sizes -
 rather than byte layouts of encoded messages.
 
+### Multipart operations
+
+The provider supports the multipart families `C_EncryptUpdate`/`C_EncryptFinal`,
+`C_DecryptUpdate`/`C_DecryptFinal`, and `C_SignUpdate`/`C_SignFinal`. Because RSA (and ECDSA)
+private-key operations require the complete message in one call, update parts are **buffered** in
+the per-session operation state and the underlying operation runs once at the `*Final` step.
+Semantics follow the PKCS #11 specification:
+
+- a length query (`*Final` with a null output pointer) determines the required output size without
+  consuming the operation;
+- `CKR_BUFFER_TOO_SMALL` on a real `*Final` attempt reports the required size and leaves the
+  operation active for a retry;
+- closing a session discards any buffered parts along with the operation;
+- the total amount of buffered data per operation is bounded
+  (`MAX_TOTAL_OPERATION_DATA_LEN`, 64 KiB); exceeding it fails the update with `CKR_DATA_LEN_RANGE`.
+
+Stub-backend tests verify that multipart results equal single-shot results over the concatenated
+input, that buffer-too-small retries preserve the pending operation, and that abandoned sessions
+cannot be finished. The Windows S/MIME suite adds an end-to-end check against real CNG: a
+multipart RSA PKCS#1 v1.5 signature must be byte-identical to the deterministic single-shot
+signature over the same DigestInfo.
+
 ### Hostile-input tests (FFI boundary, all platforms)
 
 The exported `C_*` functions are the library's attack surface: any process that loads the DLL can
@@ -218,7 +240,9 @@ crashing:
 - `C_FindObjectsInit`: attribute entries with a null value pointer but non-zero length, or with
   lengths above the sane bound; plus graceful handling of legal-but-unusual templates
   (zero-count match-all searches, unsupported attribute types, duplicate types);
-- `C_Encrypt` / `C_Decrypt` / `C_Sign`: oversized input buffers.
+- `C_Encrypt` / `C_Decrypt` / `C_Sign`: oversized input buffers;
+- `C_EncryptUpdate` / `C_DecryptUpdate` / `C_SignUpdate`: null parts with non-zero lengths and
+  oversized parts, exactly as for their single-shot counterparts.
 
 The corresponding bounds live in constants next to the FFI layer (`MAX_TEMPLATE_COUNT = 128`,
 `MAX_ATTRIBUTE_VALUE_LEN = 64 KiB`, `MAX_DATA_LEN = 64 KiB`, `MAX_OAEP_LABEL_LEN = 8 KiB`) and
