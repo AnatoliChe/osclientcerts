@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file. Pre-built DLLs 
 are published on the GitHub
 [releases page](https://github.com/AnatoliChe/osclientcerts/releases).
 
-## Unreleased
+## 0.3.5 - 2026-08-25
 
 - Added multipart operation support: `C_SignUpdate`/`C_SignFinal`,
   `C_EncryptUpdate`/`C_EncryptFinal`, and `C_DecryptUpdate`/`C_DecryptFinal` are now implemented
