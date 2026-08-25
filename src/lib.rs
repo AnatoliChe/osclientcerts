@@ -171,6 +171,28 @@ const MAX_ATTRIBUTE_VALUE_LEN: CK_ULONG = 64 * 1024;
 /// caller-provided memory (RSA operations for keys up to 4096 bits use well under 1 KiB).
 const MAX_DATA_LEN: CK_ULONG = 64 * 1024;
 
+/// Converts a caller-supplied byte buffer into a slice. A null pointer is accepted only for a
+/// zero-length buffer, yielding an empty slice; `slice::from_raw_parts` requires a non-null
+/// pointer even for zero lengths, so this centralizes the check instead of relying on each call
+/// site to remember it. The caller still warrants that, for non-zero lengths, the pointer is
+/// aligned and dereferenceable for `len` bytes - that part of the C calling contract cannot be
+/// validated in-process.
+///
+/// # Safety
+///
+/// For non-null pointers, `ptr` must be aligned and valid for reads of `len` bytes.
+unsafe fn input_slice<'a>(ptr: CK_BYTE_PTR, len: CK_ULONG) -> Result<&'a [u8], CK_RV> {
+    if ptr.is_null() {
+        if len == 0 {
+            return Ok(&[]);
+        }
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    // SAFETY: the caller of input_slice warrants that a non-null ptr is aligned and readable for
+    // len bytes; the null case never reaches from_raw_parts.
+    Ok(unsafe { std::slice::from_raw_parts(ptr, len as usize) })
+}
+
 /// This gets called twice: once with a null `pSlotList` to get the number of slots (returned via
 /// `pulCount`) and a second time to get the ID for each slot.
 extern "C" fn C_GetSlotList(
@@ -599,17 +621,19 @@ extern "C" fn C_FindObjectsInit(
         // them (formatting or referencing a field of a packed struct is not allowed).
         let attr_type = attr.attrType;
         let value_len = attr.ulValueLen;
-        if attr.pValue.is_null() && value_len != 0 {
-            // A null value pointer is only meaningful for a zero-length value.
-            error!("C_FindObjectsInit: attribute with null value and length {value_len}");
-            return CKR_ARGUMENTS_BAD;
-        }
         if value_len > MAX_ATTRIBUTE_VALUE_LEN {
             error!("C_FindObjectsInit: unreasonable attribute value length {value_len}");
             return CKR_ARGUMENTS_BAD;
         }
-        let slice =
-            unsafe { std::slice::from_raw_parts(attr.pValue as *const u8, value_len as usize) };
+        // A null value pointer is only meaningful for a zero-length value (input_slice handles
+        // that combination without invoking undefined behavior).
+        let slice = match unsafe { input_slice(attr.pValue as CK_BYTE_PTR, value_len) } {
+            Ok(slice) => slice,
+            Err(rv) => {
+                error!("C_FindObjectsInit: invalid attribute value pointer/length combination");
+                return rv;
+            }
+        };
         attrs.push((attr_type, slice.to_owned()));
     }
     let mut manager_guard = try_to_get_manager_guard!();
@@ -805,15 +829,17 @@ extern "C" fn C_EncryptUpdate(
     _pEncryptedPart: CK_BYTE_PTR,
     _pulEncryptedPartLen: CK_ULONG_PTR,
 ) -> CK_RV {
-    if pPart.is_null() && ulPartLen != 0 {
-        error!("C_EncryptUpdate: CKR_ARGUMENTS_BAD");
-        return CKR_ARGUMENTS_BAD;
-    }
     if ulPartLen > MAX_DATA_LEN {
         error!("C_EncryptUpdate: unreasonable data length {ulPartLen}");
         return CKR_ARGUMENTS_BAD;
     }
-    let part = unsafe { std::slice::from_raw_parts(pPart, ulPartLen as usize) };
+    let part = match unsafe { input_slice(pPart, ulPartLen) } {
+        Ok(part) => part,
+        Err(rv) => {
+            error!("C_EncryptUpdate: invalid part pointer/length combination");
+            return rv;
+        }
+    };
     let mut manager_guard = try_to_get_manager_guard!();
     let manager = manager_guard_to_manager!(manager_guard);
     match manager.encrypt_update(hSession, part.to_vec()) {
@@ -1019,15 +1045,17 @@ extern "C" fn C_DecryptUpdate(
     _pPart: CK_BYTE_PTR,
     _pulPartLen: CK_ULONG_PTR,
 ) -> CK_RV {
-    if pEncryptedPart.is_null() && ulEncryptedPartLen != 0 {
-        error!("C_DecryptUpdate: CKR_ARGUMENTS_BAD");
-        return CKR_ARGUMENTS_BAD;
-    }
     if ulEncryptedPartLen > MAX_DATA_LEN {
         error!("C_DecryptUpdate: unreasonable data length {ulEncryptedPartLen}");
         return CKR_ARGUMENTS_BAD;
     }
-    let part = unsafe { std::slice::from_raw_parts(pEncryptedPart, ulEncryptedPartLen as usize) };
+    let part = match unsafe { input_slice(pEncryptedPart, ulEncryptedPartLen) } {
+        Ok(part) => part,
+        Err(rv) => {
+            error!("C_DecryptUpdate: invalid part pointer/length combination");
+            return rv;
+        }
+    };
     let mut manager_guard = try_to_get_manager_guard!();
     let manager = manager_guard_to_manager!(manager_guard);
     match manager.decrypt_update(hSession, part.to_vec()) {
@@ -1267,15 +1295,17 @@ extern "C" fn C_SignUpdate(
     pPart: CK_BYTE_PTR,
     ulPartLen: CK_ULONG,
 ) -> CK_RV {
-    if pPart.is_null() && ulPartLen != 0 {
-        error!("C_SignUpdate: CKR_ARGUMENTS_BAD");
-        return CKR_ARGUMENTS_BAD;
-    }
     if ulPartLen > MAX_DATA_LEN {
         error!("C_SignUpdate: unreasonable data length {ulPartLen}");
         return CKR_ARGUMENTS_BAD;
     }
-    let part = unsafe { std::slice::from_raw_parts(pPart, ulPartLen as usize) };
+    let part = match unsafe { input_slice(pPart, ulPartLen) } {
+        Ok(part) => part,
+        Err(rv) => {
+            error!("C_SignUpdate: invalid part pointer/length combination");
+            return rv;
+        }
+    };
     let mut manager_guard = try_to_get_manager_guard!();
     let manager = manager_guard_to_manager!(manager_guard);
     match manager.sign_update(hSession, part.to_vec()) {
@@ -2456,6 +2486,28 @@ mod ffi_hardening_tests {
         assert_eq!(C_CloseSession(session), CKR_OK);
     }
 
+    /// A search-template attribute with a null value pointer and zero length is a valid
+    /// empty-value attribute and must not be rejected.
+    #[test]
+    fn find_objects_init_accepts_null_zero_length_attribute_value() {
+        let mut template = [CK_ATTRIBUTE {
+            attrType: CKA_ID,
+            pValue: std::ptr::null_mut(),
+            ulValueLen: 0,
+        }];
+        let session = open_session();
+        assert_eq!(C_FindObjectsInit(session, template.as_mut_ptr(), 1), CKR_OK);
+        let mut handles = [0 as CK_OBJECT_HANDLE; 16];
+        let mut count: CK_ULONG = 0;
+        assert_eq!(
+            C_FindObjects(session, handles.as_mut_ptr(), 16, &mut count),
+            CKR_OK
+        );
+        assert!((count as usize) <= handles.len());
+        assert_eq!(C_FindObjectsFinal(session), CKR_OK);
+        assert_eq!(C_CloseSession(session), CKR_OK);
+    }
+
     #[test]
     fn sign_update_rejects_null_part_with_nonzero_length() {
         assert_eq!(C_SignUpdate(1, std::ptr::null_mut(), 4), CKR_ARGUMENTS_BAD);
@@ -2510,6 +2562,37 @@ mod ffi_hardening_tests {
                 std::ptr::null_mut()
             ),
             CKR_ARGUMENTS_BAD
+        );
+    }
+
+    /// A null pointer with a zero length is a valid empty part: it must pass argument validation
+    /// (and then fail later, since no operation is active on session 1) instead of being rejected
+    /// as malformed or invoking undefined behavior in slice creation.
+    #[test]
+    fn update_accepts_null_zero_length_parts() {
+        assert_eq!(
+            C_SignUpdate(1, std::ptr::null_mut(), 0),
+            CKR_FUNCTION_FAILED
+        );
+        assert_eq!(
+            C_EncryptUpdate(
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            CKR_FUNCTION_FAILED
+        );
+        assert_eq!(
+            C_DecryptUpdate(
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            CKR_FUNCTION_FAILED
         );
     }
 
