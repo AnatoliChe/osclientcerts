@@ -124,17 +124,29 @@ Services) that Windows trusts (so `CryptAcquireCertificatePrivateKey`/CNG and Th
 "Test" button work fine) but that Thunderbird's own NSS trust store does not, since Thunderbird
 does not consult the Windows trusted-root store for this check.
 
-Fix (not in this module -- in Thunderbird's certificate store):
+**Confirmed fix** (2026-08-25, not in this module -- in Thunderbird's certificate store):
 
-1. Settings -> Privacy & Security -> Manage Certificates -> **Authorities** tab.
-2. Check whether the issuing CA (and any root above it) is listed. If not, export it from Windows
-   (`certmgr.msc` -> Intermediate/Trusted Root Certification Authorities -> Export, DER/CER) and
-   **Import** it here.
-3. Open its trust settings and check **"This certificate can identify mail users"** -- this is
-   exactly the trust bit `certUsageEmailRecipient` checks. Repeat for every CA in the chain.
-4. If the CDP/AIA URLs are `ldap://` (AD CS), NSS's own revocation checking may not be able to
-   fetch them at all; if the error persists after fixing trust, check whether it's now a
-   revocation-check failure rather than a trust failure.
+1. **Disable/remove this module from Thunderbird's Security Devices first.** Settings -> Privacy &
+   Security -> Security Devices -> select the module -> Unload (or otherwise stop it from being
+   loaded for this step). This step turned out to be required in practice: with the module loaded,
+   Thunderbird already sees the issuing CA (as the issuer of certificates coming from this
+   module's token) and the Import-CA dialog under Authorities silently does nothing, since as far
+   as Thunderbird can tell that CA is "already known" -- even though it has no *trust* flags set
+   for it in NSS's own database, which is what `certUsageEmailRecipient` actually checks.
+2. Settings -> Privacy & Security -> Manage Certificates -> **Authorities** tab -> **Import**, and
+   pick a DER/CER export of the issuing CA (and any root above it) from Windows (`certmgr.msc` ->
+   Intermediate/Trusted Root Certification Authorities -> Export). With the module unloaded, the
+   import dialog now actually adds it and lets you set trust on it.
+3. In the trust dialog (or the CA's properties afterwards), check **"This certificate can identify
+   mail users"** -- this is exactly the trust bit `certUsageEmailRecipient` checks. Repeat for
+   every CA in the chain if there's more than one level.
+4. Re-enable/reload this module (Security Devices -> Load). Signing now works: NSS finds the CA
+   trusted in its own database, `NSS_CMSSignerInfo_AddSMIMEEncKeyPrefs` succeeds, and the module
+   sees a normal `C_SignInit`/`C_Sign` for the send.
+
+If the CDP/AIA URLs are `ldap://` (AD CS) and trust alone doesn't fix it, the next thing to check
+is whether NSS's revocation checking can't fetch them at all (a different failure than a trust
+failure) -- did not come up in this reproduction since step 1 above resolved it.
 
 This was reproduced with `cert9.db` deleted entirely (so there was no possibility of a
 stale/duplicate cached cert pointing PK11 at the wrong slot -- an earlier, now-ruled-out theory)

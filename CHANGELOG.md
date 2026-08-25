@@ -31,6 +31,12 @@ are published on the GitHub
   from an internal/AD-CS CA that Windows trusts but that hasn't been imported and marked "trusted
   to identify email users" in Thunderbird's own Certificate Manager -> Authorities. Not a bug in
   this module; see `DEBUGGING.md` for the fix (import + trust the issuing CA in Thunderbird).
+- **Confirmed fixed** (2026-08-25): importing the issuing CA into Thunderbird's Authorities list
+  and marking it trusted for email was silently blocked while this module was loaded (Thunderbird
+  already "knew" the CA as an issuer via the module's certificates, so the import dialog did
+  nothing, without setting the actual trust flag needed). Unloading the module first, importing +
+  trusting the CA, then reloading the module fixed signing. `DEBUGGING.md` updated with the
+  working procedure.
 
 ## 0.3.10 - 2026-08-25
 
