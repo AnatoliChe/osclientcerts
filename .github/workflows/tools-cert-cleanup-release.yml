@@ -1,0 +1,26 @@
+name: cert-cleanup release
+
+# Builds tools/thunderbird-cert-cleanup into cert-cleanup.xpi and attaches it to a GitHub release,
+# on push of a tools-cert-cleanup-vX.Y.Z tag. See tools/thunderbird-cert-cleanup/README.md for how
+# this is used (Enterprise Policy install_url / update_url).
+on:
+  push:
+    tags: ['tools-cert-cleanup-v*']
+
+jobs:
+  release:
+    name: Build and release cert-cleanup.xpi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build xpi
+        run: ./build.sh
+        working-directory: tools/thunderbird-cert-cleanup
+
+      - name: Attach xpi to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: tools/thunderbird-cert-cleanup/dist/cert-cleanup.xpi

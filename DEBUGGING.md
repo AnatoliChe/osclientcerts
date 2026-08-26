@@ -180,3 +180,33 @@ recommended for routine use, `mail.smime.accept_insecure_sha1_message_signatures
 throwaway database with the chain imported -- is a good way to confirm the signature is
 cryptographically fine and this really is a policy rejection rather than a genuinely bad signature,
 before concluding it's a Thunderbird policy issue rather than something else entirely.
+
+## Signing works, then silently stops after some time (outgoing mail)
+
+Symptom: S/MIME signing on outgoing mail worked fine, then at some point stops -- composing a
+signed message produces no error, the message just never gets signed/sent. `RUST_LOG=osclientcerts=debug`
+shows `C_SignInit` is never called at all (the module was never asked). Restarting Thunderbird does
+**not** fix it. Re-selecting the same certificate in Account Settings > End-To-End Encryption does
+fix it, without reinstalling anything or resetting the profile.
+
+Root cause: NSS caches the signer's certificate from any verified S/MIME signature into its own
+persistent `cert9.db`, including messages signed by a local identity itself (e.g. a Sent-folder
+item or a self-addressed test getting processed/verified like any other signed message). This
+produces a second, keyless copy of that identity's certificate in `cert9.db`, alongside the live,
+key-bearing object this module serves from the OS certificate store. At some point, whatever
+resolves `mail.identity.<id>.signing_cert_name` (a plain nickname string, matched via
+`CERT_FindCertByNickname`) can end up resolving to the keyless cached copy instead of the live one,
+and signing then fails silently rather than falling through or producing a diagnosable error. This
+lives entirely in NSS/Thunderbird's own certificate database handling -- this module never writes
+to `cert9.db` and has no way to prevent NSS from caching what it sees.
+
+To confirm: open Certificate Manager, find the tab that lists certificates *without* an associated
+private key (labeled "Other People's Certificates" or similar depending on version), and look for
+an entry matching your own signing identity's subject/email -- if it's there, that's the stale
+duplicate. Deleting it (select it -> "Delete or Distrust") restores signing immediately, without
+touching Account Settings or restarting.
+
+[`tools/thunderbird-cert-cleanup/`](../tools/thunderbird-cert-cleanup) automates exactly that
+deletion (same NSS API the "Delete or Distrust" button uses) as a small internal Thunderbird
+add-on, for anyone hitting this repeatedly -- see its README for how it decides what's safe to
+delete and how to deploy it.

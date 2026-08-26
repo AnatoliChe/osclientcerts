@@ -10,3 +10,6 @@ Cargo.lock
 # Self-managed NSS source+build cache used by scripts/nss-regression-test.sh when no local NSS
 # checkout is found (see its NSS_SECURITY_DIR default).
 /.nss-regression-cache/
+
+# Built by tools/thunderbird-cert-cleanup/build.sh; published via GitHub Releases, not committed.
+/tools/thunderbird-cert-cleanup/dist/

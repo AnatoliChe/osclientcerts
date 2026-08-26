@@ -1,0 +1,14 @@
+[
+  {
+    "namespace": "certCleanup",
+    "functions": [
+      {
+        "name": "cleanup",
+        "type": "function",
+        "async": true,
+        "description": "Finds certificates known to NSS under more than one issuer+serial-matching record where at least one of those records lives on the OS Client Certs token, and deletes the other (stale, keyless) records. Returns the list of records deleted.",
+        "parameters": []
+      }
+    ]
+  }
+]

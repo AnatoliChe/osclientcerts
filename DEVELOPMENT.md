@@ -319,6 +319,14 @@ pointer cannot be defended against by any in-process check (that remains part of
 contract); the tests therefore only exercise inputs where validation happens before the first
 dereference.
 
+## Companion tools
+
+[`tools/thunderbird-cert-cleanup/`](../tools/thunderbird-cert-cleanup) -- a small internal
+Thunderbird add-on (not part of the provider itself) that cleans up a stale-`cert9.db`-entry issue
+documented in [DEBUGGING.md](DEBUGGING.md#signing-works-then-silently-stops-after-some-time-outgoing-mail).
+Deliberately kept separate from the Rust crate: it needs its own build/release flow (an `.xpi`, not
+a DLL) and has nothing to do with the PKCS #11 surface.
+
 ## Continuous integration
 
 GitHub Actions run on every push to `trunk` and on pull requests:
