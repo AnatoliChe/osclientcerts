@@ -601,6 +601,13 @@ extern "C" fn C_GetAttributeValue(
                 unsafe {
                     std::ptr::copy_nonoverlapping(attr_value.as_ptr(), ptr, attr_value.len());
                 }
+                // Per PKCS #11, ulValueLen must reflect the actual value length on return, even
+                // when the caller's buffer was larger than needed. Leaving it at the caller's
+                // buffer capacity (as this used to do) meant callers that pre-allocate a fixed,
+                // oversized buffer (e.g. NSS's own trust-attribute reader, which always requests a
+                // 64-byte buffer for hash attributes regardless of the actual hash length) would
+                // treat the unwritten tail of their buffer as part of the value.
+                attr.ulValueLen = attr_value.len() as CK_ULONG;
             }
         } else {
             attr.ulValueLen = (0 - 1) as CK_ULONG; // CK_UNAVAILABLE_INFORMATION

@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file. Pre-built DLLs 
 are published on the GitHub
 [releases page](https://github.com/AnatoliChe/osclientcerts/releases).
 
+## Unreleased
+
+- Fixed `C_GetAttributeValue`: when the caller supplies a buffer larger than the attribute's
+  actual value, `ulValueLen` is now updated to the real value length on return, as PKCS #11
+  requires. Previously it was left at whatever length the caller's buffer happened to be, so a
+  caller that pre-allocates a fixed, oversized buffer for a variable-length attribute (e.g. NSS's
+  own trust-object reader always requests a 64-byte buffer for hash-type attributes, regardless of
+  the actual hash algorithm's output size) would read the unwritten tail of their buffer as part
+  of the value. Found while diagnosing a related S/MIME signing issue where a 20-byte SHA-1 hash
+  attribute value was read back as 64 bytes with garbage in the last 44.
+
 ## 0.3.10 - 2026-08-25
 
 - Private key objects now expose `CKA_LABEL`, `CKA_SUBJECT`, `CKA_ISSUER`, and
