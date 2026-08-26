@@ -6,28 +6,44 @@ sometimes caches into `cert9.db` from verified S/MIME signatures. This is what c
 specific reason in `MOZ_LOG` -- see the "Signing works, then silently stops after some time" case
 in [`../../DEBUGGING.md`](../../DEBUGGING.md) for the full investigation and root cause. The fix
 that was found to work is: delete the duplicate, keyless copy of the identity's own certificate
-from Certificate Manager (it shows up under the tab for certificates without a private key). This
-add-on automates exactly that deletion using the same NSS API Certificate Manager's own "Delete or
-Distrust" button uses (`nsIX509CertDB.deleteCertificate`) -- nothing here touches `cert9.db`
-directly as a file, so there's no risk of it racing Thunderbird's own open connection to it (unlike
-editing the SQLite file from a separate process while Thunderbird is running).
+from Certificate Manager (it shows up under the tab for certificates without a private key).
 
 ## How it decides what to delete
 
-1. Ask NSS for every certificate record it knows about, across every token and its own internal
-   database (`nsIX509CertDB.getCerts()`).
-2. Group them by issuer name + serial number -- i.e. by the real-world certificate they represent,
-   regardless of which token/database record happens to represent it.
-3. For any group that contains a record on the `OS Client Cert Token` (the PKCS #11 token label
-   this provider reports -- see `TOKEN_LABEL_BYTES` in `../../src/lib.rs`), every *other* record in
-   that group is a stale duplicate: something else NSS knows about the same certificate, but not
-   the live, key-bearing one the provider serves. Those are deleted.
-4. A group with no record on `OS Client Cert Token` is left alone entirely (nothing to do with this
-   provider's identities -- most commonly, some other correspondent's certificate NSS cached while
-   verifying their signature, which is the normal, needed behavior).
+An earlier version of this add-on detected duplicates via `nsIX509CertDB.getCerts()` (grouping by
+issuer+serial and looking for more than one record). **That doesn't work**: Gecko's
+`nsNSSCertificateDB::GetCerts()` calls `PK11_ListCerts(PK11CertListUnique, ...)` internally
+(confirmed against NSS's `lib/pk11wrap` and `security/manager/ssl/nsNSSCertificateDB.cpp`), which
+silently merges a persisted, keyless `cert9.db` row with a live token object representing the same
+certificate -- so `getCerts()` never shows the duplicate as a second entry while the provider is
+loaded, which is exactly when you'd want to detect and remove it. Confirmed directly against a real
+profile: its `cert9.db` had a persisted row for the signing identity's own certificate the entire
+time signing was broken (and after, since nothing had removed it), yet `getCerts()` only ever
+reported one record for it. NSS does have a non-deduplicating list type (`PK11CertListAll`), but no
+JS-facing API exposes it.
 
-This only ever deletes a record when the real, working copy is confirmed still present, so it can't
-remove the certificate you actually need.
+So instead:
+
+1. Ask NSS for the deduplicated view (`nsIX509CertDB.getCerts()`) and keep only the records on the
+   `OS Client Cert Token` (the PKCS #11 token label this provider reports -- see
+   `TOKEN_LABEL_BYTES` in `../../src/lib.rs`). These are confirmed-live, key-bearing certificates.
+2. Open `cert9.db` directly, read-write, via
+   [`Sqlite.sys.mjs`](https://searchfox.org/mozilla-central/source/toolkit/modules/Sqlite.sys.mjs)
+   (`openNotExclusive: true`) -- Gecko's sanctioned module for opening additional, concurrent
+   connections to a Firefox/Thunderbird-managed sqlite database (the same mechanism other in-process
+   code uses for shared databases like `places.sqlite`). This is not "editing the file behind
+   Thunderbird's back"; it's a second connection through the same safe machinery NSS's own
+   connection uses.
+3. For each live certificate, query `cert9.db`'s own table (`nssPublic`, one row per PKCS #11
+   object, columns named `a` + the attribute type in hex -- confirmed against NSS's
+   `lib/softoken/sdb.c`) for a `CKO_CERTIFICATE` row (`a0`) whose DER (`a11`) is byte-for-byte
+   identical to that live certificate's DER (`nsIX509Cert.getRawDER()`). Delete any match.
+
+Step 3 can only ever find genuine duplicates: PKCS #11 objects belonging to an *external* token
+like ours are never themselves written to `cert9.db`, so a `cert9.db` row whose DER matches one of
+our live certificates cannot be that live certificate -- it can only be a stale, cached copy. This
+also means the tool never touches another correspondent's certificate that NSS legitimately cached
+while verifying their signature (those have no live counterpart on our token at all).
 
 ## Building
 
@@ -57,7 +73,7 @@ delivery your org already uses for `policies.json`):
     "ExtensionSettings": {
       "cert-cleanup@osclientcerts.dev": {
         "installation_mode": "force_installed",
-        "install_url": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.1.1/cert-cleanup.xpi"
+        "install_url": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.2.0/cert-cleanup.xpi"
       }
     }
   }
