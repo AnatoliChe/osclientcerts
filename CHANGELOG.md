@@ -4,8 +4,13 @@ All notable changes to this project are documented in this file. Pre-built DLLs 
 are published on the GitHub
 [releases page](https://github.com/AnatoliChe/osclientcerts/releases).
 
-## Unreleased
+## 0.3.11 - 2026-08-26
 
+- Confirmed end to end against a real Thunderbird/Windows deployment: S/MIME **signing** now
+  works with an internal/AD CS-issued certificate chain, without any manual Thunderbird
+  certificate-trust setup, for the first time in this fork's history. Previous releases (0.3.9,
+  0.3.10) fixed real PKCS#11 attribute bugs blocking signing but did not resolve it end to end;
+  this release does.
 - The provider now bridges CA trust for S/MIME email from Windows into NSS: for every leaf
   certificate it exposes, it walks the issuer chain (via the "My", "CA" and "ROOT" Windows
   certificate stores) and, for any CA certificate found there that is present in the current
