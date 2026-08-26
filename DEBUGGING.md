@@ -121,3 +121,62 @@ appears at all for the send attempt (with `RUST_LOG=osclientcerts=debug` it's al
   isn't in the Windows ROOT store specifically, or its EKU excludes email protection (both logged
   at `debug` level); either way, the manual Thunderbird import documented in the README is the
   fallback.
+
+## S/MIME signature verification failures ("invalid signature" on *incoming* mail)
+
+This is a different failure from the signing case above: Thunderbird shows the sender's
+certificate chain as fully resolved and trusted, but still flags the message's digital signature
+itself as invalid -- with no PKCS#11 error, because **this module is never involved**. Verifying
+someone else's incoming signature is done entirely by NSS's own CMS code, using NSS's own crypto;
+this provider only ever supplies the *local* user's own certificates/keys (for the reverse
+direction: signing outgoing mail and decrypting mail addressed to them). If you're chasing this
+kind of failure suspecting the provider, it's very likely the wrong place to look -- confirm the
+actual cause below before spending time on the module's own logs.
+
+First, capture `MOZ_LOG=pipnss:5,CMS:5,certverifier:5,psm:5,smime:5,timestamp` as described above
+and open the message. The `certverifier`/`NSSCertDBTrustDomain` lines will show the chain
+resolving cleanly (that's a separate check from the signature itself); look right after that for a
+line from `nsCMSMessage::CommonVerifySignature`. A generic reason string there (e.g. "unsupported
+digest algo") does not necessarily mean the algorithm is exotic or actually unsupported by NSS's
+crypto engine -- **check the actual `digestAlgorithm`/`signatureAlgorithm` OIDs before assuming
+anything.** The single most common real-world cause of exactly this symptom is mundane: since
+**Thunderbird 115.0** (October 2023), Thunderbird deliberately rejects S/MIME signatures that use
+SHA-1 as the message digest, regardless of whether the signature is otherwise cryptographically
+valid -- see [Thunderbird 115 and Signatures Using The Obsolete SHA-1
+Algorithm](https://blog.thunderbird.net/2023/10/thunderbird-115-and-signatures-using-the-obsolete-sha-1-algorithm/).
+This is a deliberate Thunderbird-side policy check, not an NSS crypto-engine limitation and not
+something this module can influence.
+
+To check whether this is the cause:
+
+- For a `multipart/signed` message, view the message source (`Ctrl+U`) and look for `micalg=` in
+  the `Content-Type` header of the signed part; `sha-1`/`sha1` confirms it.
+- For an opaque signed message (`application/pkcs7-mime; smime-type=signed-data`, content embedded
+  in the CMS structure rather than a separate MIME part) there's no `micalg=` header to check;
+  decode the CMS structure instead, e.g. `openssl cms -inform DER -in message.p7s -cmsout -noout
+  -print` (works even without decrypting, if the message isn't also encrypted) and look at
+  `signerInfos[].digestAlgorithm`.
+- If the message is also encrypted (`smime-type=enveloped-data` wrapping a signed layer inside),
+  you need the recipient's private key to get to the inner `SignerInfo` at all. On Windows this
+  works even for a non-exportable CNG-backed key, since decryption happens through the CSP/KSP
+  rather than by extracting key material -- from PowerShell:
+  ```powershell
+  Add-Type -AssemblyName System.Security
+  $env = New-Object System.Security.Cryptography.Pkcs.EnvelopedCms
+  $env.Decode([System.IO.File]::ReadAllBytes("message.p7m"))
+  $env.Decrypt()  # finds the matching cert in CurrentUser\My and uses CNG automatically
+  [System.IO.File]::WriteAllBytes("inner.bin", $env.ContentInfo.Content)
+  ```
+  then inspect `inner.bin` the same way as the opaque case above (strip the outer MIME headers
+  first if `Content-Transfer-Encoding: base64` wraps another `application/pkcs7-mime` part).
+
+If the digest is indeed SHA-1, the two options are: get the sender's CA to reissue their signing
+certificate against a template that hashes with SHA-256 or better (the correct long-term fix --
+check what hash algorithm the issuing CA's certificate template actually signs with, since this can
+silently be SHA-1 even on an otherwise modern CA), or, only as a temporary workaround and not
+recommended for routine use, `mail.smime.accept_insecure_sha1_message_signatures` in
+`about:config`. Independently verifying the signature outside Thunderbird -- e.g. `openssl cms
+-verify -in inner.bin -inform DER -CAfile root.pem` succeeding, or NSS's own `cmsutil -D` against a
+throwaway database with the chain imported -- is a good way to confirm the signature is
+cryptographically fine and this really is a policy rejection rather than a genuinely bad signature,
+before concluding it's a Thunderbird policy issue rather than something else entirely.
