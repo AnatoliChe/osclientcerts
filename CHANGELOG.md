@@ -19,6 +19,24 @@ are published on the GitHub
   the "Certificate trust: Windows vs. Thunderbird" section of `README.md` for why that check
   (`NSS_CMSSignerInfo_AddSMIMEEncKeyPrefs`) exists and what it required before this. Only email
   trust is ever granted; this never widens what a CA is trusted for in TLS or code signing.
+- **Confirmed working end to end**, root-caused by building a real local NSS from source with
+  targeted debug instrumentation and reproducing the failure entirely offline (`vfychain`/
+  `certutil` against a throwaway NSS DB with a minimal test PKCS#11 module, no Windows/Thunderbird
+  involved) rather than guessing: the `CKO_NSS_TRUST` objects above were being read by NSS but
+  silently discarded, because `nssTrust_Create` (`security/nss/lib/pki/certificate.c`) refuses to
+  accept a *positive* trust record (`CKT_NSS_TRUSTED_DELEGATOR`) that has no
+  `CKA_NSS_CERT_SHA1_HASH` attribute -- a hash-less record is only accepted for `Unknown`/
+  `NotTrusted` entries. `Trust` objects now include the CA certificate's SHA-1 fingerprint via
+  this attribute. See the `C_GetAttributeValue` fix below, which this also depends on.
+- Fixed `C_GetAttributeValue`: when the caller supplies a buffer larger than the attribute's
+  actual value, `ulValueLen` is now updated to the real value length on return, as PKCS #11
+  requires. Previously it was left at whatever length the caller's buffer happened to be, so a
+  caller that pre-allocates a fixed, oversized buffer for a variable-length attribute (e.g. NSS's
+  own trust-object reader always requests a 64-byte buffer for hash-type attributes, regardless of
+  the actual hash algorithm's output size) would read the unwritten tail of their buffer as part
+  of the value. Found while diagnosing the S/MIME signing issue above, where the new 20-byte
+  SHA-1 hash attribute value was read back as 64 bytes with garbage in the last 44 -- which is
+  exactly the kind of hash mismatch `nssTrust_Create` also rejects.
 
 ## 0.3.10 - 2026-08-25
 
