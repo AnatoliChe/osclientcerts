@@ -13,6 +13,7 @@ env_logger = {version = "0.6", default-features = false } # disable `regex` to r
 lazy_static = "1"
 log = "0.4"
 pkcs11 = "0.5"
+sha-1 = "0.8"
 sha2 = "0.8"
 
 [target."cfg(target_os = \"macos\")".dependencies.core-foundation]

@@ -7,6 +7,7 @@
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 use pkcs11::types::*;
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use std::convert::TryInto;
 use std::ffi::{CStr, CString};
@@ -268,6 +269,7 @@ const CKA_NSS_TRUST_CLIENT_AUTH: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 9;
 const CKA_NSS_TRUST_CODE_SIGNING: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 10;
 const CKA_NSS_TRUST_EMAIL_PROTECTION: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 11;
 const CKA_NSS_TRUST_STEP_UP_APPROVED: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 16;
+const CKA_NSS_CERT_SHA1_HASH: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 100;
 const CKT_VENDOR_DEFINED: CK_TRUST = 0x8000_0000;
 const CKT_NSS: CK_TRUST = CKT_VENDOR_DEFINED | (NSSCK_VENDOR_NSS as CK_TRUST);
 const CKT_NSS_TRUSTED_DELEGATOR: CK_TRUST = CKT_NSS + 2;
@@ -292,6 +294,14 @@ const CKT_NSS_TRUST_UNKNOWN: CK_TRUST = CKT_NSS + 5;
 /// `_CLIENT_AUTH`, `_CODE_SIGNING`) is left at `CKT_NSS_TRUST_UNKNOWN`, NSS's "no opinion, defer
 /// to other trust sources" value, so this never grants TLS or code-signing trust -- only enough
 /// to make S/MIME signing/encryption key-preference checks succeed.
+///
+/// Includes `CKA_NSS_CERT_SHA1_HASH` (the SHA-1 of the CA certificate's DER encoding), which is
+/// not part of how NSS *finds* this object (that's by issuer + serial, like any trust object) but
+/// is required for NSS to *accept* it: `nssTrust_Create` in NSS's own
+/// `lib/pki/certificate.c` only accepts a hash-less trust record for `Unknown`/`NotTrusted`
+/// entries (`nssTrust_IsSafeToIgnoreCertHash`) -- a positive grant like this one without a hash is
+/// silently discarded. Confirmed by reproducing this exact failure against a real local NSS build
+/// with debug instrumentation, entirely offline (no Windows/Thunderbird involved).
 pub struct Trust {
     class: Vec<u8>,
     token: Vec<u8>,
@@ -302,6 +312,7 @@ pub struct Trust {
     code_signing: Vec<u8>,
     email_protection: Vec<u8>,
     step_up_approved: Vec<u8>,
+    sha1_hash: Vec<u8>,
 }
 
 impl Trust {
@@ -321,6 +332,7 @@ impl Trust {
         }
         .to_vec();
         serial_number.reverse();
+        let sha1_hash = Sha1::digest(&cert_der_bytes(cert_context)).to_vec();
         Ok(Trust {
             class: serialize_uint(CKO_NSS_TRUST)?,
             token: vec![CK_TRUE as u8],
@@ -331,6 +343,7 @@ impl Trust {
             code_signing: serialize_uint(CKT_NSS_TRUST_UNKNOWN)?,
             email_protection: serialize_uint(CKT_NSS_TRUSTED_DELEGATOR)?,
             step_up_approved: vec![CK_FALSE as u8],
+            sha1_hash,
         })
     }
 
@@ -386,6 +399,7 @@ impl Trust {
             CKA_NSS_TRUST_CODE_SIGNING => &self.code_signing,
             CKA_NSS_TRUST_EMAIL_PROTECTION => &self.email_protection,
             CKA_NSS_TRUST_STEP_UP_APPROVED => &self.step_up_approved,
+            CKA_NSS_CERT_SHA1_HASH => &self.sha1_hash,
             _ => return None,
         };
         Some(result)
