@@ -200,13 +200,21 @@ and signing then fails silently rather than falling through or producing a diagn
 lives entirely in NSS/Thunderbird's own certificate database handling -- this module never writes
 to `cert9.db` and has no way to prevent NSS from caching what it sees.
 
-To confirm: open Certificate Manager, find the tab that lists certificates *without* an associated
-private key (labeled "Other People's Certificates" or similar depending on version), and look for
-an entry matching your own signing identity's subject/email -- if it's there, that's the stale
-duplicate. Deleting it (select it -> "Delete or Distrust") restores signing immediately, without
-touching Account Settings or restarting.
+Recommended fix: install
+[`tools/thunderbird-cert-cleanup/`](../tools/thunderbird-cert-cleanup), a small internal
+Thunderbird add-on that finds and removes exactly this stale duplicate automatically (at startup
+and every 30 minutes), so signing self-heals before anyone notices it broke. It does *not* go
+through the "Delete or Distrust" UI/API -- `nsIX509CertDB.getCerts()` (the only cert-listing API
+exposed to a Thunderbird add-on) silently deduplicates a cert9.db row with the live token object
+representing the same certificate, so it never even shows the duplicate as a separate entry while
+this module is loaded, i.e. exactly when you'd need to find and delete it. The add-on instead reads
+`cert9.db` directly and compares raw certificate bytes against what this module currently serves --
+see its README for the full mechanism and how it's confirmed safe.
 
-[`tools/thunderbird-cert-cleanup/`](../tools/thunderbird-cert-cleanup) automates exactly that
-deletion (same NSS API the "Delete or Distrust" button uses) as a small internal Thunderbird
-add-on, for anyone hitting this repeatedly -- see its README for how it decides what's safe to
-delete and how to deploy it.
+To fix a single occurrence by hand instead: open Certificate Manager, find the tab that lists
+certificates *without* an associated private key (labeled "Other People's Certificates" or similar
+depending on version), and look for an entry matching your own signing identity's subject/email --
+if it's there, that's the stale duplicate. Deleting it (select it -> "Delete or Distrust") restores
+signing immediately, without touching Account Settings or restarting. This has been confirmed to
+work manually, but it's a one-off fix for whatever's stuck right now -- the add-on is what stops it
+from recurring.
