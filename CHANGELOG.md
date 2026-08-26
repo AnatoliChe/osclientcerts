@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file. Pre-built DLLs 
 are published on the GitHub
 [releases page](https://github.com/AnatoliChe/osclientcerts/releases).
 
-## 0.3.11 - 2026-08-26
+## 0.4.0 - 2026-08-26
 
 - Confirmed end to end against a real Thunderbird/Windows deployment: S/MIME **signing** now
   works with an internal/AD CS-issued certificate chain, without any manual Thunderbird
