@@ -265,6 +265,7 @@ fn key_attrs() -> Attrs {
     ])
 }
 
+#[cfg(not(feature = "nss-regression"))]
 pub fn list_objects() -> Vec<Object> {
     vec![
         Object::Cert(Cert {
@@ -273,3 +274,157 @@ pub fn list_objects() -> Vec<Object> {
         Object::Key(Key { attrs: key_attrs() }),
     ]
 }
+
+/// Builds `Object`s (certificates and `CKO_NSS_TRUST` records) from a generated test-case
+/// directory instead of the fixed stub data above, so the NSS regression harness
+/// (`tests/nss-regression/`) can load real certificate chains -- with varying signature
+/// algorithms and, for negative-control cases, deliberately malformed trust attributes -- into
+/// this crate's actual, unmodified PKCS #11 object/attribute code and check how a real NSS build
+/// resolves trust and validates signatures against it. This is the only way to catch bugs that
+/// live in how NSS itself interprets our PKCS #11 objects (as opposed to bugs in this crate's own
+/// state machines, which the stub backend above already covers): the two real bugs this harness
+/// was built to catch (a missing `CKA_NSS_CERT_SHA1_HASH` silently discarding trust grants, and
+/// `C_GetAttributeValue` not updating `ulValueLen`) were both invisible to unit tests against the
+/// stub backend and were only found by loading a module into a real, from-source NSS build.
+#[cfg(feature = "nss-regression")]
+mod nss_regression {
+    use super::{Attrs, Cert, Object, Trust};
+    use crate::util::{
+        CKA_NSS_CERT_SHA1_HASH, CKA_NSS_TRUST_CLIENT_AUTH, CKA_NSS_TRUST_CODE_SIGNING,
+        CKA_NSS_TRUST_EMAIL_PROTECTION, CKA_NSS_TRUST_SERVER_AUTH, CKA_NSS_TRUST_STEP_UP_APPROVED,
+        CKO_NSS_TRUST, CKT_NSS_TRUST_UNKNOWN, CKT_NSS_TRUSTED_DELEGATOR, serialize_uint,
+    };
+    use pkcs11::types::*;
+    use std::{env, fs, path::Path};
+
+    /// The manifest is a sequence of `key=value` blocks separated by blank lines, e.g.:
+    ///
+    /// ```text
+    /// kind=cert
+    /// label=root
+    /// id=root
+    /// der=root.der
+    /// issuer=root.issuer.der
+    /// subject=root.subject.der
+    /// serial=root.serial.bin
+    ///
+    /// kind=trust
+    /// issuer=root.issuer.der
+    /// serial=root.serial.bin
+    /// sha1=root.sha1.bin
+    /// ```
+    ///
+    /// A `trust` block that omits `sha1=` reproduces the historical missing-hash bug (the trust
+    /// grant should then be silently ignored by NSS); `email_protection=unknown` (instead of the
+    /// default, which grants trust) reproduces "no trust asserted" for comparison. File paths are
+    /// relative to the manifest's own directory. See `tests/nss-regression/generate_chains.py`,
+    /// which writes these directories.
+    fn parse_manifest(text: &str) -> Vec<Vec<(String, String)>> {
+        text.split("\n\n")
+            .map(|block| {
+                block
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                    .map(|line| {
+                        let (key, value) = line.split_once('=').unwrap_or_else(|| {
+                            panic!("nss-regression: malformed manifest line: {line}")
+                        });
+                        (key.trim().to_string(), value.trim().to_string())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|block: &Vec<_>| !block.is_empty())
+            .collect()
+    }
+
+    struct Block(Vec<(String, String)>);
+
+    impl Block {
+        fn get(&self, key: &str) -> Option<&str> {
+            self.0
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        }
+
+        fn require(&self, key: &str) -> &str {
+            self.get(key)
+                .unwrap_or_else(|| panic!("nss-regression: manifest block missing '{key}'"))
+        }
+    }
+
+    fn read_file(dir: &Path, name: &str) -> Vec<u8> {
+        fs::read(dir.join(name))
+            .unwrap_or_else(|e| panic!("nss-regression: failed to read '{name}': {e}"))
+    }
+
+    pub fn list_objects() -> Vec<Object> {
+        let dir = env::var("OSCLIENTCERTS_NSS_REGRESSION_DIR").expect(
+            "OSCLIENTCERTS_NSS_REGRESSION_DIR must point to a generated test-case directory \
+             (see tests/nss-regression/) when built with the nss-regression feature",
+        );
+        let dir = Path::new(&dir);
+        let manifest_text = fs::read_to_string(dir.join("manifest.txt"))
+            .unwrap_or_else(|e| panic!("nss-regression: failed to read manifest.txt: {e}"));
+
+        parse_manifest(&manifest_text)
+            .into_iter()
+            .map(Block)
+            .map(|block| match block.require("kind") {
+                "cert" => Object::Cert(Cert {
+                    attrs: Attrs(vec![
+                        (CKA_CLASS, serialize_uint(CKO_CERTIFICATE).unwrap()),
+                        (CKA_TOKEN, vec![CK_TRUE]),
+                        (CKA_LABEL, block.require("label").as_bytes().to_vec()),
+                        (CKA_ID, block.require("id").as_bytes().to_vec()),
+                        (CKA_VALUE, read_file(dir, block.require("der"))),
+                        (CKA_ISSUER, read_file(dir, block.require("issuer"))),
+                        (CKA_SERIAL_NUMBER, read_file(dir, block.require("serial"))),
+                        (CKA_SUBJECT, read_file(dir, block.require("subject"))),
+                    ]),
+                }),
+                "trust" => {
+                    let email_protection = if block.get("email_protection") == Some("unknown") {
+                        CKT_NSS_TRUST_UNKNOWN
+                    } else {
+                        CKT_NSS_TRUSTED_DELEGATOR
+                    };
+                    let mut attrs = vec![
+                        (CKA_CLASS, serialize_uint(CKO_NSS_TRUST).unwrap()),
+                        (CKA_TOKEN, vec![CK_TRUE]),
+                        (CKA_ISSUER, read_file(dir, block.require("issuer"))),
+                        (CKA_SERIAL_NUMBER, read_file(dir, block.require("serial"))),
+                        (
+                            CKA_NSS_TRUST_SERVER_AUTH,
+                            serialize_uint(CKT_NSS_TRUST_UNKNOWN).unwrap(),
+                        ),
+                        (
+                            CKA_NSS_TRUST_CLIENT_AUTH,
+                            serialize_uint(CKT_NSS_TRUST_UNKNOWN).unwrap(),
+                        ),
+                        (
+                            CKA_NSS_TRUST_CODE_SIGNING,
+                            serialize_uint(CKT_NSS_TRUST_UNKNOWN).unwrap(),
+                        ),
+                        (
+                            CKA_NSS_TRUST_EMAIL_PROTECTION,
+                            serialize_uint(email_protection).unwrap(),
+                        ),
+                        (CKA_NSS_TRUST_STEP_UP_APPROVED, vec![CK_FALSE]),
+                    ];
+                    if let Some(sha1_file) = block.get("sha1") {
+                        attrs.push((CKA_NSS_CERT_SHA1_HASH, read_file(dir, sha1_file)));
+                    }
+                    Object::Trust(Trust {
+                        attrs: Attrs(attrs),
+                    })
+                }
+                other => panic!("nss-regression: unknown object kind '{other}'"),
+            })
+            .collect()
+    }
+}
+
+#[cfg(feature = "nss-regression")]
+pub use nss_regression::list_objects;

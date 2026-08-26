@@ -6,6 +6,43 @@
 use byteorder::{BigEndian, NativeEndian, ReadBytesExt, WriteBytesExt};
 use std::convert::TryInto;
 
+// NSS-specific (vendor) PKCS #11 object class, attribute types and trust values. These are not
+// part of the base PKCS #11 spec covered by the `pkcs11` crate; the numeric values are taken
+// directly from NSS's own `security/nss/lib/util/pkcs11n.h`. They're used to build synthetic
+// `CKO_NSS_TRUST` objects -- by `backend_windows` for real Windows-root-trusted CAs, and by
+// `backend_other` under the `nss-regression` feature to synthesize trust objects for the NSS
+// regression harness (see `tests/nss-regression/`). Both consumers are conditional (target_os =
+// "windows", or the nss-regression feature), so on a plain non-Windows build these are unused;
+// `#![allow(dead_code)]` covers that rather than cfg-gating every constant individually.
+#[allow(dead_code)]
+mod nss_trust {
+    use pkcs11::types::{
+        CK_ATTRIBUTE_TYPE, CK_OBJECT_CLASS, CK_ULONG, CKA_VENDOR_DEFINED, CKO_VENDOR_DEFINED,
+    };
+
+    /// Not exported by the `pkcs11` crate (it has no notion of trust objects at all).
+    #[allow(non_camel_case_types)]
+    pub type CK_TRUST = CK_ULONG;
+
+    pub const NSSCK_VENDOR_NSS: CK_ATTRIBUTE_TYPE = 0x4E53_4350; // "NSCP"
+    pub const CKO_NSS: CK_OBJECT_CLASS = CKO_VENDOR_DEFINED | (NSSCK_VENDOR_NSS as CK_OBJECT_CLASS);
+    pub const CKO_NSS_TRUST: CK_OBJECT_CLASS = CKO_NSS + 3;
+    pub const CKA_NSS: CK_ATTRIBUTE_TYPE = CKA_VENDOR_DEFINED | NSSCK_VENDOR_NSS;
+    pub const CKA_NSS_TRUST_BASE: CK_ATTRIBUTE_TYPE = CKA_NSS + 0x2000;
+    pub const CKA_NSS_TRUST_SERVER_AUTH: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 8;
+    pub const CKA_NSS_TRUST_CLIENT_AUTH: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 9;
+    pub const CKA_NSS_TRUST_CODE_SIGNING: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 10;
+    pub const CKA_NSS_TRUST_EMAIL_PROTECTION: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 11;
+    pub const CKA_NSS_TRUST_STEP_UP_APPROVED: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 16;
+    pub const CKA_NSS_CERT_SHA1_HASH: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 100;
+    pub const CKT_VENDOR_DEFINED: CK_TRUST = 0x8000_0000;
+    pub const CKT_NSS: CK_TRUST = CKT_VENDOR_DEFINED | (NSSCK_VENDOR_NSS as CK_TRUST);
+    pub const CKT_NSS_TRUSTED_DELEGATOR: CK_TRUST = CKT_NSS + 2;
+    pub const CKT_NSS_TRUST_UNKNOWN: CK_TRUST = CKT_NSS + 5;
+}
+#[allow(unused_imports)]
+pub use nss_trust::*;
+
 /// Formats a byte slice as a lowercase hexadecimal string (for diagnostic logging).
 pub fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()

@@ -238,6 +238,27 @@ Because signatures are opaque values (the result of the private-key operation), 
 rely on mechanism-level properties - deterministic vs randomized encodings and exact output sizes -
 rather than byte layouts of encoded messages.
 
+### NSS regression harness (manual)
+
+The suites above check this crate's own behavior; they never load a real NSS. That's a real blind
+spot: the two bugs that actually blocked S/MIME signing in this project (a `CKO_NSS_TRUST` object
+silently discarded because it was missing `CKA_NSS_CERT_SHA1_HASH`, and `C_GetAttributeValue` not
+updating `ulValueLen`) both lived in how a real NSS build *interprets* the objects this crate hands
+it, and neither was visible to the stub-backend tests above.
+
+`tests/nss-regression/` builds a real NSS from source and loads this crate's actual, unmodified
+PKCS #11 code (via `backend_other.rs`'s `nss-regression` feature, which swaps the fixed stub
+objects for ones read from a generated certificate-chain manifest) into it, then checks with
+`vfychain` that trust resolves the way it should across several signature algorithms and two
+negative-control cases (missing hash / no trust grant at all -- both must stay untrusted). See
+`tests/nss-regression/README.md` for details and case list.
+
+This is slow (building NSS from source takes a few minutes) so it isn't part of the fast per-push
+CI; run it manually via `scripts/nss-regression-test.sh`, or trigger
+`.github/workflows/nss-regression.yml` (`workflow_dispatch`) from the Actions tab, before a release
+or after touching `Trust`/`backend_other.rs`/the `CKA_NSS_*`/`CKT_NSS_*` constants in `util.rs`/
+`C_GetAttributeValue`.
+
 ### Multipart operations
 
 The provider supports the multipart families `C_EncryptUpdate`/`C_EncryptFinal`,
@@ -306,6 +327,7 @@ GitHub Actions run on every push to `trunk` and on pull requests:
 |---|---|---|
 | `.github/workflows/rust.yml` | `ubuntu-latest` | `cargo fmt --all -- --check`; `cargo test --all-targets`; `cargo clippy --all-targets --all-features -- -D warnings` |
 | `.github/workflows/windows.yml` | `windows-latest` | Native MSVC build of `osclientcerts.dll` (uploaded as a workflow artifact); `cargo test --all-targets` on the host target; on a pushed `v*` tag the DLL is attached to a GitHub release |
+| `.github/workflows/nss-regression.yml` | `ubuntu-latest` | Manual only (`workflow_dispatch`): builds NSS from source and runs the harness in `tests/nss-regression/` (see above) |
 
 Notes:
 

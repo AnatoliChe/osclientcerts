@@ -1,11 +1,17 @@
 [package]
 name = "osclientcerts"
-version = "0.4.0"
+version = "0.4.1"
 authors = ["Dana Keeler <dkeeler@mozilla.com>", "AnatoliChe <AnatoliChe@gmail.com>"]
 edition = "2024"
 description = "PKCS#11 module exposing OS certificate stores as PKCS#11 tokens; standalone Windows x64 DLL fork of Mozilla's osclientcerts adapted for Thunderbird S/MIME with non-exportable CNG keys"
 repository = "https://github.com/AnatoliChe/osclientcerts"
 license = "MPL-2.0"
+
+[features]
+# Swaps backend_other's fixed stub objects for ones loaded from a generated test-case directory
+# (OSCLIENTCERTS_NSS_REGRESSION_DIR); used only by tests/nss-regression/. Not used by normal
+# builds or `cargo test`.
+nss-regression = []
 
 [dependencies]
 byteorder = "1.3"

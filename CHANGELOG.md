@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file. Pre-built DLLs 
 are published on the GitHub
 [releases page](https://github.com/AnatoliChe/osclientcerts/releases).
 
+## 0.4.1 - 2026-08-26
+
+- Added an NSS regression harness (`tests/nss-regression/`, `scripts/nss-regression-test.sh`,
+  `.github/workflows/nss-regression.yml`, manual/`workflow_dispatch` only): builds a real NSS from
+  source and loads this crate's actual PKCS #11 object/attribute code into it across several
+  generated certificate chains (RSA PKCS#1 v1.5, RSA-PSS, ECDSA P-256/P-384) plus two negative
+  controls, to catch the class of bug that blocked S/MIME signing in 0.4.0 -- both real bugs lived
+  in how NSS itself interprets our PKCS #11 objects, which the crate's own stub-backend unit tests
+  can't see. Verified to actually catch a regression: temporarily reintroducing the historical
+  `ulValueLen` bug flips all four positive cases to failing while the two negative controls stay
+  correct. See `tests/nss-regression/README.md`.
+- Internal: the NSS vendor `CKO_NSS_TRUST`/`CKA_NSS_TRUST_*`/`CKT_NSS_*` constants moved from
+  `backend_windows.rs` into a shared `util.rs` module so the new harness's `nss-regression` Cargo
+  feature (in `backend_other.rs`) can reuse them instead of duplicating the numeric values. No
+  behavior change.
+
 ## 0.4.0 - 2026-08-26
 
 - Confirmed end to end against a real Thunderbird/Windows deployment: S/MIME **signing** now

@@ -252,28 +252,10 @@ impl Cert {
     }
 }
 
-// NSS-specific (vendor) PKCS #11 object class, attribute types and trust values. These are not
-// part of the base PKCS #11 spec covered by the `pkcs11` crate; the numeric values are taken
-// directly from NSS's own `security/nss/lib/util/pkcs11n.h`. They're used only to build the
-// synthetic `CKO_NSS_TRUST` objects below.
-// Not exported by the `pkcs11` crate (it has no notion of trust objects at all).
-type CK_TRUST = CK_ULONG;
-
-const NSSCK_VENDOR_NSS: CK_ATTRIBUTE_TYPE = 0x4E53_4350; // "NSCP"
-const CKO_NSS: CK_OBJECT_CLASS = CKO_VENDOR_DEFINED | (NSSCK_VENDOR_NSS as CK_OBJECT_CLASS);
-const CKO_NSS_TRUST: CK_OBJECT_CLASS = CKO_NSS + 3;
-const CKA_NSS: CK_ATTRIBUTE_TYPE = CKA_VENDOR_DEFINED | NSSCK_VENDOR_NSS;
-const CKA_NSS_TRUST_BASE: CK_ATTRIBUTE_TYPE = CKA_NSS + 0x2000;
-const CKA_NSS_TRUST_SERVER_AUTH: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 8;
-const CKA_NSS_TRUST_CLIENT_AUTH: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 9;
-const CKA_NSS_TRUST_CODE_SIGNING: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 10;
-const CKA_NSS_TRUST_EMAIL_PROTECTION: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 11;
-const CKA_NSS_TRUST_STEP_UP_APPROVED: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 16;
-const CKA_NSS_CERT_SHA1_HASH: CK_ATTRIBUTE_TYPE = CKA_NSS_TRUST_BASE + 100;
-const CKT_VENDOR_DEFINED: CK_TRUST = 0x8000_0000;
-const CKT_NSS: CK_TRUST = CKT_VENDOR_DEFINED | (NSSCK_VENDOR_NSS as CK_TRUST);
-const CKT_NSS_TRUSTED_DELEGATOR: CK_TRUST = CKT_NSS + 2;
-const CKT_NSS_TRUST_UNKNOWN: CK_TRUST = CKT_NSS + 5;
+// NSS-specific (vendor) PKCS #11 object class, attribute types and trust values used to build the
+// synthetic `CKO_NSS_TRUST` objects below (`CK_TRUST`, `CKO_NSS_TRUST`, `CKA_NSS_TRUST_*`,
+// `CKT_NSS_*`) come from the `use crate::util::*;` glob import above; see their definitions and
+// doc comment in `util.rs`. Shared with `backend_other`'s `nss-regression` feature.
 
 /// A synthetic `CKO_NSS_TRUST` object that grants NSS's `certUsageEmailRecipient` trust to a CA
 /// certificate. NSS's CMS signing code (`NSS_CMSSignerInfo_AddSMIMEEncKeyPrefs`) requires the

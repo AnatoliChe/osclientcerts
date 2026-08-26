@@ -1,0 +1,56 @@
+name: NSS regression (manual)
+
+# Builds a real NSS from source and loads this crate's actual PKCS #11 object/attribute code
+# (backend_other.rs's `nss-regression` feature) into it across several generated certificate
+# chains, to check that NSS resolves S/MIME email trust the way we expect. See
+# tests/nss-regression/generate_chains.py and scripts/nss-regression-test.sh for details on what
+# this catches and why it isn't part of the fast per-push CI (building NSS from source takes
+# several minutes).
+#
+# Manual only: run from the Actions tab, or `gh workflow run nss-regression.yml`.
+on:
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  nss-regression:
+    name: NSS regression harness (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install NSS build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gyp ninja-build libnspr4-dev python3 python3-venv pkg-config
+
+      - name: Checkout NSS source
+        run: git clone --depth 1 https://github.com/mozilla/nss security/nss
+        working-directory: /tmp/nss-regression
+
+      - name: Build NSS (Release, --system-nspr)
+        run: ./build.sh -o --system-nspr -j "$(nproc)"
+        working-directory: /tmp/nss-regression/security/nss
+
+      - name: Generate certificate chains
+        run: |
+          python3 -m venv /tmp/nss-regression-venv
+          /tmp/nss-regression-venv/bin/pip install --quiet cryptography
+          /tmp/nss-regression-venv/bin/python3 generate_chains.py
+        working-directory: tests/nss-regression
+
+      - name: Build osclientcerts.so (host target, nss-regression feature)
+        run: cargo build --release --features nss-regression
+
+      - name: Run cases against the real NSS build
+        env:
+          NSS_DIST: /tmp/nss-regression/security/dist/Release
+        run: |
+          MODULE="$(pwd)/target/release/libosclientcerts.so"
+          NSS_DIST="${NSS_DIST}" MODULE="${MODULE}" CASES_DIR="$(pwd)/tests/nss-regression/cases" \
+            ./tests/nss-regression/run_cases.sh
