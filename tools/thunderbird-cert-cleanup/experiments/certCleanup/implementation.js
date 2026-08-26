@@ -44,31 +44,8 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
           );
 
           const certs = certDB.getCerts();
-
-          // Verbose, always-on diagnostic dump of what NSS's deduplicated view
-          // reports. Kept for troubleshooting, but this view is NOT what we use
-          // to detect duplicates -- see the comment below on why.
-          console.log(
-            "certCleanup: NSS reports " + certs.length + " certificate record(s) " +
-              "(deduplicated view):"
-          );
-          for (const cert of certs) {
-            const tokenName = cert.tokenName || "";
-            console.log(
-              "  subject=" + cert.subjectName +
-                " issuer=" + cert.issuerName +
-                " serial=" + cert.serialNumber +
-                " token=" + JSON.stringify(tokenName) +
-                " (len=" + tokenName.length + ")"
-            );
-          }
-
           const liveCerts = certs.filter(
             (cert) => (cert.tokenName || "").trim() === OS_CLIENT_CERTS_TOKEN_NAME
-          );
-          console.log(
-            "certCleanup: " + liveCerts.length + " live certificate(s) on " +
-              JSON.stringify(OS_CLIENT_CERTS_TOKEN_NAME)
           );
           if (liveCerts.length === 0) {
             // The provider isn't loaded (or has no certs) right now -- don't

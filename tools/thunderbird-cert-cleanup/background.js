@@ -2,7 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-const DAILY_ALARM_NAME = "cert-cleanup-daily";
+const CLEANUP_ALARM_NAME = "cert-cleanup-periodic";
+const CLEANUP_PERIOD_MINUTES = 30;
 
 // Read from manifest.json rather than hardcoded here, so it can never drift
 // out of sync with the actual installed version -- log it on every run so
@@ -51,9 +52,11 @@ async function runCleanup(reason) {
 browser.runtime.onInstalled.addListener(() => runCleanup("install"));
 browser.runtime.onStartup.addListener(() => runCleanup("startup"));
 
-browser.alarms.create(DAILY_ALARM_NAME, { periodInMinutes: 24 * 60 });
+browser.alarms.create(CLEANUP_ALARM_NAME, {
+  periodInMinutes: CLEANUP_PERIOD_MINUTES,
+});
 browser.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === DAILY_ALARM_NAME) {
+  if (alarm.name === CLEANUP_ALARM_NAME) {
     runCleanup("scheduled");
   }
 });

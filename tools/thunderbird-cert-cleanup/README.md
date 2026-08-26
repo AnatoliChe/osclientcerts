@@ -73,7 +73,7 @@ delivery your org already uses for `policies.json`):
     "ExtensionSettings": {
       "cert-cleanup@osclientcerts.dev": {
         "installation_mode": "force_installed",
-        "install_url": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.2.0/cert-cleanup.xpi"
+        "install_url": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.2.1/cert-cleanup.xpi"
       }
     }
   }
@@ -104,7 +104,7 @@ cutting a new version:
 
 ## Notes
 
-- Runs automatically on startup and once every 24 hours (`browser.alarms`); shows a notification
+- Runs automatically on startup and every 30 minutes (`browser.alarms`); shows a notification
   only when it actually removed something, so it's not silent if it does act, but also isn't
   noisy on every normal startup.
 - `strict_min_version` in `manifest.json` is a conservative floor (128.0) -- lower or raise it to
