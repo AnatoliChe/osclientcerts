@@ -4,22 +4,32 @@
 
 const DAILY_ALARM_NAME = "cert-cleanup-daily";
 
+// Read from manifest.json rather than hardcoded here, so it can never drift
+// out of sync with the actual installed version -- log it on every run so
+// it's unambiguous from the console output alone which build is actually
+// executing (WebExtension Experiments can otherwise keep a stale cached copy
+// running across a reload; see onShutdown() in experiments/certCleanup/
+// implementation.js).
+const VERSION = browser.runtime.getManifest().version;
+
 async function runCleanup(reason) {
+  console.log(`certCleanup v${VERSION} (${reason}): starting`);
+
   let deleted;
   try {
     deleted = await browser.certCleanup.cleanup();
   } catch (e) {
-    console.error(`certCleanup (${reason}): cleanup call failed`, e);
+    console.error(`certCleanup v${VERSION} (${reason}): cleanup call failed`, e);
     return;
   }
 
   if (deleted.length === 0) {
-    console.log(`certCleanup (${reason}): nothing to clean up`);
+    console.log(`certCleanup v${VERSION} (${reason}): nothing to clean up`);
     return;
   }
 
   console.log(
-    `certCleanup (${reason}): removed ${deleted.length} stale certificate record(s)`,
+    `certCleanup v${VERSION} (${reason}): removed ${deleted.length} stale certificate record(s)`,
     deleted
   );
   try {

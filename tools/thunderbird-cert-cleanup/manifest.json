@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Removes stale, keyless duplicate copies of your OS Client Certs signing certificate that NSS sometimes caches into cert9.db from verified S/MIME signatures, which can silently break outgoing S/MIME signing. See README.md.",
   "browser_specific_settings": {
     "gecko": {
