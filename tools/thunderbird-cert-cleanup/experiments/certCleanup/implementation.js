@@ -65,17 +65,41 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
           // cert9.db right now. NSS has a non-deduplicating list type
           // (PK11CertListAll), but no JS-facing API exposes it.
           //
-          // So: read cert9.db directly instead, via Sqlite.sys.mjs (Gecko's
-          // sanctioned module for opening additional, concurrent connections
-          // to a Firefox/Thunderbird-managed sqlite database -- the same
-          // mechanism other in-process code uses for shared databases like
-          // places.sqlite; openNotExclusive avoids fighting NSS's own already
-          // -open connection to this same file). A row here is a genuine
-          // persisted duplicate by construction: PKCS #11 objects belonging to
-          // an *external* token like ours are never themselves written to
+          // So: *read* cert9.db directly instead, via Sqlite.sys.mjs (Gecko's
+          // sanctioned module for opening additional, concurrent, read-only
+          // connections to a Firefox/Thunderbird-managed sqlite database --
+          // the same mechanism other in-process code uses for shared
+          // databases like places.sqlite). A row here is a genuine persisted
+          // duplicate by construction: PKCS #11 objects belonging to an
+          // *external* token like ours are never themselves written to
           // cert9.db, so any CKO_CERTIFICATE row whose DER byte-for-byte
           // matches one of our live certificates cannot be that live
           // certificate -- it can only be a stale, keyless, NSS-cached copy.
+          //
+          // Earlier versions (through 0.2.2) also *deleted* the row through
+          // this same second connection (`DELETE FROM nssPublic ...`). That
+          // broke S/MIME decryption for the rest of the session in
+          // production testing: a raw external write to cert9.db bypasses
+          // whatever bookkeeping NSS's own softoken does around its already
+          // -open connection to the same file, and desynced it badly enough
+          // that decrypting any message afterwards failed
+          // (C_DecryptInit/C_UnwrapKey started returning
+          // CKR_FUNCTION_NOT_SUPPORTED for the rest of the session,
+          // regardless of how long after startup the write happened -- a
+          // startup-timing delay did not help). So deletion now goes through
+          // nsIX509CertDB itself instead: constructX509() builds a transient
+          // in-memory certificate object from the duplicate's raw DER (not
+          // tied to any token/slot), and deleteCertificate() on that object
+          // resolves and removes the matching persisted record through NSS's
+          // own softoken code path (PK11_DeleteTokenCertAndKey /
+          // SEC_DeletePermCertificate -- confirmed against
+          // nsNSSCertificateDB::DeleteCertificate), the same one "Delete or
+          // Distrust" in Certificate Manager uses. If that resolution ever
+          // targeted our *live* token object instead of the cert9.db
+          // duplicate, the call would simply fail rather than corrupt
+          // anything: osclientcerts' own C_DestroyObject is an unconditional
+          // CKR_FUNCTION_NOT_SUPPORTED stub (see src/lib.rs), so an attempt
+          // to destroy anything on our external token is a safe no-op.
           const { Sqlite } = ChromeUtils.importESModule(
             "resource://gre/modules/Sqlite.sys.mjs"
           );
@@ -89,29 +113,38 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
             conn = await Sqlite.openConnection({
               path: dbFile.path,
               openNotExclusive: true,
+              readOnly: true,
             });
             for (const liveCert of liveCerts) {
-              const der = Uint8Array.from(liveCert.getRawDER());
+              const derArray = liveCert.getRawDER();
+              const der = Uint8Array.from(derArray);
               const rows = await conn.execute(
                 "SELECT id FROM nssPublic WHERE " +
                   CKA_CLASS_COLUMN + " = :cls AND " + CKA_VALUE_COLUMN + " = :der",
                 { cls: CKO_CERTIFICATE_BYTES, der }
               );
-              for (const row of rows) {
-                const rowId = row.getResultByName("id");
-                console.log(
-                  "certCleanup: found stale cert9.db row id=" + rowId +
-                    " duplicating live cert subject=" + liveCert.subjectName
-                );
-                await conn.execute("DELETE FROM nssPublic WHERE id = :id", {
-                  id: rowId,
-                });
+              if (rows.length === 0) {
+                continue;
+              }
+              console.log(
+                "certCleanup: found " + rows.length +
+                  " stale cert9.db row(s) duplicating live cert subject=" +
+                  liveCert.subjectName
+              );
+              try {
+                const tempCert = certDB.constructX509(derArray);
+                certDB.deleteCertificate(tempCert);
                 deleted.push({
                   subjectName: liveCert.subjectName,
                   issuerName: liveCert.issuerName,
                   serialNumber: liveCert.serialNumber,
-                  rowId,
+                  rowCount: rows.length,
                 });
+              } catch (e) {
+                Cu.reportError(
+                  "certCleanup: deleteCertificate failed for subject=" +
+                    liveCert.subjectName + ": " + e
+                );
               }
             }
           } catch (e) {

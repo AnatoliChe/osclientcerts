@@ -45,7 +45,7 @@ directory under `distribution\` (e.g. `C:\Program Files\Thunderbird\distribution
     "ExtensionSettings": {
       "cert-cleanup@osclientcerts.dev": {
         "installation_mode": "force_installed",
-        "install_url": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.2.2/cert-cleanup.xpi"
+        "install_url": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.3.0/cert-cleanup.xpi"
       }
     }
   }
@@ -101,23 +101,41 @@ So instead:
 1. Ask NSS for the deduplicated view (`nsIX509CertDB.getCerts()`) and keep only the records on the
    `OS Client Cert Token` (the PKCS #11 token label this provider reports -- see
    `TOKEN_LABEL_BYTES` in `../../src/lib.rs`). These are confirmed-live, key-bearing certificates.
-2. Open `cert9.db` directly, read-write, via
+2. Open `cert9.db` directly, **read-only**, via
    [`Sqlite.sys.mjs`](https://searchfox.org/mozilla-central/source/toolkit/modules/Sqlite.sys.mjs)
-   (`openNotExclusive: true`) -- Gecko's sanctioned module for opening additional, concurrent
-   connections to a Firefox/Thunderbird-managed sqlite database (the same mechanism other in-process
-   code uses for shared databases like `places.sqlite`). This is not "editing the file behind
-   Thunderbird's back"; it's a second connection through the same safe machinery NSS's own
-   connection uses.
+   (`openNotExclusive: true, readOnly: true`) -- Gecko's sanctioned module for opening additional,
+   concurrent connections to a Firefox/Thunderbird-managed sqlite database (the same mechanism
+   other in-process code uses for shared databases like `places.sqlite`).
 3. For each live certificate, query `cert9.db`'s own table (`nssPublic`, one row per PKCS #11
    object, columns named `a` + the attribute type in hex -- confirmed against NSS's
    `lib/softoken/sdb.c`) for a `CKO_CERTIFICATE` row (`a0`) whose DER (`a11`) is byte-for-byte
-   identical to that live certificate's DER (`nsIX509Cert.getRawDER()`). Delete any match.
+   identical to that live certificate's DER (`nsIX509Cert.getRawDER()`).
+4. For each match, delete it through `nsIX509CertDB` itself rather than SQL: `constructX509()`
+   builds a transient, in-memory certificate object from the duplicate's DER (not tied to any
+   token/slot), and `deleteCertificate()` on that object resolves and removes the matching
+   persisted record through NSS's own softoken code path (`PK11_DeleteTokenCertAndKey` /
+   `SEC_DeletePermCertificate` -- confirmed against `nsNSSCertificateDB::DeleteCertificate`), the
+   same path "Delete or Distrust" in Certificate Manager uses.
 
 Step 3 can only ever find genuine duplicates: PKCS #11 objects belonging to an *external* token
 like ours are never themselves written to `cert9.db`, so a `cert9.db` row whose DER matches one of
 our live certificates cannot be that live certificate -- it can only be a stale, cached copy. This
 also means the tool never touches another correspondent's certificate that NSS legitimately cached
 while verifying their signature (those have no live counterpart on our token at all).
+
+**Why step 4 changed in 0.3.0:** through 0.2.2, deletion was also done via a raw
+`DELETE FROM nssPublic ...` on the same read-write `Sqlite.sys.mjs` connection used for detection.
+In production testing that broke S/MIME **decryption** for the rest of the session -- every
+subsequent decrypt attempt returned `CKR_FUNCTION_NOT_SUPPORTED` from `C_DecryptInit`/`C_UnwrapKey`
+(confirmed via `RUST_LOG=osclientcerts=debug`), regardless of how long after startup the write
+happened (a startup-timing delay didn't help, ruling that out as the cause). A raw external write
+to `cert9.db` apparently desyncs whatever bookkeeping NSS's own softoken keeps around its
+already-open connection to the same file. Routing the delete through `nsIX509CertDB.deleteCertificate()`
+instead lets NSS's own code perform and account for the deletion, avoiding that desync. If that
+resolution ever targeted our *live* token object instead of the `cert9.db` duplicate, the call
+would simply fail rather than corrupt anything: osclientcerts' own `C_DestroyObject` is an
+unconditional `CKR_FUNCTION_NOT_SUPPORTED` stub, so an attempt to destroy anything on our external
+token is a safe no-op.
 
 ## Building from source
 
