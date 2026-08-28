@@ -12,10 +12,11 @@ the real one. See ["Signing works, then silently stops after some
 time"](../../DEBUGGING.md#signing-works-then-silently-stops-after-some-time-outgoing-mail) in
 `DEBUGGING.md` for the full investigation.
 
-This add-on finds and removes exactly that stale copy automatically -- at startup and every 30
-minutes -- so the problem self-heals before you notice it. It never touches any other certificate
+This add-on finds and removes exactly that stale copy automatically -- **at Thunderbird shutdown**,
+so the problem self-heals before your next session -- without ever touching any other certificate
 (correspondents' certificates NSS legitimately caches while verifying their signatures are left
-alone; see "How it decides what to delete" below for exactly why that's safe).
+alone; see "How it decides what to delete" below for exactly why that's safe, and "Why cleanup only
+runs at shutdown" for why it doesn't run during the session instead).
 
 ## Installing
 
@@ -27,10 +28,13 @@ alone; see "How it decides what to delete" below for exactly why that's safe).
 2. In Thunderbird: `Ctrl+Shift+A` (Add-ons and Themes) → gear icon ⚙ → **Debug Add-ons**.
 3. **Load Temporary Add-on...** → select the downloaded `.xpi`.
 
-It runs immediately; check the Browser Console (`Ctrl+Shift+J` -- a separate window from the
-per-addon "Inspect" console, which won't show this add-on's privileged-side logging) for
-`certCleanup:` lines. A temporary add-on disappears on the next restart -- use this only to verify
-it works before deploying it for real, below.
+It only actually removes anything at shutdown (see "Why cleanup only runs at shutdown" below), so
+to see it act: open the Browser Console *first* (`Ctrl+Shift+J` -- a separate window from the
+per-addon "Inspect" console, which won't show this add-on's privileged-side logging), load the
+add-on, then quit Thunderbird normally. The blocker this add-on registers runs early enough in
+Gecko's shutdown sequence (`quit-application`, before windows close) that `certCleanup:` lines
+still show up in that open console window as the quit proceeds. A temporary add-on disappears on
+the next restart -- use this only to verify it works before deploying it for real, below.
 
 ### Real deployment (Enterprise Policy, persists, auto-updates)
 
@@ -45,7 +49,7 @@ directory under `distribution\` (e.g. `C:\Program Files\Thunderbird\distribution
     "ExtensionSettings": {
       "cert-cleanup@osclientcerts.dev": {
         "installation_mode": "force_installed",
-        "install_url": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.3.1/cert-cleanup.xpi"
+        "install_url": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.0/cert-cleanup.xpi"
       }
     }
   }
@@ -124,18 +128,50 @@ also means the tool never touches another correspondent's certificate that NSS l
 while verifying their signature (those have no live counterpart on our token at all).
 
 **Why step 4 changed in 0.3.0:** through 0.2.2, deletion was also done via a raw
-`DELETE FROM nssPublic ...` on the same read-write `Sqlite.sys.mjs` connection used for detection.
-In production testing that broke S/MIME **decryption** for the rest of the session -- every
-subsequent decrypt attempt returned `CKR_FUNCTION_NOT_SUPPORTED` from `C_DecryptInit`/`C_UnwrapKey`
-(confirmed via `RUST_LOG=osclientcerts=debug`), regardless of how long after startup the write
-happened (a startup-timing delay didn't help, ruling that out as the cause). A raw external write
-to `cert9.db` apparently desyncs whatever bookkeeping NSS's own softoken keeps around its
-already-open connection to the same file. Routing the delete through `nsIX509CertDB.deleteCertificate()`
-instead lets NSS's own code perform and account for the deletion, avoiding that desync. If that
-resolution ever targeted our *live* token object instead of the `cert9.db` duplicate, the call
-would simply fail rather than corrupt anything: osclientcerts' own `C_DestroyObject` is an
-unconditional `CKR_FUNCTION_NOT_SUPPORTED` stub, so an attempt to destroy anything on our external
-token is a safe no-op.
+`DELETE FROM nssPublic ...` on the same connection used for detection. Routing the delete through
+`nsIX509CertDB.deleteCertificate()` instead lets NSS's own code perform and account for the
+deletion. If that resolution ever targeted our *live* token object instead of the `cert9.db`
+duplicate, the call would simply fail rather than corrupt anything: osclientcerts' own
+`C_DestroyObject` is an unconditional `CKR_FUNCTION_NOT_SUPPORTED` stub, so an attempt to destroy
+anything on our external token is a safe no-op.
+
+## Why cleanup only runs at shutdown
+
+0.2.x and 0.3.x ran this pass periodically during the session (on startup, then every 30 minutes).
+**Both the raw-SQL delete (through 0.2.2) and the official `nsIX509CertDB.deleteCertificate()` path
+(0.3.0/0.3.1) broke S/MIME decryption for the rest of that Thunderbird session** once they actually
+removed a duplicate -- confirmed in production testing via `RUST_LOG=osclientcerts=debug`: every
+decrypt attempt afterward returned `CKR_FUNCTION_NOT_SUPPORTED` from `C_DecryptInit`/`C_UnwrapKey`,
+and critically, with no `C_OpenSession` preceding those calls at all -- meaning Gecko had stopped
+calling into the module for that operation entirely, rather than the module itself failing. This
+wasn't a timing issue (a startup delay in 0.2.2 didn't help; the break still happened, just later,
+at whatever point the delayed run actually deleted something) and it wasn't specific to the digest
+algorithm of the message being read (reproduced with both SHA-1- and SHA-256-signed test messages).
+
+It also isn't reproducible at the raw NSS/softoken/libsmime level: a from-source NSS build,
+exercised directly via a small C harness that holds an `NSS_InitReadWrite` session open across an
+external modification to the same `cert9.db` (mirroring what a second `Sqlite.sys.mjs` connection
+or an external `certutil -D` does), survives every combination tried -- raw SQL delete, official
+`certutil -D`, from a fresh process or an already-open one, checking both plain `PK11`
+cert/key lookup and a real `NSS_CMSDecoder` envelope decrypt. All of it kept working. So whatever
+goes stale lives in Gecko's C++ layer above NSS (the mail/PSM code that resolves a decryption
+candidate for a specific message), not in NSS itself, and not in anything this add-on does
+directly -- which also means it's not something this add-on can safely work around by changing
+*how* it deletes, only *when*.
+
+Given that, the fix is architectural rather than mechanical: **only clean up at shutdown.**
+Whatever goes stale in Gecko's cache doesn't matter if the process exits shortly after -- there's no
+more of that session left for it to affect -- and the next launch does a completely fresh
+`NSS_Init` that simply reads the already-cleaned file from disk. This is implemented as an
+`AsyncShutdown.appShutdownConfirmed` blocker (topic `quit-application`, the earliest well-known
+Gecko shutdown phase, registered once when the Experiment script loads) rather than a
+`browser.alarms` timer -- see `experiments/certCleanup/implementation.js`. A blocker, rather than a
+fire-and-forget observer callback, is what guarantees the async `cert9.db` work actually finishes
+before Thunderbird tears down further.
+
+One consequence: on a machine that's rarely fully quit (put to sleep, or Thunderbird left running
+for days), the duplicate can persist for that whole stretch, same as before this add-on existed.
+That's an accepted tradeoff for not corrupting the session it does run in.
 
 ## Building from source
 
@@ -147,14 +183,11 @@ Produces `dist/cert-cleanup.xpi`. Requires `zip`.
 
 ## Notes
 
-- Runs automatically ~2 minutes after startup/install, then every 30 minutes (`browser.alarms`);
-  shows a notification only when it actually removed something, so it's not silent if it does act,
-  but also isn't noisy on every normal startup. The 2-minute delay on the first run is deliberate:
-  NSS opens `cert9.db` read-write within milliseconds of Thunderbird's own process start, and a
-  concurrent write from us into that same window broke S/MIME decryption for the rest of the
-  session in testing under Enterprise Policy (`force_installed`, whose `onStartup` fires at process
-  launch) -- a temporary add-on, always loaded well into an already-running session, never hit this.
-  Once that startup window has passed, touching the database is fine.
+- Runs once per Thunderbird shutdown (see "Why cleanup only runs at shutdown" above) -- not on
+  startup, not periodically. No notification on completion: by the time it runs, the user is
+  already quitting, so there's no one to usefully notify. Console logging
+  (`certCleanup: removed N stale certificate record(s)`) is the only visible signal, and only
+  fires when it actually found and removed something.
 - `strict_min_version` in `manifest.json` is a conservative floor (128.0) -- lower or raise it to
   match whatever Thunderbird version your org actually deploys.
 - This uses a [WebExtension
