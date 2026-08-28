@@ -45,7 +45,7 @@ directory under `distribution\` (e.g. `C:\Program Files\Thunderbird\distribution
     "ExtensionSettings": {
       "cert-cleanup@osclientcerts.dev": {
         "installation_mode": "force_installed",
-        "install_url": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.2.1/cert-cleanup.xpi"
+        "install_url": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.2.2/cert-cleanup.xpi"
       }
     }
   }
@@ -129,9 +129,14 @@ Produces `dist/cert-cleanup.xpi`. Requires `zip`.
 
 ## Notes
 
-- Runs automatically on startup and every 30 minutes (`browser.alarms`); shows a notification
-  only when it actually removed something, so it's not silent if it does act, but also isn't
-  noisy on every normal startup.
+- Runs automatically ~2 minutes after startup/install, then every 30 minutes (`browser.alarms`);
+  shows a notification only when it actually removed something, so it's not silent if it does act,
+  but also isn't noisy on every normal startup. The 2-minute delay on the first run is deliberate:
+  NSS opens `cert9.db` read-write within milliseconds of Thunderbird's own process start, and a
+  concurrent write from us into that same window broke S/MIME decryption for the rest of the
+  session in testing under Enterprise Policy (`force_installed`, whose `onStartup` fires at process
+  launch) -- a temporary add-on, always loaded well into an already-running session, never hit this.
+  Once that startup window has passed, touching the database is fine.
 - `strict_min_version` in `manifest.json` is a conservative floor (128.0) -- lower or raise it to
   match whatever Thunderbird version your org actually deploys.
 - This uses a [WebExtension

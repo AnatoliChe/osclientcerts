@@ -4,6 +4,18 @@
 
 const CLEANUP_ALARM_NAME = "cert-cleanup-periodic";
 const CLEANUP_PERIOD_MINUTES = 30;
+const STARTUP_ALARM_NAME = "cert-cleanup-startup-delay";
+// NSS opens cert9.db read-write within milliseconds of Thunderbird's process
+// start (confirmed via MOZ_LOG=pipnss:5 -- "initialized NSS in r/w mode"
+// appears ~20ms after nsNSSComponent::ctor). Running our own cert9.db access
+// that early, concurrently with NSS's own startup-time DB access, corrupted
+// S/MIME decryption for the rest of the session in testing (force_installed
+// via policy runs onStartup essentially at process launch; a temporary
+// add-on loaded well into an already-running session never hit this, which
+// is why it always looked fine there). Delaying the first run past this
+// startup window avoids the race; the DB is a normal, unhurried target for
+// the rest of the session after that.
+const STARTUP_DELAY_MINUTES = 2;
 
 // Read from manifest.json rather than hardcoded here, so it can never drift
 // out of sync with the actual installed version -- log it on every run so
@@ -49,14 +61,22 @@ async function runCleanup(reason) {
   }
 }
 
-browser.runtime.onInstalled.addListener(() => runCleanup("install"));
-browser.runtime.onStartup.addListener(() => runCleanup("startup"));
+function scheduleStartupCleanup() {
+  browser.alarms.create(STARTUP_ALARM_NAME, {
+    delayInMinutes: STARTUP_DELAY_MINUTES,
+  });
+}
+
+browser.runtime.onInstalled.addListener(scheduleStartupCleanup);
+browser.runtime.onStartup.addListener(scheduleStartupCleanup);
 
 browser.alarms.create(CLEANUP_ALARM_NAME, {
   periodInMinutes: CLEANUP_PERIOD_MINUTES,
 });
 browser.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === CLEANUP_ALARM_NAME) {
+  if (alarm.name === STARTUP_ALARM_NAME) {
+    runCleanup("startup, delayed");
+  } else if (alarm.name === CLEANUP_ALARM_NAME) {
     runCleanup("scheduled");
   }
 });
