@@ -29,6 +29,54 @@ const CKA_CLASS_COLUMN = "a0";
 const CKA_VALUE_COLUMN = "a11";
 const CKO_CERTIFICATE_BYTES = new Uint8Array([0, 0, 0, 1]);
 
+// EXPERIMENTAL (experiment/cert-cleanup-mid-session branch): after deleting a
+// duplicate, force a full unload+reload of our own PKCS#11 module -- the
+// same operation the "Unload"/"Load" buttons in Certificate Manager's
+// Device Manager perform (nsIPKCS11ModuleDB.deleteModule/addModule; see
+// security/manager/pki/resources/content/{device_manager,load_device}.js).
+// That's a full C_Finalize/C_Initialize cycle for the module, which should
+// force NSS/Gecko to fully re-resolve everything on our slot from scratch,
+// on the theory that whatever Gecko-level state goes stale after a
+// mid-session delete (see the long comment in doCleanup() below) is tied to
+// the slot/module and gets rebuilt cleanly by a reload. Untested hypothesis
+// -- that's what this branch exists to find out.
+function reloadOwnModule() {
+  const moduleDB = Cc["@mozilla.org/security/pkcs11moduledb;1"].getService(
+    Ci.nsIPKCS11ModuleDB
+  );
+
+  let targetModule = null;
+  for (const module of moduleDB.listModules()) {
+    for (const slot of module.listSlots()) {
+      if (slot.tokenName === OS_CLIENT_CERTS_TOKEN_NAME) {
+        targetModule = module;
+        break;
+      }
+    }
+    if (targetModule) {
+      break;
+    }
+  }
+  if (!targetModule) {
+    console.log(
+      "certCleanup: reloadOwnModule found no loaded module exposing token '" +
+        OS_CLIENT_CERTS_TOKEN_NAME + "', skipping reload"
+    );
+    return;
+  }
+
+  const name = targetModule.name;
+  const libPath = targetModule.libName;
+  console.log(
+    "certCleanup: reloading PKCS#11 module '" + name + "' (" + libPath + ")"
+  );
+  // Same call shape load_device.js uses for a normal "Load" (mechanismFlags
+  // and cipherFlags both 0 -- let NSS use its defaults).
+  moduleDB.deleteModule(name);
+  moduleDB.addModule(name, libPath, 0, 0);
+  console.log("certCleanup: PKCS#11 module '" + name + "' reloaded");
+}
+
 // Runs the actual detect-and-delete pass. See the long comment inline below
 // for why detection reads cert9.db directly but deletion goes through
 // nsIX509CertDB, and why this whole pass is only ever run at shutdown -- not
@@ -150,6 +198,14 @@ async function doCleanup() {
   } finally {
     if (conn) {
       await conn.close();
+    }
+  }
+
+  if (deleted.length > 0) {
+    try {
+      reloadOwnModule();
+    } catch (e) {
+      Cu.reportError("certCleanup: reloadOwnModule failed: " + e);
     }
   }
 

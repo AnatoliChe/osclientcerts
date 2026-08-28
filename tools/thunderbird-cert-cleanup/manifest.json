@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.1",
-  "description": "EXPERIMENT BUILD, not for production: mid-session periodic cleanup re-enabled, to test whether NSS 3.128 (bugs 2056775/2056786) fixes the corruption that made 0.2.x/0.3.x unsafe mid-session. See tools/thunderbird-cert-cleanup/README.md and the experiment/cert-cleanup-mid-session branch.",
+  "version": "0.4.2",
+  "description": "EXPERIMENT BUILD, not for production: mid-session periodic cleanup, now also unloading+reloading the osclientcerts PKCS#11 module after each delete (same as Device Manager's Unload/Load buttons), to test whether that avoids the corruption that made 0.2.x/0.3.x unsafe mid-session -- independent of whether NSS 3.128 is present. See tools/thunderbird-cert-cleanup/README.md and the experiment/cert-cleanup-mid-session branch.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
