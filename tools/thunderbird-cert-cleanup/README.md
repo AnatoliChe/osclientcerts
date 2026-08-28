@@ -45,7 +45,7 @@ directory under `distribution\` (e.g. `C:\Program Files\Thunderbird\distribution
     "ExtensionSettings": {
       "cert-cleanup@osclientcerts.dev": {
         "installation_mode": "force_installed",
-        "install_url": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.3.0/cert-cleanup.xpi"
+        "install_url": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.3.1/cert-cleanup.xpi"
       }
     }
   }
