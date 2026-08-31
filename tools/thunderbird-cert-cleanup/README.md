@@ -12,11 +12,12 @@ the real one. See ["Signing works, then silently stops after some
 time"](../../DEBUGGING.md#signing-works-then-silently-stops-after-some-time-outgoing-mail) in
 `DEBUGGING.md` for the full investigation.
 
-This add-on finds and removes exactly that stale copy automatically -- **at Thunderbird shutdown**,
-so the problem self-heals before your next session -- without ever touching any other certificate
-(correspondents' certificates NSS legitimately caches while verifying their signatures are left
-alone; see "How it decides what to delete" below for exactly why that's safe, and "Why cleanup only
-runs at shutdown" for why it doesn't run during the session instead).
+This add-on finds and removes exactly that stale copy automatically -- **at Thunderbird shutdown,
+and again as soon as a compose window opens** (new message, reply, or forward) -- without ever
+touching any other certificate (correspondents' certificates NSS legitimately caches while
+verifying their signatures are left alone; see "How it decides what to delete" below for exactly
+why that's safe, and "Why cleanup runs at shutdown and when composing" for why it runs at those two
+moments specifically, and what it costs to run at the second one).
 
 ## Installing
 
@@ -28,13 +29,15 @@ runs at shutdown" for why it doesn't run during the session instead).
 2. In Thunderbird: `Ctrl+Shift+A` (Add-ons and Themes) → gear icon ⚙ → **Debug Add-ons**.
 3. **Load Temporary Add-on...** → select the downloaded `.xpi`.
 
-It only actually removes anything at shutdown (see "Why cleanup only runs at shutdown" below), so
-to see it act: open the Browser Console *first* (`Ctrl+Shift+J` -- a separate window from the
-per-addon "Inspect" console, which won't show this add-on's privileged-side logging), load the
-add-on, then quit Thunderbird normally. The blocker this add-on registers runs early enough in
-Gecko's shutdown sequence (`quit-application`, before windows close) that `certCleanup:` lines
-still show up in that open console window as the quit proceeds. A temporary add-on disappears on
-the next restart -- use this only to verify it works before deploying it for real, below.
+It only actually removes anything at shutdown or when a compose window opens (see "Why cleanup runs
+at shutdown and when composing" below), so to see it act: open the Browser Console *first*
+(`Ctrl+Shift+J` -- a separate window from the per-addon "Inspect" console, which won't show this
+add-on's privileged-side logging), load the add-on, then either open a compose window (reply,
+forward, or new message) or quit Thunderbird normally. The shutdown blocker this add-on registers
+runs early enough in Gecko's shutdown sequence (`quit-application`, before windows close) that
+`certCleanup:` lines still show up in that open console window as the quit proceeds. A temporary
+add-on disappears on the next restart -- use this only to verify it works before deploying it for
+real, below.
 
 ### Real deployment (Enterprise Policy, persists, auto-updates)
 
@@ -49,7 +52,7 @@ directory under `distribution\` (e.g. `C:\Program Files\Thunderbird\distribution
     "ExtensionSettings": {
       "cert-cleanup@osclientcerts.dev": {
         "installation_mode": "force_installed",
-        "install_url": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.0/cert-cleanup.xpi"
+        "install_url": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.5.0/cert-cleanup.xpi"
       }
     }
   }
@@ -135,7 +138,7 @@ duplicate, the call would simply fail rather than corrupt anything: osclientcert
 `C_DestroyObject` is an unconditional `CKR_FUNCTION_NOT_SUPPORTED` stub, so an attempt to destroy
 anything on our external token is a safe no-op.
 
-## Why cleanup only runs at shutdown
+## Why cleanup runs at shutdown and when composing
 
 0.2.x and 0.3.x ran this pass periodically during the session (on startup, then every 30 minutes).
 **Both the raw-SQL delete (through 0.2.2) and the official `nsIX509CertDB.deleteCertificate()` path
@@ -159,19 +162,39 @@ candidate for a specific message), not in NSS itself, and not in anything this a
 directly -- which also means it's not something this add-on can safely work around by changing
 *how* it deletes, only *when*.
 
-Given that, the fix is architectural rather than mechanical: **only clean up at shutdown.**
-Whatever goes stale in Gecko's cache doesn't matter if the process exits shortly after -- there's no
-more of that session left for it to affect -- and the next launch does a completely fresh
-`NSS_Init` that simply reads the already-cleaned file from disk. This is implemented as an
-`AsyncShutdown.appShutdownConfirmed` blocker (topic `quit-application`, the earliest well-known
-Gecko shutdown phase, registered once when the Experiment script loads) rather than a
-`browser.alarms` timer -- see `experiments/certCleanup/implementation.js`. A blocker, rather than a
-fire-and-forget observer callback, is what guarantees the async `cert9.db` work actually finishes
-before Thunderbird tears down further.
+0.4.0's fix was architectural: **only clean up at shutdown.** Whatever goes stale in Gecko's cache
+doesn't matter if the process exits shortly after -- there's no more of that session left for it to
+affect -- and the next launch does a completely fresh `NSS_Init` that simply reads the
+already-cleaned file from disk. This is implemented as an `AsyncShutdown.appShutdownConfirmed`
+blocker (topic `quit-application`, the earliest well-known Gecko shutdown phase, registered once
+when the Experiment script loads) rather than a `browser.alarms` timer -- see
+`experiments/certCleanup/implementation.js`. A blocker, rather than a fire-and-forget observer
+callback, is what guarantees the async `cert9.db` work actually finishes before Thunderbird tears
+down further. Its one downside: on a machine that's rarely fully quit (put to sleep, or Thunderbird
+left running for days), the duplicate -- and the outgoing-signing bug it causes -- can persist for
+that whole stretch.
 
-One consequence: on a machine that's rarely fully quit (put to sleep, or Thunderbird left running
-for days), the duplicate can persist for that whole stretch, same as before this add-on existed.
-That's an accepted tradeoff for not corrupting the session it does run in.
+**0.5.0 adds a second trigger**, in `background.js`: `browser.windows.onCreated`, filtered to
+`window.type === "messageCompose"`, runs the same cleanup as soon as any compose window opens (new
+message, reply, or forward) -- i.e. right before the moment signing would actually matter, rather
+than waiting for the next full restart. This still goes through `nsIX509CertDB.deleteCertificate()`
+(same as the shutdown path -- see "How it decides what to delete" above), which means it still hits
+the same Gecko-layer staleness described above: opening a compose window while a duplicate exists
+**breaks decryption of other messages in the list** for as long as that compose window (or the rest
+of that session, if you don't send) is open. Confirmed recovery path: sending the message you were
+composing restores decryption immediately, presumably because a real send exercises the same
+resolve-decryption-candidate code path that got stuck. Whether closing the compose window *without*
+sending also recovers it is not yet confirmed. Extensive attempts to avoid the breakage altogether
+-- targeted lookups instead of a full listing, avoiding file/SQL access, PKCS#11 module
+reload/token logout, and even synthesizing a real sign+encrypt operation through
+`nsIMsgComposeSecure` before deleting -- were all tried and none prevented it; see the git history
+of the `experiment/cert-cleanup-mid-session` branch for the full investigation.
+
+This is an accepted tradeoff, not an oversight: fixing signing right before it's needed, at the
+cost of a self-recovering decryption glitch during that same compose session, was judged better
+than leaving signing silently broken until the next full restart. The shutdown trigger stays in
+place alongside it (in case a compose window is never opened before the next quit, or the
+compose-time trigger's own dedup finds nothing to do yet).
 
 ## Building from source
 
@@ -183,9 +206,10 @@ Produces `dist/cert-cleanup.xpi`. Requires `zip`.
 
 ## Notes
 
-- Runs once per Thunderbird shutdown (see "Why cleanup only runs at shutdown" above) -- not on
-  startup, not periodically. No notification on completion: by the time it runs, the user is
-  already quitting, so there's no one to usefully notify. Console logging
+- Runs once per Thunderbird shutdown, and once per compose window opened (see "Why cleanup runs at
+  shutdown and when composing" above) -- not on a timer, not otherwise periodically. No
+  notification on completion in either case: at shutdown there's no one left to usefully notify,
+  and at compose-open a popup would be more disruptive than useful. Console logging
   (`certCleanup: removed N stale certificate record(s)`) is the only visible signal, and only
   fires when it actually found and removed something.
 - `strict_min_version` in `manifest.json` is a conservative floor (128.0) -- lower or raise it to
