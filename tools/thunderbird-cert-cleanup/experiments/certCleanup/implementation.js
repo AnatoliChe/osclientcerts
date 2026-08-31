@@ -156,6 +156,86 @@ async function doCleanup() {
   return deleted;
 }
 
+// SIGN-CHECKBOX-TRIGGER BUILD, not for production. Tests a third trigger
+// point, after compose-window-open (v0.4.18) and compose.onBeforeSend
+// (v0.4.19): the Security > "Digitally Sign This Message" checkbox in the
+// compose window itself, toggled via the compose window's own global
+// function `toggleGlobalSignMessage()` (confirmed against comm-central's
+// mail/components/compose/content/MsgComposeCommands.js). Known reliability
+// caveats, accepted for this experiment: (1) never fires at all for an
+// identity with "always sign" as its default, since the checkbox starts
+// checked and the user never touches it; (2) fires whenever the user
+// happens to toggle it, which could be before or after Thunderbird's own
+// recipient-cert resolution -- unlike compose-window-open, timing here is
+// not guaranteed to be earlier than that resolution.
+//
+// Since `toggleGlobalSignMessage` is a plain global function in the compose
+// window's own JS scope (not a WebExtension-visible API), this hooks it
+// directly via window enumeration/monkey-patching from the privileged
+// Experiment side -- the same technique legacy XUL overlay add-ons used.
+function isComposeWindow(win) {
+  try {
+    return win.document.documentElement.getAttribute("windowtype") === "msgcompose";
+  } catch (e) {
+    return false;
+  }
+}
+
+function hookComposeWindow(win) {
+  if (win.__certCleanupSignHooked) {
+    return;
+  }
+  if (typeof win.toggleGlobalSignMessage !== "function") {
+    console.log(
+      "certCleanup SIGN-CHECKBOX-TRIGGER: toggleGlobalSignMessage not found on this compose window (wrong TB version, or UI changed?)"
+    );
+    return;
+  }
+  win.__certCleanupSignHooked = true;
+  const original = win.toggleGlobalSignMessage;
+  win.toggleGlobalSignMessage = function (...args) {
+    const result = original.apply(this, args);
+    console.log(
+      "certCleanup SIGN-CHECKBOX-TRIGGER: toggleGlobalSignMessage fired, gSendSigned now =" +
+        win.gSendSigned + " -- running cleanup"
+    );
+    doCleanup()
+      .then((deleted) => {
+        console.log(
+          `certCleanup SIGN-CHECKBOX-TRIGGER: done, ${deleted.length} deleted -- now try reading encrypted mail`
+        );
+      })
+      .catch((e) => {
+        Cu.reportError("certCleanup SIGN-CHECKBOX-TRIGGER: cleanup failed: " + e);
+      });
+    return result;
+  };
+  console.log("certCleanup SIGN-CHECKBOX-TRIGGER: hooked toggleGlobalSignMessage on compose window");
+}
+
+const composeWindowWatcher = {
+  onOpenWindow(xulWindow) {
+    const win = xulWindow.docShell.domWindow;
+    win.addEventListener(
+      "load",
+      function onLoad() {
+        win.removeEventListener("load", onLoad);
+        if (isComposeWindow(win)) {
+          hookComposeWindow(win);
+        }
+      },
+      { once: true }
+    );
+  },
+  onCloseWindow() {},
+};
+
+Services.wm.addListener(composeWindowWatcher);
+// Also hook any compose windows already open when the add-on loads/reloads.
+for (const win of Services.wm.getEnumerator("msgcompose")) {
+  hookComposeWindow(win);
+}
+
 const SHUTDOWN_BLOCKER_NAME =
   "certCleanup: remove stale cert9.db duplicates before quit";
 
@@ -218,6 +298,7 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
     // (and, worse, keep referencing this soon-to-be-stale script) across
     // the reload.
     AsyncShutdown.appShutdownConfirmed.removeBlocker(onQuitApplication);
+    Services.wm.removeListener(composeWindowWatcher);
     Services.obs.notifyObservers(null, "startupcache-invalidate", null);
   }
 };
