@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.9",
-  "description": "NO-OP CONTROL BUILD, not for production: does nothing at all except log a line 10 seconds after startup -- no getCerts(), no cert9.db access of any kind. Isolates whether merely loading this Experiment and running code at this point in startup is what breaks reading, independent of anything cert-related (0.4.8, touching cert9.db only via a read that found nothing, still broke it).",
+  "version": "0.4.10",
+  "description": "GETCERTS-ONLY CONTROL BUILD, not for production: calls nsIX509CertDB.getCerts() 10 seconds after startup and nothing else -- no cert9.db file access of any kind. Isolates whether getCerts() itself or the plain file read (0.4.8) is what broke reading (0.4.9, touching nothing at all, did not break it).",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",

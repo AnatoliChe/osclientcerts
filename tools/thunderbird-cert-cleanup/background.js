@@ -2,25 +2,32 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-// NO-OP EXPERIMENT BUILD, not for production. Logs a single line 10 seconds
-// after startup and does nothing else at all -- does not call
-// browser.certCleanup.cleanup(), does not touch cert9.db, does not touch
-// certificates in any way. See implementation.js for why this build exists.
+// GETCERTS-ONLY CONTROL BUILD, not for production. Calls
+// browser.certCleanup.cleanup() once, 10 seconds after startup; that
+// implementation.js function calls nsIX509CertDB.getCerts() and nothing
+// else -- no cert9.db file access at all. See implementation.js for why.
 
 const VERSION = browser.runtime.getManifest().version;
 const STARTUP_DELAY_MS = 10000;
 
-console.log(`certCleanup v${VERSION} NO-OP: background page loaded`);
+console.log(`certCleanup v${VERSION} GETCERTS-ONLY: background page loaded`);
+
+async function runCleanup(reason) {
+  console.log(`certCleanup v${VERSION} GETCERTS-ONLY (${reason}): starting`);
+  try {
+    await browser.certCleanup.cleanup();
+  } catch (e) {
+    console.error(`certCleanup v${VERSION} GETCERTS-ONLY (${reason}): call failed`, e);
+    return;
+  }
+  console.log(`certCleanup v${VERSION} GETCERTS-ONLY (${reason}): done -- now try reading encrypted mail`);
+}
 
 browser.runtime.onStartup.addListener(() => {
-  console.log(`certCleanup v${VERSION} NO-OP: onStartup fired, will say hello in ${STARTUP_DELAY_MS}ms`);
-  setTimeout(() => {
-    console.log(`certCleanup v${VERSION} NO-OP: hello (startup+10s) -- nothing else was touched`);
-  }, STARTUP_DELAY_MS);
+  console.log(`certCleanup v${VERSION} GETCERTS-ONLY: onStartup fired, scheduling in ${STARTUP_DELAY_MS}ms`);
+  setTimeout(() => runCleanup("startup+10s"), STARTUP_DELAY_MS);
 });
 browser.runtime.onInstalled.addListener(() => {
-  console.log(`certCleanup v${VERSION} NO-OP: onInstalled fired, will say hello in ${STARTUP_DELAY_MS}ms`);
-  setTimeout(() => {
-    console.log(`certCleanup v${VERSION} NO-OP: hello (install+10s) -- nothing else was touched`);
-  }, STARTUP_DELAY_MS);
+  console.log(`certCleanup v${VERSION} GETCERTS-ONLY: onInstalled fired, scheduling in ${STARTUP_DELAY_MS}ms`);
+  setTimeout(() => runCleanup("install+10s"), STARTUP_DELAY_MS);
 });

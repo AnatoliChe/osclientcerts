@@ -2,33 +2,47 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-// NO-OP EXPERIMENT BUILD (experiment/cert-cleanup-mid-session branch), not
-// for production. Absolute minimal control test: this Experiment does
-// nothing at all -- no cert9.db access, no getCerts(), no AsyncShutdown
-// blocker, nothing -- to isolate whether merely having this kind of
-// WebExtension Experiment loaded and running *any* code ~10s after startup
-// is enough to break reading encrypted mail, independent of anything
-// cert-related. Every previous build (including 0.4.8, which touched
-// cert9.db only via a plain read-only file read that found nothing) still
-// broke reading; this build exists to find out whether it's specifically
-// our cert-related code at fault, or something else entirely coinciding
-// with this extension's presence/timing.
+// GETCERTS-ONLY CONTROL BUILD (experiment/cert-cleanup-mid-session branch),
+// not for production. Calls nsIX509CertDB.getCerts() and filters for our
+// live certs -- nothing else. No cert9.db file access of any kind (no
+// Sqlite.sys.mjs, no nsIFileInputStream, nothing). 0.4.9 (touches nothing
+// cert-related at all) did NOT break reading; 0.4.8 (getCerts() + a plain
+// read-only file read that found nothing) DID break reading. This build
+// isolates which half of that is responsible: getCerts() itself, or the
+// file read.
 
 const { ExtensionCommon } = ChromeUtils.importESModule(
   "resource://gre/modules/ExtensionCommon.sys.mjs"
 );
 
-console.log("certCleanup: implementation.js loaded (no-op build)");
+const OS_CLIENT_CERTS_TOKEN_NAME = "OS Client Cert Token";
+
+console.log("certCleanup: implementation.js loaded (getCerts-only build)");
+
+async function doCleanup() {
+  console.log("certCleanup: doCleanup starting (getCerts-only, no file access)");
+  const certDB = Cc["@mozilla.org/security/x509certdb;1"].getService(
+    Ci.nsIX509CertDB
+  );
+
+  const certs = certDB.getCerts();
+  const liveCerts = certs.filter(
+    (cert) => (cert.tokenName || "").trim() === OS_CLIENT_CERTS_TOKEN_NAME
+  );
+  console.log(
+    "certCleanup: getCerts() returned " + certs.length +
+      " total, " + liveCerts.length + " on token '" +
+      OS_CLIENT_CERTS_TOKEN_NAME + "'"
+  );
+  console.log("certCleanup: doCleanup finished -- no file access attempted");
+  return [];
+}
 
 var certCleanup = class extends ExtensionCommon.ExtensionAPI {
   getAPI(context) {
     return {
       certCleanup: {
-        // No-op: intentionally does nothing. background.js does not call
-        // this at all in this build -- see its own top-level comment.
-        async cleanup() {
-          return [];
-        },
+        cleanup: doCleanup,
       },
     };
   }
