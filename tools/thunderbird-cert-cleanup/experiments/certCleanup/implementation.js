@@ -31,8 +31,9 @@ const CKO_CERTIFICATE_BYTES = new Uint8Array([0, 0, 0, 1]);
 
 // Runs the actual detect-and-delete pass. See the long comment inline below
 // for why detection reads cert9.db directly but deletion goes through
-// nsIX509CertDB, and why this whole pass is only ever run at shutdown -- not
-// periodically during the session -- as of 0.4.0.
+// nsIX509CertDB, and README.md ("Why cleanup runs at shutdown and on a
+// failed send") for why this only ever runs at those two points and never
+// periodically during the session.
 async function doCleanup() {
   const certDB = Cc["@mozilla.org/security/x509certdb;1"].getService(
     Ci.nsIX509CertDB
@@ -112,20 +113,19 @@ async function doCleanup() {
       // without even a preceding C_OpenSession, meaning Gecko had stopped
       // calling into the module at all -- independently reproduced as safe
       // at the raw NSS/softoken level via a from-source NSS build, so the
-      // stale state lives above NSS, not in it). That's *why* this whole
-      // pass now only ever runs at shutdown (see AsyncShutdown blocker
-      // below): whatever goes stale doesn't matter if the process is about
-      // to exit anyway, and the next session starts with a clean read of
-      // the already-fixed file. constructX509() builds a transient,
-      // in-memory certificate object from the duplicate's DER (not tied to
-      // any token/slot), and deleteCertificate() on that object resolves
-      // and removes the matching persisted record through NSS's own
-      // softoken code path (PK11_DeleteTokenCertAndKey /
-      // SEC_DeletePermCertificate -- confirmed against
-      // nsNSSCertificateDB::DeleteCertificate), the same path "Delete or
-      // Distrust" in Certificate Manager uses. If that resolution ever
-      // targeted our *live* token object instead of the cert9.db
-      // duplicate, the call would simply fail rather than corrupt
+      // stale state lives above NSS, not in it). That's *why* this only
+      // runs at shutdown or on a failed send, each followed by something
+      // that resets it (process exit, or the auto-retried send -- see
+      // README.md), rather than at arbitrary points during the session.
+      // constructX509() builds a transient, in-memory certificate object
+      // from the duplicate's DER (not tied to any token/slot), and
+      // deleteCertificate() on that object resolves and removes the
+      // matching persisted record through NSS's own softoken code path
+      // (PK11_DeleteTokenCertAndKey / SEC_DeletePermCertificate --
+      // confirmed against nsNSSCertificateDB::DeleteCertificate), the same
+      // path "Delete or Distrust" in Certificate Manager uses. If that
+      // resolution ever targeted our *live* token object instead of the
+      // cert9.db duplicate, the call would simply fail rather than corrupt
       // anything: osclientcerts' own C_DestroyObject is an unconditional
       // CKR_FUNCTION_NOT_SUPPORTED stub (see src/lib.rs), so an attempt to
       // destroy anything on our external token is a safe no-op.
@@ -156,6 +156,226 @@ async function doCleanup() {
   return deleted;
 }
 
+// The second cleanup trigger, alongside shutdown (see registerShutdownBlocker
+// below): a failed send. See README.md ("Why cleanup runs at shutdown and on
+// a failed send") for the full investigation this design is based on; in
+// short:
+//
+// - Removing the duplicate mid-session (which is what a failed send's
+//   underlying cause requires fixing) breaks S/MIME decryption of other
+//   messages in the folder pane for the rest of the session -- confirmed
+//   extensively; see the long comment in doCleanup() above.
+// - That breakage self-heals the moment a real send completes -- but only
+//   if the retry happens *before* anything tries to read a message in the
+//   meantime. Production testing (three-scenario comparison) confirmed: an
+//   immediate retry after cleanup leaves reading intact; reading a message
+//   first, then retrying, does not recover it.
+// - So cleanup on a failed send is paired with an automatic, immediate
+//   retry of that same send, before the user gets a chance to go read
+//   anything in between -- which also means the user doesn't have to
+//   notice a signing failure, dismiss a dialog, and manually resend; the
+//   whole recovery happens on its own.
+//
+// Detecting the failure at all needs to bypass browser.compose.onAfterSend:
+// that event structurally cannot see this failure. comm-central's
+// MsgComposeCommands.js (CompleteGenericSendMessage) returns from its catch
+// block on a send failure *before* ever reaching the
+// window.dispatchEvent(new CustomEvent("aftersend")) call onAfterSend is
+// built on. Instead, this hooks the same layer Thunderbird's own compose
+// window code uses to observe its own send outcome:
+// nsIMsgComposeStateListener (nsIMsgCompose.idl), registered via
+// gMsgCompose.RegisterStateListener() -- the exact same public API
+// MsgComposeCommands.js registers its own listener through.
+// ComposeProcessDone(aResult) fires with the actual nsresult of the
+// compose/send process (NS_OK on success, the real failure code otherwise,
+// including a finishCryptoEncapsulation failure), driven by nsMsgCompose's
+// own internal completion notification rather than the JS-level try/catch
+// that swallows the exception in CompleteGenericSendMessage.
+//
+// Two more pieces needed for a clean automatic retry:
+//   1. The failure also pops a modal "couldn't send" alert
+//      (MessageSend.sys.mjs's sendReport.displayReport(), a
+//      Services.prompt.alert() call) that blocks further interaction with
+//      the compose window until dismissed. Auto-closed via the same
+//      domwindowopened observer already used to find compose windows,
+//      matched by the dialog's stable id (commonDialogWindow) and its
+//      .opener being a compose window we're tracking (Services.ww.openWindow
+//      sets .opener to the parentWindow argument -- confirmed against
+//      toolkit/components/prompts/src/Prompter.sys.mjs).
+//   2. GenericSendMessage(msgType)'s msgType isn't included in
+//      ComposeProcessDone's own callback, so it's recorded separately by
+//      lightly wrapping GenericSendMessage (recording the argument only,
+//      not changing its behavior) whenever the user (or our own retry)
+//      calls it, so the retry can use the same send mode (Now/Later/
+//      Background) the user originally chose.
+const hookedComposeWindows = new Set();
+
+function isComposeWindow(win) {
+  return win.document.documentElement.getAttribute("windowtype") === "msgcompose";
+}
+
+function isCommonDialogFrom(win, composeWindows) {
+  try {
+    return (
+      win.document.documentElement.id === "commonDialogWindow" &&
+      composeWindows.has(win.opener)
+    );
+  } catch (e) {
+    return false;
+  }
+}
+
+function onComposeProcessDone(win, aResult) {
+  if (aResult === 0) {
+    // NS_OK. Not using Cr.NS_OK to avoid depending on whether Cr
+    // (Components.results) is available as a predefined global here the
+    // same way Cc/Ci/Cu are -- NS_OK's value (0) is stable across all of
+    // Gecko and won't change.
+    win.__certCleanupRetrying = false;
+    return;
+  }
+  if (win.__certCleanupRetrying) {
+    // This is the retry's own failure -- don't retry a retry, that's an
+    // infinite loop waiting to happen if the real problem is something
+    // cleanup can't fix.
+    console.error(
+      `certCleanup: retry also failed (0x${(aResult >>> 0).toString(16)}), giving up`
+    );
+    win.__certCleanupRetrying = false;
+    return;
+  }
+  win.__certCleanupRetrying = true;
+  console.log(
+    `certCleanup: send failed (0x${(aResult >>> 0).toString(16)}), running cleanup`
+  );
+  doCleanup()
+    .then((deleted) => {
+      if (deleted.length > 0) {
+        console.log(
+          `certCleanup (on-send-failure): removed ${deleted.length} stale certificate record(s), retrying send`,
+          deleted
+        );
+      } else {
+        console.log("certCleanup: nothing to clean up, retrying send anyway");
+      }
+      const msgType = win.__certCleanupLastMsgType ?? Ci.nsIMsgCompDeliverMode.Now;
+      return win.GenericSendMessage(msgType);
+    })
+    .catch((e) => {
+      win.__certCleanupRetrying = false;
+      Cu.reportError("certCleanup: cleanup/retry after a failed send failed: " + e);
+    });
+}
+
+// win.gMsgCompose isn't necessarily ready by the window's "load" event --
+// confirmed in production testing: RegisterStateListener was unavailable at
+// that point, meaning gMsgCompose's own async setup hadn't finished yet.
+// Polled instead of guessing a more specific ready signal to hook: up to
+// 5 seconds, every 100ms, which comfortably covers real-world compose
+// window startup and fails loudly (one clear log line) if it never shows up.
+const GMSGCOMPOSE_POLL_INTERVAL_MS = 100;
+const GMSGCOMPOSE_POLL_MAX_ATTEMPTS = 50;
+
+function registerStateListener(win) {
+  // All four nsIMsgComposeStateListener methods must exist as callable
+  // functions even though only ComposeProcessDone matters here: this is a
+  // [scriptable] XPCOM interface, and Thunderbird's C++ side may call any
+  // of them without checking first.
+  win.gMsgCompose.RegisterStateListener({
+    NotifyComposeFieldsReady() {},
+    ComposeProcessDone(aResult) {
+      onComposeProcessDone(win, aResult);
+    },
+    SaveInFolderDone(folderName) {},
+    NotifyComposeBodyReady() {},
+  });
+}
+
+function wrapGenericSendMessage(win) {
+  if (typeof win.GenericSendMessage !== "function") {
+    Cu.reportError(
+      "certCleanup: GenericSendMessage not found on this compose window, can't track/retry send mode"
+    );
+    return;
+  }
+  const original = win.GenericSendMessage;
+  win.GenericSendMessage = function (msgType, ...rest) {
+    win.__certCleanupLastMsgType = msgType;
+    return original.call(this, msgType, ...rest);
+  };
+}
+
+function hookComposeWindow(win) {
+  if (win.__certCleanupHooked) {
+    return;
+  }
+  win.__certCleanupHooked = true;
+  hookedComposeWindows.add(win);
+  win.addEventListener("unload", () => hookedComposeWindows.delete(win), { once: true });
+  wrapGenericSendMessage(win);
+  let attemptsLeft = GMSGCOMPOSE_POLL_MAX_ATTEMPTS;
+  const tryRegister = () => {
+    if (win.gMsgCompose && typeof win.gMsgCompose.RegisterStateListener === "function") {
+      registerStateListener(win);
+      return;
+    }
+    attemptsLeft -= 1;
+    if (attemptsLeft <= 0) {
+      Cu.reportError(
+        "certCleanup: gMsgCompose.RegisterStateListener never became available on a compose window"
+      );
+      return;
+    }
+    win.setTimeout(tryRegister, GMSGCOMPOSE_POLL_INTERVAL_MS);
+  };
+  tryRegister();
+}
+
+function onWindowOpened(win) {
+  win.addEventListener(
+    "load",
+    function onLoad() {
+      win.removeEventListener("load", onLoad);
+      if (isComposeWindow(win)) {
+        hookComposeWindow(win);
+        return;
+      }
+      if (isCommonDialogFrom(win, hookedComposeWindows)) {
+        win.close();
+      }
+    },
+    { once: true }
+  );
+}
+
+const domWindowOpenedObserver = {
+  observe(subject, topic) {
+    if (topic === "domwindowopened") {
+      // "domwindowopened"'s subject is already the raw Window object in JS.
+      onWindowOpened(subject);
+    }
+  },
+};
+
+// Registers the failed-send hook for every current and future compose
+// window, and the earliest well-known Gecko shutdown phase (ShutdownPhase::
+// AppShutdownConfirmed, topic "quit-application"). Called once from
+// getAPI() below (see the comment there for why module-level top-level
+// code isn't the right place for this), guarded so a second getAPI() call
+// for another context can't register everything twice.
+let initialized = false;
+function initialize() {
+  if (initialized) {
+    return;
+  }
+  initialized = true;
+  registerShutdownBlocker();
+  Services.obs.addObserver(domWindowOpenedObserver, "domwindowopened");
+  for (const win of Services.wm.getEnumerator("msgcompose")) {
+    hookComposeWindow(win);
+  }
+}
+
 const SHUTDOWN_BLOCKER_NAME =
   "certCleanup: remove stale cert9.db duplicates before quit";
 
@@ -174,28 +394,41 @@ async function onQuitApplication() {
   }
 }
 
-// The earliest well-known Gecko shutdown phase (ShutdownPhase::
-// AppShutdownConfirmed, topic "quit-application"), registered once when this
-// script first loads (module-level code in an Experiment script runs once
-// per load of the extension, independent of how many times getAPI() is
-// called for background-page contexts). Blocking here, rather than doing a
-// fire-and-forget cleanup, guarantees our async cert9.db work finishes
-// before Thunderbird tears down further -- see the long comment in
-// doCleanup() for why shutdown, and not any point during the session, is
-// where this needs to run.
-AsyncShutdown.appShutdownConfirmed.addBlocker(
-  SHUTDOWN_BLOCKER_NAME,
-  onQuitApplication
-);
+// Registers the earliest well-known Gecko shutdown phase (ShutdownPhase::
+// AppShutdownConfirmed, topic "quit-application"). Blocking here, rather
+// than doing a fire-and-forget cleanup, guarantees our async cert9.db work
+// finishes before Thunderbird tears down further -- see the long comment in
+// doCleanup() for why shutdown is one of the two points this needs to run.
+function registerShutdownBlocker() {
+  AsyncShutdown.appShutdownConfirmed.addBlocker(
+    SHUTDOWN_BLOCKER_NAME,
+    onQuitApplication
+  );
+}
 
 var certCleanup = class extends ExtensionCommon.ExtensionAPI {
+  // getAPI() is Thunderbird's documented entry point for a privileged
+  // Experiment to become available to a WebExtension context -- unlike bare
+  // module-level top-level code, it's guaranteed to run as soon as the
+  // add-on actually needs this API, which is the right place for one-time
+  // setup like the listeners above (module-level code is unreliable here:
+  // Experiment "parent" scripts can be loaded lazily on first real API
+  // access rather than eagerly with the add-on, so with no WebExtension-side
+  // code touching this API at all, nothing would trigger the script to load
+  // in the first place -- see background.js's activate() call).
   getAPI(context) {
+    initialize();
     return {
       certCleanup: {
+        // Called once by background.js at startup. By the time this
+        // resolves, getAPI() above has already run initialize() -- see
+        // schema.json for why background.js needs to make this call at all
+        // rather than relying on getAPI() running on its own.
+        activate: async () => {},
         // Exposed for manual/on-demand use (e.g. from the Browser Console
-        // while testing), but background.js does not call this on any
-        // schedule -- see onQuitApplication above for the only place
-        // cleanup actually runs in normal use.
+        // while testing), but not called from background.js on any
+        // schedule -- see onComposeProcessDone above and onQuitApplication
+        // below for the only two places cleanup actually runs.
         cleanup: doCleanup,
       },
     };
@@ -214,10 +447,11 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
       return;
     }
     // The extension is being disabled/reloaded/uninstalled -- not app
-    // shutdown -- so the blocker registered above would otherwise leak
-    // (and, worse, keep referencing this soon-to-be-stale script) across
-    // the reload.
+    // shutdown -- so anything registered in initialize() above would
+    // otherwise leak (and, worse, keep referencing this soon-to-be-stale
+    // script) across the reload.
     AsyncShutdown.appShutdownConfirmed.removeBlocker(onQuitApplication);
+    Services.obs.removeObserver(domWindowOpenedObserver, "domwindowopened");
     Services.obs.notifyObservers(null, "startupcache-invalidate", null);
   }
 };

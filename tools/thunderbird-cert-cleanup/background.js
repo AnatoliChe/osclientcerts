@@ -2,34 +2,22 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-// Cleanup runs from two places: the AsyncShutdown.appShutdownConfirmed
-// blocker in experiments/certCleanup/implementation.js (registered at module
-// load, independent of this file), and the windows.onCreated listener below.
-// See "Why cleanup runs at shutdown and when composing" in README.md for why
-// both exist and the trade-off the compose-time trigger accepts.
+// Cleanup runs from two places, both in the privileged Experiment side (see
+// experiments/certCleanup/implementation.js): the
+// AsyncShutdown.appShutdownConfirmed blocker, and an nsIMsgComposeStateListener
+// on each compose window that reacts to a failed send (cleans up, then
+// automatically retries). See README.md ("Why cleanup runs at shutdown and
+// on a failed send") for why.
+//
+// certCleanup.activate() is called once at startup purely to guarantee
+// getAPI() has actually run: Thunderbird can load an Experiment's parent
+// script lazily, on first access to its API, rather than eagerly with the
+// add-on, and this file otherwise never touches the API at all -- without
+// this call, implementation.js's setup would silently never run.
+
 const VERSION = browser.runtime.getManifest().version;
 console.log(`certCleanup v${VERSION}: background page loaded`);
 
-// A standalone compose window has Window.type === "messageCompose" (added in
-// Thunderbird 70) -- this fires for new messages, replies, and forwards
-// alike, as soon as the window is created, which is the earliest signal a
-// WebExtension has for "the user is about to compose a message" (the
-// `compose` namespace itself has no window-opened event of its own).
-browser.windows.onCreated.addListener(async (window) => {
-  if (window.type !== "messageCompose") {
-    return;
-  }
-  let deleted;
-  try {
-    deleted = await browser.certCleanup.cleanup();
-  } catch (e) {
-    console.error(`certCleanup v${VERSION}: cleanup on compose-window-open failed`, e);
-    return;
-  }
-  if (deleted.length > 0) {
-    console.log(
-      `certCleanup v${VERSION} (compose-window-open): removed ${deleted.length} stale certificate record(s)`,
-      deleted
-    );
-  }
+browser.certCleanup.activate().catch((e) => {
+  console.error(`certCleanup v${VERSION}: activate() failed`, e);
 });

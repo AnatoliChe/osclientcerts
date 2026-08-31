@@ -3,6 +3,13 @@
     "namespace": "certCleanup",
     "functions": [
       {
+        "name": "activate",
+        "type": "function",
+        "async": true,
+        "description": "Ensures this Experiment's privileged parent script has loaded and its listeners (the failed-send hook, the shutdown blocker) are registered. Thunderbird can load an Experiment's parent script lazily, on first access to its API from a WebExtension context, rather than eagerly with the add-on -- since this Experiment's real job is registering listeners for side effects rather than answering calls, nothing would otherwise ever touch the API to trigger that load. background.js calls this once at startup for exactly that reason; it has no effect beyond guaranteeing getAPI() has run.",
+        "parameters": []
+      },
+      {
         "name": "cleanup",
         "type": "function",
         "async": true,

@@ -203,8 +203,9 @@ to `cert9.db` and has no way to prevent NSS from caching what it sees.
 Recommended fix: install
 [`tools/thunderbird-cert-cleanup/`](../tools/thunderbird-cert-cleanup), a small internal
 Thunderbird add-on that finds and removes exactly this stale duplicate automatically (at
-Thunderbird shutdown, and again whenever a compose window opens), so signing self-heals before
-anyone notices it broke. It does *not* go
+Thunderbird shutdown, and again -- automatically retrying the send -- the moment a signing
+failure actually happens), so signing self-heals before anyone notices it broke for long. It does
+*not* go
 through the "Delete or Distrust" UI/API -- `nsIX509CertDB.getCerts()` (the only cert-listing API
 exposed to a Thunderbird add-on) silently deduplicates a cert9.db row with the live token object
 representing the same certificate, so it never even shows the duplicate as a separate entry while

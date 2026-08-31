@@ -13,11 +13,11 @@ time"](../../DEBUGGING.md#signing-works-then-silently-stops-after-some-time-outg
 `DEBUGGING.md` for the full investigation.
 
 This add-on finds and removes exactly that stale copy automatically -- **at Thunderbird shutdown,
-and again as soon as a compose window opens** (new message, reply, or forward) -- without ever
-touching any other certificate (correspondents' certificates NSS legitimately caches while
-verifying their signatures are left alone; see "How it decides what to delete" below for exactly
-why that's safe, and "Why cleanup runs at shutdown and when composing" for why it runs at those two
-moments specifically, and what it costs to run at the second one).
+and again, automatically, the moment a send actually fails because of it** (then retries the send)
+-- without ever touching any other certificate (correspondents' certificates NSS legitimately
+caches while verifying their signatures are left alone; see "How it decides what to delete" below
+for exactly why that's safe, and "Why cleanup runs at shutdown and on a failed send" for why it
+runs at those two moments specifically, and what it costs to run at the second one).
 
 ## Installing
 
@@ -29,15 +29,14 @@ moments specifically, and what it costs to run at the second one).
 2. In Thunderbird: `Ctrl+Shift+A` (Add-ons and Themes) → gear icon ⚙ → **Debug Add-ons**.
 3. **Load Temporary Add-on...** → select the downloaded `.xpi`.
 
-It only actually removes anything at shutdown or when a compose window opens (see "Why cleanup runs
-at shutdown and when composing" below), so to see it act: open the Browser Console *first*
+It only actually removes anything at shutdown or right after a signing failure (see "Why cleanup
+runs at shutdown and on a failed send" below), so to see it act: open the Browser Console *first*
 (`Ctrl+Shift+J` -- a separate window from the per-addon "Inspect" console, which won't show this
-add-on's privileged-side logging), load the add-on, then either open a compose window (reply,
-forward, or new message) or quit Thunderbird normally. The shutdown blocker this add-on registers
-runs early enough in Gecko's shutdown sequence (`quit-application`, before windows close) that
-`certCleanup:` lines still show up in that open console window as the quit proceeds. A temporary
-add-on disappears on the next restart -- use this only to verify it works before deploying it for
-real, below.
+add-on's privileged-side logging), load the add-on, then either quit Thunderbird normally or
+reproduce a signing failure. The shutdown blocker this add-on registers runs early enough in
+Gecko's shutdown sequence (`quit-application`, before windows close) that `certCleanup:` lines
+still show up in that open console window as the quit proceeds. A temporary add-on disappears on
+the next restart -- use this only to verify it works before deploying it for real, below.
 
 ### Real deployment (Enterprise Policy, persists, auto-updates)
 
@@ -52,7 +51,7 @@ directory under `distribution\` (e.g. `C:\Program Files\Thunderbird\distribution
     "ExtensionSettings": {
       "cert-cleanup@osclientcerts.dev": {
         "installation_mode": "force_installed",
-        "install_url": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.5.0/cert-cleanup.xpi"
+        "install_url": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.6.0/cert-cleanup.xpi"
       }
     }
   }
@@ -138,7 +137,7 @@ duplicate, the call would simply fail rather than corrupt anything: osclientcert
 `C_DestroyObject` is an unconditional `CKR_FUNCTION_NOT_SUPPORTED` stub, so an attempt to destroy
 anything on our external token is a safe no-op.
 
-## Why cleanup runs at shutdown and when composing
+## Why cleanup runs at shutdown and on a failed send
 
 0.2.x and 0.3.x ran this pass periodically during the session (on startup, then every 30 minutes).
 **Both the raw-SQL delete (through 0.2.2) and the official `nsIX509CertDB.deleteCertificate()` path
@@ -150,51 +149,71 @@ calling into the module for that operation entirely, rather than the module itse
 wasn't a timing issue (a startup delay in 0.2.2 didn't help; the break still happened, just later,
 at whatever point the delayed run actually deleted something) and it wasn't specific to the digest
 algorithm of the message being read (reproduced with both SHA-1- and SHA-256-signed test messages).
-
-It also isn't reproducible at the raw NSS/softoken/libsmime level: a from-source NSS build,
-exercised directly via a small C harness that holds an `NSS_InitReadWrite` session open across an
-external modification to the same `cert9.db` (mirroring what a second `Sqlite.sys.mjs` connection
-or an external `certutil -D` does), survives every combination tried -- raw SQL delete, official
-`certutil -D`, from a fresh process or an already-open one, checking both plain `PK11`
-cert/key lookup and a real `NSS_CMSDecoder` envelope decrypt. All of it kept working. So whatever
-goes stale lives in Gecko's C++ layer above NSS (the mail/PSM code that resolves a decryption
-candidate for a specific message), not in NSS itself, and not in anything this add-on does
-directly -- which also means it's not something this add-on can safely work around by changing
-*how* it deletes, only *when*.
+It also isn't reproducible at the raw NSS/softoken/libsmime level (a from-source NSS build survives
+every deletion mechanism tried, checking both plain `PK11` cert/key lookup and a real
+`NSS_CMSDecoder` envelope decrypt), so whatever goes stale lives in Gecko's C++ layer above NSS (the
+mail/PSM code that resolves a decryption candidate for a specific message), not in NSS itself and
+not in anything this add-on does directly -- which means it's not something this add-on can safely
+work around by changing *how* it deletes, only *when*.
 
 0.4.0's fix was architectural: **only clean up at shutdown.** Whatever goes stale in Gecko's cache
-doesn't matter if the process exits shortly after -- there's no more of that session left for it to
-affect -- and the next launch does a completely fresh `NSS_Init` that simply reads the
-already-cleaned file from disk. This is implemented as an `AsyncShutdown.appShutdownConfirmed`
-blocker (topic `quit-application`, the earliest well-known Gecko shutdown phase, registered once
-when the Experiment script loads) rather than a `browser.alarms` timer -- see
-`experiments/certCleanup/implementation.js`. A blocker, rather than a fire-and-forget observer
-callback, is what guarantees the async `cert9.db` work actually finishes before Thunderbird tears
-down further. Its one downside: on a machine that's rarely fully quit (put to sleep, or Thunderbird
-left running for days), the duplicate -- and the outgoing-signing bug it causes -- can persist for
-that whole stretch.
+doesn't matter if the process exits shortly after, and the next launch does a completely fresh
+`NSS_Init` that simply reads the already-cleaned file from disk. Implemented as an
+`AsyncShutdown.appShutdownConfirmed` blocker (topic `quit-application`, the earliest well-known
+Gecko shutdown phase) -- a blocker, rather than a fire-and-forget observer callback, is what
+guarantees the async `cert9.db` work actually finishes before Thunderbird tears down further. Its
+one downside: on a machine that's rarely fully quit, the duplicate -- and the outgoing-signing bug
+it causes -- can persist for that whole stretch. 0.5.0 tried adding a second, *proactive* trigger
+(cleanup on every compose-window-open, or in later experiments every send), on the reasoning that
+fixing signing right before it's needed was worth a temporary decryption glitch during that same
+compose session. In practice this ran cleanup -- and so risked the decryption glitch -- on every
+single compose window or send, whether or not a duplicate actually existed (`getCerts()` alone,
+with nothing to find or delete, is sufficient to trigger the glitch). And triggers placed adjacent
+to the send itself (`browser.compose.onBeforeSend`; a capturing `command` event on the Send button)
+made it *worse*, not better: the decryption glitch stopped self-healing on that same send and
+instead needed a full restart, apparently because there was no longer any normal Thunderbird
+activity (typing a recipient, etc.) happening *between* the disruptive delete and the recovering
+send to let Gecko re-resolve things cleanly in between. See the git history of the
+`experiment/cert-cleanup-mid-session` branch for the full trigger-placement investigation.
 
-**0.5.0 adds a second trigger**, in `background.js`: `browser.windows.onCreated`, filtered to
-`window.type === "messageCompose"`, runs the same cleanup as soon as any compose window opens (new
-message, reply, or forward) -- i.e. right before the moment signing would actually matter, rather
-than waiting for the next full restart. This still goes through `nsIX509CertDB.deleteCertificate()`
-(same as the shutdown path -- see "How it decides what to delete" above), which means it still hits
-the same Gecko-layer staleness described above: opening a compose window while a duplicate exists
-**breaks decryption of other messages in the list** for as long as that compose window (or the rest
-of that session, if you don't send) is open. Confirmed recovery path: sending the message you were
-composing restores decryption immediately, presumably because a real send exercises the same
-resolve-decryption-candidate code path that got stuck. Whether closing the compose window *without*
-sending also recovers it is not yet confirmed. Extensive attempts to avoid the breakage altogether
--- targeted lookups instead of a full listing, avoiding file/SQL access, PKCS#11 module
-reload/token logout, and even synthesizing a real sign+encrypt operation through
-`nsIMsgComposeSecure` before deleting -- were all tried and none prevented it; see the git history
-of the `experiment/cert-cleanup-mid-session` branch for the full investigation.
+**0.6.0 replaces the proactive trigger with a reactive one: clean up only when a send has actually
+just failed because of this bug, then automatically retry that same send.** This cuts how often the
+known decryption glitch can happen at all -- down from every compose window/send to only the
+(presumably rare) occasions the underlying duplicate has actually just caused a visible failure --
+and, just as importantly, the automatic retry happens *before* the user has a chance to go read any
+mail in between, which production testing confirmed is what makes the difference between the
+glitch self-healing on that same send (nobody ever observes it) versus needing a restart (reading a
+message from the now-broken state, *then* retrying the send, does not recover it).
 
-This is an accepted tradeoff, not an oversight: fixing signing right before it's needed, at the
-cost of a self-recovering decryption glitch during that same compose session, was judged better
-than leaving signing silently broken until the next full restart. The shutdown trigger stays in
-place alongside it (in case a compose window is never opened before the next quit, or the
-compose-time trigger's own dedup finds nothing to do yet).
+Mechanically, in `experiments/certCleanup/implementation.js`:
+
+1. Detecting the failure at all needs to bypass `browser.compose.onAfterSend`: that WebExtension
+   event structurally cannot see this failure. comm-central's `MsgComposeCommands.js`
+   (`CompleteGenericSendMessage`) `return`s from its catch block on a send failure *before* ever
+   reaching the `window.dispatchEvent(new CustomEvent("aftersend"))` call `onAfterSend` is built
+   on. Instead, this hooks the same layer Thunderbird's own compose window code uses to observe its
+   own send outcome: `nsIMsgComposeStateListener` (`nsIMsgCompose.idl`), registered via
+   `gMsgCompose.RegisterStateListener()` -- the exact same public API `MsgComposeCommands.js`
+   registers its own listener through. `ComposeProcessDone(aResult)` fires with the actual
+   `nsresult` of the compose/send process, driven by `nsMsgCompose`'s own internal completion
+   notification rather than the JS-level `try`/`catch` that swallows the exception.
+2. The failure also pops a modal "couldn't send" alert (`MessageSend.sys.mjs`'s
+   `sendReport.displayReport()`, a `Services.prompt.alert()` call) that blocks further interaction
+   with the compose window until dismissed. Auto-closed via a `domwindowopened` observer, matched
+   by the dialog's stable id (`commonDialogWindow`) and its `.opener` being a compose window this
+   add-on is tracking (`Services.ww.openWindow()` sets `.opener` to the parent-window argument --
+   confirmed against `toolkit/components/prompts/src/Prompter.sys.mjs`).
+3. `GenericSendMessage(msgType)`'s `msgType` isn't included in `ComposeProcessDone`'s own callback,
+   so it's recorded separately by lightly wrapping `GenericSendMessage` (recording the argument
+   only, not changing its behavior) whenever the user, or this add-on's own retry, calls it -- so
+   the retry uses the same send mode (Now/Later/Background) the user originally chose.
+4. A `__certCleanupRetrying` guard on the compose window prevents retrying a retry: if the retried
+   send also fails, this add-on gives up and leaves the normal failure dialog for the user to deal
+   with, rather than looping.
+
+The shutdown trigger stays in place alongside this one, for whatever duplicate accumulates in a
+session where no send ever fails (or a send fails for an unrelated reason and the user never
+retries).
 
 ## Building from source
 
@@ -206,12 +225,12 @@ Produces `dist/cert-cleanup.xpi`. Requires `zip`.
 
 ## Notes
 
-- Runs once per Thunderbird shutdown, and once per compose window opened (see "Why cleanup runs at
-  shutdown and when composing" above) -- not on a timer, not otherwise periodically. No
-  notification on completion in either case: at shutdown there's no one left to usefully notify,
-  and at compose-open a popup would be more disruptive than useful. Console logging
-  (`certCleanup: removed N stale certificate record(s)`) is the only visible signal, and only
-  fires when it actually found and removed something.
+- Runs once per Thunderbird shutdown, and once per failed send (see "Why cleanup runs at shutdown
+  and on a failed send" above) -- not on a timer, not otherwise periodically. No notification on
+  completion in either case: at shutdown there's no one left to usefully notify, and on a failed
+  send the automatic retry (and its own success/failure) is the visible signal. Console logging
+  (`certCleanup: removed N stale certificate record(s)`) is there too, but only fires when it
+  actually found and removed something.
 - `strict_min_version` in `manifest.json` is a conservative floor (128.0) -- lower or raise it to
   match whatever Thunderbird version your org actually deploys.
 - This uses a [WebExtension
