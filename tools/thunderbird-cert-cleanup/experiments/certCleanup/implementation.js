@@ -127,6 +127,37 @@ async function synthesizeSignEncrypt(identity) {
   composeSecure.signFormat = "multipart";
   compFields.to = identity.email;
 
+  // Required, non-obvious step: BeginCryptoEncapsulation()'s own C++
+  // comment says the composer "should already have looked up and verified
+  // certificates... and should have used CacheValidCertForEmail" --
+  // MimeCryptoHackCerts() resolves each recipient's cert purely from this
+  // in-memory cache (GetCertDBKeyForEmail()), never doing a lookup itself.
+  // On a cache miss it returns NS_OK with an *empty* dbKey string (not a
+  // failure), which then gets passed straight to findCertByDBKey(""),
+  // which is what actually throws NS_ERROR_ILLEGAL_VALUE. A real compose
+  // window populates this cache as the user types each recipient
+  // (asyncFindCertByEmailAddr); we do the synchronous equivalent here since
+  // we already know our own encryption cert's dbkey and are addressing
+  // ourselves.
+  let encryptionDbKey;
+  try {
+    encryptionDbKey = identity.getCharAttribute("encryption_cert_dbkey");
+  } catch (e) {
+    encryptionDbKey = "";
+  }
+  if (encryptionDbKey) {
+    composeSecure.cacheValidCertForEmail(identity.email, encryptionDbKey);
+    console.log(
+      "certCleanup: synthesizeSignEncrypt: cached encryption cert for " +
+        identity.email
+    );
+  } else {
+    console.log(
+      "certCleanup: synthesizeSignEncrypt: no encryption_cert_dbkey for " +
+        identity.email + ", recipient cert lookup will likely fail"
+    );
+  }
+
   if (!composeSecure.requiresCryptoEncapsulation(identity, compFields)) {
     console.log(
       "certCleanup: synthesizeSignEncrypt: requiresCryptoEncapsulation() " +
