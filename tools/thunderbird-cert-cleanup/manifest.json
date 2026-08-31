@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.10",
-  "description": "GETCERTS-ONLY CONTROL BUILD, not for production: calls nsIX509CertDB.getCerts() 10 seconds after startup and nothing else -- no cert9.db file access of any kind. Isolates whether getCerts() itself or the plain file read (0.4.8) is what broke reading (0.4.9, touching nothing at all, did not break it).",
+  "version": "0.4.11",
+  "description": "GETCERTS-PLUS-LOGOUT CONTROL BUILD, not for production: calls nsIX509CertDB.getCerts() then nsIPK11Token.logoutAndDropAuthenticatedResources() on our token, 10 seconds after startup. Tests whether that recovers/avoids the reading breakage getCerts() alone caused in 0.4.10.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
