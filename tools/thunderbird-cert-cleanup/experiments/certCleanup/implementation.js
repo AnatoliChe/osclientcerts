@@ -181,29 +181,82 @@ async function doCleanup() {
 // JS-level try/catch that swallows the exception in
 // CompleteGenericSendMessage. No monkey-patching of internal functions
 // required.
+// Confirmed in production testing (three-scenario comparison on a real
+// profile): cleanup + an IMMEDIATE resend, before the user ever tries to
+// read anything in between, leaves reading intact -- the same
+// getCerts()-then-a-real-send healing pattern compose-window-open (v0.5.0)
+// relies on, just compressed into one automatic round trip. Trying to read
+// mail *before* resending is what exposes the broken window; resending
+// from an already-observed-broken state does not recover it (see this
+// branch's investigation notes). So: auto-retry the send once, immediately,
+// right after cleanup -- before the user gets a chance to go read anything.
+//
+// Two obstacles to a fully automatic retry, both handled below:
+//   1. The failure also pops a modal "couldn't send" alert
+//      (MessageSend.sys.mjs's sendReport.displayReport(), a
+//      Services.prompt.alert() call) that blocks further interaction with
+//      the compose window until dismissed. Auto-closed via the same
+//      domwindowopened observer already used to find compose windows,
+//      matched by the dialog's stable id (commonDialogWindow) and its
+//      .opener being a compose window we're tracking (Services.ww.openWindow
+//      sets .opener to the parentWindow argument -- confirmed against
+//      toolkit/components/prompts/src/Prompter.sys.mjs).
+//   2. GenericSendMessage(msgType)'s msgType isn't included in
+//      ComposeProcessDone's own callback, so it's recorded separately by
+//      lightly wrapping GenericSendMessage (recording the argument only,
+//      not changing its behavior) whenever the user (or our own retry)
+//      calls it.
+const hookedComposeWindows = new Set();
+
 function isComposeWindow(win) {
   return win.document.documentElement.getAttribute("windowtype") === "msgcompose";
 }
 
-function onComposeProcessDone(aResult) {
+function isCommonDialogFrom(win, composeWindows) {
+  try {
+    return (
+      win.document.documentElement.id === "commonDialogWindow" &&
+      composeWindows.has(win.opener)
+    );
+  } catch (e) {
+    return false;
+  }
+}
+
+function onComposeProcessDone(win, aResult) {
   if (aResult === 0) {
     // NS_OK. Not using Cr.NS_OK to avoid depending on whether Cr
     // (Components.results) is available as a predefined global here the
     // same way Cc/Ci/Cu are -- NS_OK's value (0) is stable across all of
     // Gecko and won't change.
+    win.__certCleanupRetrying = false;
     return;
   }
+  if (win.__certCleanupRetrying) {
+    // This is the retry's own failure -- don't retry a retry, that's an
+    // infinite loop waiting to happen if the real problem is something
+    // cleanup can't fix.
+    console.error(
+      `certCleanup ON-COMPOSE-ERROR-TRIGGER: retry also failed (0x${(aResult >>> 0).toString(16)}), giving up`
+    );
+    win.__certCleanupRetrying = false;
+    return;
+  }
+  win.__certCleanupRetrying = true;
   console.log(
     `certCleanup ON-COMPOSE-ERROR-TRIGGER: ComposeProcessDone failed (0x${(aResult >>> 0).toString(16)}), running cleanup`
   );
   doCleanup()
     .then((deleted) => {
       console.log(
-        `certCleanup ON-COMPOSE-ERROR-TRIGGER: done, ${deleted.length} deleted -- try resending, and check whether reading encrypted mail still works`
+        `certCleanup ON-COMPOSE-ERROR-TRIGGER: done, ${deleted.length} deleted -- retrying send`
       );
+      const msgType = win.__certCleanupLastMsgType ?? Ci.nsIMsgCompDeliverMode.Now;
+      return win.GenericSendMessage(msgType);
     })
     .catch((e) => {
-      Cu.reportError("certCleanup ON-COMPOSE-ERROR-TRIGGER: cleanup failed: " + e);
+      win.__certCleanupRetrying = false;
+      Cu.reportError("certCleanup ON-COMPOSE-ERROR-TRIGGER: cleanup/retry failed: " + e);
     });
 }
 
@@ -224,7 +277,7 @@ function registerStateListener(win) {
   win.gMsgCompose.RegisterStateListener({
     NotifyComposeFieldsReady() {},
     ComposeProcessDone(aResult) {
-      onComposeProcessDone(aResult);
+      onComposeProcessDone(win, aResult);
     },
     SaveInFolderDone(folderName) {},
     NotifyComposeBodyReady() {},
@@ -232,11 +285,28 @@ function registerStateListener(win) {
   console.log("certCleanup ON-COMPOSE-ERROR-TRIGGER: registered nsIMsgComposeStateListener");
 }
 
+function wrapGenericSendMessage(win) {
+  if (typeof win.GenericSendMessage !== "function") {
+    console.error(
+      "certCleanup ON-COMPOSE-ERROR-TRIGGER: GenericSendMessage not found on this compose window, can't track/retry send mode"
+    );
+    return;
+  }
+  const original = win.GenericSendMessage;
+  win.GenericSendMessage = function (msgType, ...rest) {
+    win.__certCleanupLastMsgType = msgType;
+    return original.call(this, msgType, ...rest);
+  };
+}
+
 function hookComposeWindow(win) {
   if (win.__certCleanupHooked) {
     return;
   }
   win.__certCleanupHooked = true;
+  hookedComposeWindows.add(win);
+  win.addEventListener("unload", () => hookedComposeWindows.delete(win), { once: true });
+  wrapGenericSendMessage(win);
   let attemptsLeft = GMSGCOMPOSE_POLL_MAX_ATTEMPTS;
   const tryRegister = () => {
     if (win.gMsgCompose && typeof win.gMsgCompose.RegisterStateListener === "function") {
@@ -262,6 +332,13 @@ function onWindowOpened(win) {
       win.removeEventListener("load", onLoad);
       if (isComposeWindow(win)) {
         hookComposeWindow(win);
+        return;
+      }
+      if (isCommonDialogFrom(win, hookedComposeWindows)) {
+        console.log(
+          "certCleanup ON-COMPOSE-ERROR-TRIGGER: auto-dismissing the send-failure alert dialog"
+        );
+        win.close();
       }
     },
     { once: true }

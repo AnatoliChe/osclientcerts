@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.27",
-  "description": "ON-COMPOSE-ERROR-TRIGGER BUILD (v2), not for production: v0.4.26 confirmed via its own diagnostic log that gMsgCompose.RegisterStateListener isn't available yet at the compose window's \"load\" event -- gMsgCompose's own async setup hasn't finished by then. This build polls for it instead (up to 5s, every 100ms) rather than giving up after one check.",
+  "version": "0.4.28",
+  "description": "ON-COMPOSE-ERROR-TRIGGER BUILD (v3, auto-retry), not for production: production testing showed cleanup + an IMMEDIATE resend (before trying to read anything) leaves reading intact, while resending from an already-observed-broken state does not recover it. This build automates that: auto-dismisses the modal \"couldn't send\" alert (matched by dialog id + .opener), runs cleanup, then automatically retries the send once (tracked send mode, retry-loop guard against retrying a retry).",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",

@@ -3,6 +3,10 @@
     "cert-cleanup-experiment@osclientcerts.dev": {
       "updates": [
         {
+          "version": "0.4.28",
+          "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.28-auto-retry/cert-cleanup.xpi"
+        },
+        {
           "version": "0.4.27",
           "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.27-on-compose-error-trigger-v2/cert-cleanup.xpi"
         },
