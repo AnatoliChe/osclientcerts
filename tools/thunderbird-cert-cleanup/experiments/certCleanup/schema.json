@@ -3,6 +3,13 @@
     "namespace": "certCleanup",
     "functions": [
       {
+        "name": "ping",
+        "type": "function",
+        "async": true,
+        "description": "No-op. Exists only so background.js can force this Experiment's privileged parent script to load at startup (in case Thunderbird loads Experiment APIs lazily on first access rather than eagerly) without triggering any actual cleanup side effects.",
+        "parameters": []
+      },
+      {
         "name": "cleanup",
         "type": "function",
         "async": true,

@@ -6,6 +6,14 @@
 // with full access to Gecko's internal APIs (Cc/Ci), unlike the sandboxed
 // background script. See ../../README.md for why this exists and how it's used.
 //
+// Logged unconditionally, as the literal first statement in the file, before
+// anything else runs: Experiment scripts are known to sometimes keep running
+// a stale cached copy across an in-place update (see onShutdown below) --
+// if this line is ever missing from the console, the version actually
+// executing is not the one just installed, full stop, before debugging
+// anything else in this file.
+console.log("certCleanup: implementation.js module evaluation starting");
+
 // ExtensionCommon is not a predefined global in this scope (unlike Cc/Ci/Cu,
 // which are) -- it must be imported explicitly, same as any other privileged
 // Gecko module.
@@ -298,8 +306,15 @@ const domWindowOpenedObserver = {
   },
 };
 
-Services.obs.addObserver(domWindowOpenedObserver, "domwindowopened");
-console.log("certCleanup SIGN-CHECKBOX-TRIGGER: domwindowopened observer registered");
+try {
+  Services.obs.addObserver(domWindowOpenedObserver, "domwindowopened");
+  console.log("certCleanup SIGN-CHECKBOX-TRIGGER: domwindowopened observer registered");
+} catch (e) {
+  // Deliberately not swallowed further up: if this throws, everything below
+  // it in the file (the AsyncShutdown blocker, the ExtensionAPI class
+  // itself) would otherwise silently never load either.
+  console.error("certCleanup SIGN-CHECKBOX-TRIGGER: FAILED to register domwindowopened observer: " + e);
+}
 
 // Also hook any compose windows already open when the add-on loads/reloads.
 try {
@@ -346,6 +361,12 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
   getAPI(context) {
     return {
       certCleanup: {
+        // No-op; see schema.json for why background.js calls this once at
+        // startup (forces this script to load if Thunderbird would
+        // otherwise only load it lazily on first real API access).
+        ping: async () => {
+          console.log("certCleanup: ping() called, implementation.js is loaded and responsive");
+        },
         // Exposed for manual/on-demand use (e.g. from the Browser Console
         // while testing), but background.js does not call this on any
         // schedule -- see onQuitApplication above for the only place
