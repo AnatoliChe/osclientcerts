@@ -89,10 +89,36 @@ macro_rules! manager_guard_to_manager {
     };
 }
 
+/// Every log line is tagged with this module's crate name, version, and the OS process id that
+/// produced it. This DLL can end up loaded into more than one Thunderbird process at once (e.g.
+/// the main process and a content or socket process each have their own NSS/PSM instance, hence
+/// their own independently-initialized copy of this module), and a debug session commonly
+/// redirects several processes' stderr into the same file -- without a PID, lines from different
+/// processes are indistinguishable and can look like one impossible, self-contradictory sequence
+/// of calls. The version also rules out "which build is this actually from" when comparing a log
+/// against the current source.
+fn init_logging() {
+    use std::io::Write;
+    let pid = std::process::id();
+    let _ = env_logger::Builder::from_default_env()
+        .format(move |buf, record| {
+            writeln!(
+                buf,
+                "[{} osclientcerts v{} pid={} {}] {}",
+                record.level(),
+                env!("CARGO_PKG_VERSION"),
+                pid,
+                record.target(),
+                record.args()
+            )
+        })
+        .try_init();
+}
+
 /// This gets called to initialize the module. For this implementation, this consists of
 /// instantiating the `ManagerProxy`.
 extern "C" fn C_Initialize(_pInitArgs: CK_C_INITIALIZE_ARGS_PTR) -> CK_RV {
-    let _ = env_logger::try_init();
+    init_logging();
     let mut manager_guard = try_to_get_manager_guard!();
     // Per PKCS #11, initializing an already-initialized module is an error; the caller must call
     // C_Finalize first. (The manager left behind by C_Finalize is always fully stopped and taken
