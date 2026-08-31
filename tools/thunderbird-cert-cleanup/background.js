@@ -3,20 +3,18 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 // EXPERIMENT BUILD (experiment/cert-cleanup-mid-session branch), not for
-// production. Trunk's 0.4.0 moved cleanup to Thunderbird shutdown because
-// every mid-session deletion mechanism tried in 0.2.x/0.3.x broke S/MIME
-// decryption for the rest of that session -- see the README's "Why cleanup
-// only runs at shutdown". This build deliberately goes back to running
-// cleanup *during* the session (immediately, then every 5 minutes) to test
-// whether that corruption is actually the NSS race fixed by bugs 2056775
-// and 2056786 in NSS 3.128 (2026-08-26) -- if a Thunderbird build with NSS
-// >= 3.128 can run this mid-session without breaking reading, that's strong
-// evidence the corruption was exactly that upstream race, now fixed.
-
-const CLEANUP_ALARM_NAME = "cert-cleanup-experiment-periodic";
-const CLEANUP_PERIOD_MINUTES = 5;
+// production. Minimal, single-shot test: run cleanup exactly once, 10
+// seconds after Thunderbird starts, then do nothing else. No periodic
+// timer. This isolates one question: does a single mid-session cert9.db
+// delete (implementation.js still also reloads the osclientcerts PKCS#11
+// module afterward -- see reloadOwnModule() there) block reading encrypted
+// mail for the rest of the session, on this build. Trunk's 0.4.0 moved
+// cleanup to shutdown-only because earlier mid-session attempts (without
+// the module reload) broke this reliably -- see the README's "Why cleanup
+// only runs at shutdown".
 
 const VERSION = browser.runtime.getManifest().version;
+const STARTUP_DELAY_MS = 10000;
 
 async function runCleanup(reason) {
   console.log(`certCleanup v${VERSION} EXPERIMENT (${reason}): starting`);
@@ -35,19 +33,18 @@ async function runCleanup(reason) {
   }
 
   console.log(
-    `certCleanup v${VERSION} EXPERIMENT (${reason}): removed ${deleted.length} stale certificate record(s) -- now try reading/sending mail and watch for breakage`,
+    `certCleanup v${VERSION} EXPERIMENT (${reason}): removed ${deleted.length} stale certificate record(s) -- now try reading encrypted mail and watch for breakage`,
     deleted
   );
 }
 
-browser.runtime.onInstalled.addListener(() => runCleanup("install"));
-browser.runtime.onStartup.addListener(() => runCleanup("startup"));
-
-browser.alarms.create(CLEANUP_ALARM_NAME, {
-  periodInMinutes: CLEANUP_PERIOD_MINUTES,
+browser.runtime.onStartup.addListener(() => {
+  setTimeout(() => runCleanup("startup+10s"), STARTUP_DELAY_MS);
 });
-browser.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === CLEANUP_ALARM_NAME) {
-    runCleanup("scheduled");
-  }
+// onInstalled also fires for "Load Temporary Add-on" (no separate
+// onStartup event in that case, since Thunderbird was already running) --
+// cover that path too so the temporary-load workflow used for this testing
+// actually exercises the delay instead of silently doing nothing.
+browser.runtime.onInstalled.addListener(() => {
+  setTimeout(() => runCleanup("install+10s"), STARTUP_DELAY_MS);
 });
