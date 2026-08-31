@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.3",
-  "description": "EXPERIMENT BUILD, not for production: single-shot cleanup 10 seconds after startup (no periodic timer), still reloading the osclientcerts PKCS#11 module after deleting. Minimal test to confirm/deny whether a single mid-session delete blocks reading encrypted mail on this build. See tools/thunderbird-cert-cleanup/README.md and the experiment/cert-cleanup-mid-session branch.",
+  "version": "0.4.4",
+  "description": "EXPERIMENT BUILD, not for production: fixes reloadOwnModule() crashing (nsISimpleEnumerator isn't for-of-iterable in this scope) so the PKCS#11 module reload actually runs. Otherwise same as 0.4.3: single-shot cleanup 10 seconds after startup, no periodic timer. See tools/thunderbird-cert-cleanup/README.md and the experiment/cert-cleanup-mid-session branch.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",

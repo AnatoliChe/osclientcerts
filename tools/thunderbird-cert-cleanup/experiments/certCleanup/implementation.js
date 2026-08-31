@@ -40,16 +40,29 @@ const CKO_CERTIFICATE_BYTES = new Uint8Array([0, 0, 0, 1]);
 // mid-session delete (see the long comment in doCleanup() below) is tied to
 // the slot/module and gets rebuilt cleanly by a reload. Untested hypothesis
 // -- that's what this branch exists to find out.
+// nsISimpleEnumerator doesn't support for-of in this (Experiment/addon_parent)
+// scope -- confirmed via "TypeError: ... is not iterable" in testing, unlike
+// the privileged chrome-document scope device_manager.js runs in, which gets
+// that sugar. Plain hasMoreElements()/getNext() works everywhere.
+function enumerate(enumerator) {
+  const items = [];
+  while (enumerator.hasMoreElements()) {
+    items.push(enumerator.getNext());
+  }
+  return items;
+}
+
 function reloadOwnModule() {
   const moduleDB = Cc["@mozilla.org/security/pkcs11moduledb;1"].getService(
     Ci.nsIPKCS11ModuleDB
   );
 
   let targetModule = null;
-  for (const module of moduleDB.listModules()) {
-    for (const slot of module.listSlots()) {
-      if (slot.tokenName === OS_CLIENT_CERTS_TOKEN_NAME) {
-        targetModule = module;
+  for (const module of enumerate(moduleDB.listModules())) {
+    const mod = module.QueryInterface(Ci.nsIPKCS11Module);
+    for (const slot of enumerate(mod.listSlots())) {
+      if (slot.QueryInterface(Ci.nsIPKCS11Slot).tokenName === OS_CLIENT_CERTS_TOKEN_NAME) {
+        targetModule = mod;
         break;
       }
     }
