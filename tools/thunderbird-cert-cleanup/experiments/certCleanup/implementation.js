@@ -21,24 +21,49 @@ const OS_CLIENT_CERTS_TOKEN_NAME = "OS Client Cert Token";
 
 console.log("certCleanup: implementation.js loaded (getCerts+logout build)");
 
-// See earlier builds' comment: nsISimpleEnumerator doesn't support for-of
-// in this (Experiment/addon_parent) scope.
-function enumerate(enumerator) {
-  const items = [];
-  while (enumerator.hasMoreElements()) {
-    items.push(enumerator.getNext());
+// Robust against API drift: earlier builds on this branch have seen
+// listModules()/listSlots() behave as a classic nsISimpleEnumerator (no
+// for-of support, needs hasMoreElements()/getNext()) on one nightly build,
+// and apparently *not* support hasMoreElements() at all on a later nightly
+// (this is Thunderbird Daily; the exact XPCOM binding for these methods
+// isn't stable build-to-build). Handle whichever shape shows up.
+function enumerate(result) {
+  if (result == null) {
+    return [];
   }
-  return items;
+  if (typeof result.hasMoreElements === "function") {
+    const items = [];
+    while (result.hasMoreElements()) {
+      items.push(result.getNext());
+    }
+    return items;
+  }
+  if (typeof result[Symbol.iterator] === "function") {
+    return Array.from(result);
+  }
+  if (typeof result.length === "number") {
+    return Array.from({ length: result.length }, (_, i) => result[i]);
+  }
+  console.log("certCleanup: enumerate() got an unrecognized shape: " + result);
+  return [];
 }
 
 function findOwnSlot() {
   const moduleDB = Cc["@mozilla.org/security/pkcs11moduledb;1"].getService(
     Ci.nsIPKCS11ModuleDB
   );
-  for (const module of enumerate(moduleDB.listModules())) {
+  const modules = enumerate(moduleDB.listModules());
+  console.log("certCleanup: findOwnSlot: " + modules.length + " module(s)");
+  for (const module of modules) {
     const mod = module.QueryInterface(Ci.nsIPKCS11Module);
-    for (const slot of enumerate(mod.listSlots())) {
+    const slots = enumerate(mod.listSlots());
+    console.log(
+      "certCleanup: findOwnSlot: module '" + mod.name + "' has " +
+        slots.length + " slot(s)"
+    );
+    for (const slot of slots) {
       const s = slot.QueryInterface(Ci.nsIPKCS11Slot);
+      console.log("certCleanup: findOwnSlot: slot tokenName='" + s.tokenName + "'");
       if (s.tokenName === OS_CLIENT_CERTS_TOKEN_NAME) {
         return s;
       }
