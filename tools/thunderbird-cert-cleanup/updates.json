@@ -3,6 +3,10 @@
     "cert-cleanup-experiment@osclientcerts.dev": {
       "updates": [
         {
+          "version": "0.4.9",
+          "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.9-noop-control/cert-cleanup.xpi"
+        },
+        {
           "version": "0.4.8",
           "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.8-single-shot-experiment/cert-cleanup.xpi"
         },
