@@ -207,17 +207,16 @@ function onComposeProcessDone(aResult) {
     });
 }
 
-function hookComposeWindow(win) {
-  if (win.__certCleanupHooked) {
-    return;
-  }
-  win.__certCleanupHooked = true;
-  if (!win.gMsgCompose || typeof win.gMsgCompose.RegisterStateListener !== "function") {
-    console.error(
-      "certCleanup ON-COMPOSE-ERROR-TRIGGER: gMsgCompose.RegisterStateListener not available on this compose window"
-    );
-    return;
-  }
+// win.gMsgCompose isn't necessarily ready by the window's "load" event --
+// confirmed in production testing: RegisterStateListener was unavailable at
+// that point, meaning gMsgCompose's own async setup hadn't finished yet.
+// Polled instead of guessing a more specific ready signal to hook: up to
+// 5 seconds, every 100ms, which comfortably covers real-world compose
+// window startup and fails loudly (one clear log line) if it never shows up.
+const GMSGCOMPOSE_POLL_INTERVAL_MS = 100;
+const GMSGCOMPOSE_POLL_MAX_ATTEMPTS = 50;
+
+function registerStateListener(win) {
   // All four nsIMsgComposeStateListener methods must exist as callable
   // functions even though only ComposeProcessDone matters here: this is a
   // [scriptable] XPCOM interface, and Thunderbird's C++ side may call any
@@ -231,6 +230,29 @@ function hookComposeWindow(win) {
     NotifyComposeBodyReady() {},
   });
   console.log("certCleanup ON-COMPOSE-ERROR-TRIGGER: registered nsIMsgComposeStateListener");
+}
+
+function hookComposeWindow(win) {
+  if (win.__certCleanupHooked) {
+    return;
+  }
+  win.__certCleanupHooked = true;
+  let attemptsLeft = GMSGCOMPOSE_POLL_MAX_ATTEMPTS;
+  const tryRegister = () => {
+    if (win.gMsgCompose && typeof win.gMsgCompose.RegisterStateListener === "function") {
+      registerStateListener(win);
+      return;
+    }
+    attemptsLeft -= 1;
+    if (attemptsLeft <= 0) {
+      console.error(
+        "certCleanup ON-COMPOSE-ERROR-TRIGGER: gMsgCompose.RegisterStateListener never became available on this compose window"
+      );
+      return;
+    }
+    win.setTimeout(tryRegister, GMSGCOMPOSE_POLL_INTERVAL_MS);
+  };
+  tryRegister();
 }
 
 function onWindowOpened(win) {

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.26",
-  "description": "ON-COMPOSE-ERROR-TRIGGER BUILD, not for production: v0.4.25's browser.compose.onAfterSend never fired for a signing failure (confirmed against comm-central's source: the JS catch block returns before the \"aftersend\" event that API is built on ever dispatches). This build hooks lower, at the same layer Thunderbird's own compose window code uses: nsIMsgComposeStateListener, registered via gMsgCompose.RegisterStateListener() -- ComposeProcessDone(aResult) fires with the real nsresult of the send, including a finishCryptoEncapsulation failure, driven by nsMsgCompose's own completion notification rather than the JS try/catch that swallows it.",
+  "version": "0.4.27",
+  "description": "ON-COMPOSE-ERROR-TRIGGER BUILD (v2), not for production: v0.4.26 confirmed via its own diagnostic log that gMsgCompose.RegisterStateListener isn't available yet at the compose window's \"load\" event -- gMsgCompose's own async setup hasn't finished by then. This build polls for it instead (up to 5s, every 100ms) rather than giving up after one check.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
