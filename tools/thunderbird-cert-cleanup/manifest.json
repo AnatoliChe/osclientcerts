@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.6",
-  "description": "EXPERIMENT BUILD, not for production: same as 0.4.5, strict_min_version raised to 153.1.1 (current latest Thunderbird ESR) to match the actual test matrix (ESR/release/beta/nightly all >= this).",
+  "version": "0.4.7",
+  "description": "EXPERIMENT BUILD, not for production: adds unconditional step-by-step console logging (script load, onStartup/onInstalled fired, doCleanup progress, Sqlite connection open/query/close) so a run with nothing to delete is still fully visible in the Browser Console, not just runs that find a duplicate.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",

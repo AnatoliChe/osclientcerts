@@ -29,6 +29,12 @@ const CKA_CLASS_COLUMN = "a0";
 const CKA_VALUE_COLUMN = "a11";
 const CKO_CERTIFICATE_BYTES = new Uint8Array([0, 0, 0, 1]);
 
+// Unconditional, logged the moment this privileged script loads (not
+// gated on getAPI() being called, which happens separately per
+// background-page context). Confirms the Experiment itself initialized,
+// independent of whether background.js's own top-level log shows up.
+console.log("certCleanup: implementation.js loaded");
+
 // EXPERIMENTAL (experiment/cert-cleanup-mid-session branch): after deleting a
 // duplicate, force a full unload+reload of our own PKCS#11 module -- the
 // same operation the "Unload"/"Load" buttons in Certificate Manager's
@@ -95,6 +101,7 @@ function reloadOwnModule() {
 // nsIX509CertDB, and why this whole pass is only ever run at shutdown -- not
 // periodically during the session -- as of 0.4.0.
 async function doCleanup() {
+  console.log("certCleanup: doCleanup starting");
   const certDB = Cc["@mozilla.org/security/x509certdb;1"].getService(
     Ci.nsIX509CertDB
   );
@@ -103,10 +110,16 @@ async function doCleanup() {
   const liveCerts = certs.filter(
     (cert) => (cert.tokenName || "").trim() === OS_CLIENT_CERTS_TOKEN_NAME
   );
+  console.log(
+    "certCleanup: getCerts() returned " + certs.length +
+      " total, " + liveCerts.length + " on token '" +
+      OS_CLIENT_CERTS_TOKEN_NAME + "'"
+  );
   if (liveCerts.length === 0) {
     // The provider isn't loaded (or has no certs) right now -- don't touch
     // cert9.db at all, since we have no way to confirm which of its rows, if
     // any, are safe to remove.
+    console.log("certCleanup: no live certs found, skipping cert9.db entirely");
     return [];
   }
 
@@ -140,19 +153,23 @@ async function doCleanup() {
   const deleted = [];
   let conn;
   try {
+    console.log("certCleanup: opening read-only Sqlite.sys.mjs connection to " + dbFile.path);
     conn = await Sqlite.openConnection({
       path: dbFile.path,
       openNotExclusive: true,
       readOnly: true,
     });
+    console.log("certCleanup: connection opened");
     for (const liveCert of liveCerts) {
       const derArray = liveCert.getRawDER();
       const der = Uint8Array.from(derArray);
+      console.log("certCleanup: querying for subject=" + liveCert.subjectName);
       const rows = await conn.execute(
         "SELECT id FROM nssPublic WHERE " +
           CKA_CLASS_COLUMN + " = :cls AND " + CKA_VALUE_COLUMN + " = :der",
         { cls: CKO_CERTIFICATE_BYTES, der }
       );
+      console.log("certCleanup: query returned " + rows.length + " row(s)");
       if (rows.length === 0) {
         continue;
       }
@@ -211,9 +228,11 @@ async function doCleanup() {
   } finally {
     if (conn) {
       await conn.close();
+      console.log("certCleanup: connection closed");
     }
   }
 
+  console.log("certCleanup: doCleanup finished, " + deleted.length + " deleted");
   if (deleted.length > 0) {
     try {
       reloadOwnModule();
