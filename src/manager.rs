@@ -644,18 +644,18 @@ impl Manager {
             next_handle: 1,
             last_scan_time: None,
         };
-        manager.maybe_find_new_objects();
+        manager.maybe_find_new_objects(Duration::new(3, 0));
         manager
     }
 
-    /// When a new `Manager` is created and when a new session is opened (provided at least 3
-    /// seconds have elapsed since the last session was opened), this searches for certificates and
-    /// keys to expose. We de-duplicate previously-found certificates and keys by / keeping track of
-    /// their IDs.
-    fn maybe_find_new_objects(&mut self) {
+    /// When a new `Manager` is created, when a new session is opened, and (with a much shorter
+    /// throttle) when a targeted search comes up empty (see `start_search`), this searches for
+    /// certificates and keys to expose. We de-duplicate previously-found certificates and keys by
+    /// keeping track of their IDs.
+    fn maybe_find_new_objects(&mut self, min_interval: Duration) {
         let now = Instant::now();
         if let Some(last_scan_time) = self.last_scan_time
-            && now.duration_since(last_scan_time) < Duration::new(3, 0)
+            && now.duration_since(last_scan_time) < min_interval
         {
             return;
         }
@@ -716,7 +716,7 @@ impl Manager {
     }
 
     pub fn open_session(&mut self, flags: CK_FLAGS) -> Result<CK_SESSION_HANDLE, ()> {
-        self.maybe_find_new_objects();
+        self.maybe_find_new_objects(Duration::new(3, 0));
         let next_session = self.next_session;
         self.next_session += 1;
         self.sessions.insert(next_session, flags);
@@ -777,14 +777,37 @@ impl Manager {
                 return Ok(());
             }
         }
-        let mut handles = Vec::new();
-        for (handle, object) in &self.objects {
-            if object.matches(attrs) {
-                handles.push(*handle);
-            }
+        let mut handles = Self::matching_handles(&self.objects, attrs);
+        if handles.is_empty() {
+            // A targeted search (e.g. by CKA_ISSUER + CKA_SERIAL_NUMBER, which is how NSS
+            // resolves both a certificate and its CKO_NSS_TRUST record -- see
+            // `nssToken_FindTrustForCertificate` in NSS's `lib/dev/devtoken.c`) can otherwise
+            // come up empty for as long as the calling session stays open: `open_session` only
+            // rescans once per 3 seconds, so an object that only exists as of a scan taken after
+            // this session was opened stays invisible to it until some *other* session-opening
+            // event happens to trigger a rescan -- observed in practice to take anywhere from a
+            // few seconds to the rest of a long-lived NSS/PSM session, even though nothing about
+            // the underlying certificate store actually changed in the meantime. Retrying once
+            // against a freshly-rescanned object list (throttled far more tightly than the normal
+            // 3-second gate, so a caller that legitimately searches for many nonexistent objects
+            // in a tight loop doesn't turn every miss into a full Windows cert-store walk) costs
+            // nothing when the object genuinely isn't there, and closes that window when it is.
+            self.maybe_find_new_objects(Duration::from_millis(250));
+            handles = Self::matching_handles(&self.objects, attrs);
         }
         self.searches.insert(session, handles);
         Ok(())
+    }
+
+    fn matching_handles(
+        objects: &BTreeMap<CK_OBJECT_HANDLE, Object>,
+        attrs: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)],
+    ) -> Vec<CK_OBJECT_HANDLE> {
+        objects
+            .iter()
+            .filter(|(_, object)| object.matches(attrs))
+            .map(|(handle, _)| *handle)
+            .collect()
     }
 
     /// Given a session and a maximum number of object handles to return, attempts to retrieve up to
