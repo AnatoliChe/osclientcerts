@@ -20,15 +20,6 @@ const { AsyncShutdown } = ChromeUtils.importESModule(
 // (see TOKEN_LABEL_BYTES in fork-osclientcerts/src/lib.rs).
 const OS_CLIENT_CERTS_TOKEN_NAME = "OS Client Cert Token";
 
-// cert9.db's SQL schema (table `nssPublic`, one row per PKCS #11 object,
-// columns named "a" + the attribute type in hex -- confirmed against a real
-// profile's cert9.db and against NSS's own lib/softoken/sdb.c, which builds
-// column names via `sqlite3_mprintf("a%x", template[i].type)`). CKA_CLASS is
-// attribute 0x0; CKA_VALUE (the DER-encoded certificate) is 0x11.
-const CKA_CLASS_COLUMN = "a0";
-const CKA_VALUE_COLUMN = "a11";
-const CKO_CERTIFICATE_BYTES = new Uint8Array([0, 0, 0, 1]);
-
 // Unconditional, logged the moment this privileged script loads (not
 // gated on getAPI() being called, which happens separately per
 // background-page context). Confirms the Experiment itself initialized,
@@ -56,6 +47,49 @@ function enumerate(enumerator) {
     items.push(enumerator.getNext());
   }
   return items;
+}
+
+// Plain XPCOM file read (nsIFileInputStream + nsIBinaryInputStream), not
+// Sqlite.sys.mjs. See the long comment in doCleanup() below for why: a
+// *second connection* to cert9.db (even strictly read-only) while NSS
+// holds it open broke S/MIME decryption in production testing, even when
+// literally nothing was found/deleted -- so avoid opening any second
+// connection to the file at all. A plain file read has no notion of a
+// database "connection" or lock negotiation with NSS's own open handle,
+// just an ordinary shared-read file open.
+function readFileBytes(file) {
+  const stream = Cc["@mozilla.org/network/file-input-stream;1"].createInstance(
+    Ci.nsIFileInputStream
+  );
+  // -1, -1, 0: default read-only open flags/permissions (see nsIFileInputStream.idl).
+  stream.init(file, -1, -1, 0);
+  const binStream = Cc["@mozilla.org/binaryinputstream;1"].createInstance(
+    Ci.nsIBinaryInputStream
+  );
+  binStream.setInputStream(stream);
+  const bytes = binStream.readByteArray(binStream.available());
+  binStream.close();
+  return new Uint8Array(bytes);
+}
+
+// Plain byte-subsequence search. A full X.509 DER certificate is a large
+// (roughly 1-2KB), highly structured, effectively-unique byte sequence --
+// finding it verbatim anywhere in cert9.db is exactly as strong a signal
+// as finding it in a specific column of a specific row would be, without
+// needing to parse cert9.db's SQL structure at all.
+function containsSubsequence(haystack, needle) {
+  if (needle.length === 0 || needle.length > haystack.length) {
+    return false;
+  }
+  outer: for (let i = 0; i <= haystack.length - needle.length; i++) {
+    for (let j = 0; j < needle.length; j++) {
+      if (haystack[i + j] !== needle[j]) {
+        continue outer;
+      }
+    }
+    return true;
+  }
+  return false;
 }
 
 function reloadOwnModule() {
@@ -133,102 +167,79 @@ async function doCleanup() {
   // want to detect and remove it. NSS has a non-deduplicating list type
   // (PK11CertListAll), but no JS-facing API exposes it.
   //
-  // So: *read* cert9.db directly instead, via Sqlite.sys.mjs (Gecko's
-  // sanctioned module for opening additional, concurrent, read-only
-  // connections to a Firefox/Thunderbird-managed sqlite database -- the same
-  // mechanism other in-process code uses for shared databases like
-  // places.sqlite). A row here is a genuine persisted duplicate by
-  // construction: PKCS #11 objects belonging to an *external* token like
-  // ours are never themselves written to cert9.db, so any CKO_CERTIFICATE
-  // row whose DER byte-for-byte matches one of our live certificates cannot
-  // be that live certificate -- it can only be a stale, keyless, NSS-cached
-  // copy.
-  const { Sqlite } = ChromeUtils.importESModule(
-    "resource://gre/modules/Sqlite.sys.mjs"
-  );
+  // So: *read* cert9.db's raw bytes directly instead (readFileBytes() above
+  // -- plain nsIFileInputStream, not a database connection of any kind) and
+  // search for each live certificate's exact DER byte sequence
+  // (containsSubsequence() above). PKCS #11 objects belonging to an
+  // *external* token like ours are never themselves written to cert9.db, so
+  // finding a live certificate's DER anywhere in the file means a stale,
+  // keyless, NSS-cached copy exists there -- it cannot be that live
+  // certificate itself.
+  //
+  // This used to go through Sqlite.sys.mjs (a proper SQL query against the
+  // `nssPublic` table, matching on the CKA_CLASS/CKA_VALUE columns
+  // specifically), which is more precise in principle. It's gone as of this
+  // build: opening a *second connection* to cert9.db via Sqlite.sys.mjs --
+  // even strictly read-only (`readOnly: true`), even when the resulting
+  // query found nothing to delete -- reproducibly broke S/MIME decryption
+  // for the rest of the session in production testing on Windows. Zero
+  // writes, zero deletions, yet the very next message failed to decrypt
+  // right after the read-only connection closed. Not reproducible at the
+  // raw NSS/softoken level on Linux (a from-source NSS build survived the
+  // same kind of concurrent access cleanly via a custom C harness) --
+  // Windows' mandatory file locking (LockFile/UnlockFile) differs
+  // fundamentally from POSIX advisory locking, and SQLite's Windows VFS
+  // backend negotiates locks through it; a from-Linux repro was never going
+  // to catch a Windows-specific lock interaction between our connection and
+  // NSS's own already-open one. A plain file read has no such negotiation
+  // with NSS's handle at all, hence this rewrite.
   const profileDir = Services.dirsvc.get("ProfD", Ci.nsIFile);
   const dbFile = profileDir.clone();
   dbFile.append("cert9.db");
 
+  const dbBytes = readFileBytes(dbFile);
+  console.log("certCleanup: read " + dbBytes.length + " bytes from cert9.db");
+
   const deleted = [];
-  let conn;
-  try {
-    console.log("certCleanup: opening read-only Sqlite.sys.mjs connection to " + dbFile.path);
-    conn = await Sqlite.openConnection({
-      path: dbFile.path,
-      openNotExclusive: true,
-      readOnly: true,
-    });
-    console.log("certCleanup: connection opened");
-    for (const liveCert of liveCerts) {
-      const derArray = liveCert.getRawDER();
-      const der = Uint8Array.from(derArray);
-      console.log("certCleanup: querying for subject=" + liveCert.subjectName);
-      const rows = await conn.execute(
-        "SELECT id FROM nssPublic WHERE " +
-          CKA_CLASS_COLUMN + " = :cls AND " + CKA_VALUE_COLUMN + " = :der",
-        { cls: CKO_CERTIFICATE_BYTES, der }
-      );
-      console.log("certCleanup: query returned " + rows.length + " row(s)");
-      if (rows.length === 0) {
-        continue;
-      }
-      console.log(
-        "certCleanup: found " + rows.length +
-          " stale cert9.db row(s) duplicating live cert subject=" +
-          liveCert.subjectName
-      );
-      // Delete via nsIX509CertDB, not a second write connection: through
-      // 0.2.2, deletion also went through this same Sqlite.sys.mjs
-      // connection (a raw `DELETE FROM nssPublic ...`). In production
-      // testing that write -- and, as it turned out, *any* mechanism that
-      // removes the duplicate mid-session, including this official API --
-      // left something in Gecko's C++ layer above NSS unable to resolve the
-      // recipient for S/MIME decryption for the rest of that Thunderbird
-      // session (confirmed via RUST_LOG=osclientcerts=debug: later
-      // C_DecryptInit/C_UnwrapKey calls returned CKR_FUNCTION_NOT_SUPPORTED
-      // without even a preceding C_OpenSession, meaning Gecko had stopped
-      // calling into the module at all -- independently reproduced as safe
-      // at the raw NSS/softoken level via a from-source NSS build, so the
-      // stale state lives above NSS, not in it). That's *why* this whole
-      // pass now only ever runs at shutdown (see AsyncShutdown blocker
-      // below): whatever goes stale doesn't matter if the process is about
-      // to exit anyway, and the next session starts with a clean read of
-      // the already-fixed file. constructX509() builds a transient,
-      // in-memory certificate object from the duplicate's DER (not tied to
-      // any token/slot), and deleteCertificate() on that object resolves
-      // and removes the matching persisted record through NSS's own
-      // softoken code path (PK11_DeleteTokenCertAndKey /
-      // SEC_DeletePermCertificate -- confirmed against
-      // nsNSSCertificateDB::DeleteCertificate), the same path "Delete or
-      // Distrust" in Certificate Manager uses. If that resolution ever
-      // targeted our *live* token object instead of the cert9.db
-      // duplicate, the call would simply fail rather than corrupt
-      // anything: osclientcerts' own C_DestroyObject is an unconditional
-      // CKR_FUNCTION_NOT_SUPPORTED stub (see src/lib.rs), so an attempt to
-      // destroy anything on our external token is a safe no-op.
-      try {
-        const tempCert = certDB.constructX509(derArray);
-        certDB.deleteCertificate(tempCert);
-        deleted.push({
-          subjectName: liveCert.subjectName,
-          issuerName: liveCert.issuerName,
-          serialNumber: liveCert.serialNumber,
-          rowCount: rows.length,
-        });
-      } catch (e) {
-        Cu.reportError(
-          "certCleanup: deleteCertificate failed for subject=" +
-            liveCert.subjectName + ": " + e
-        );
-      }
+  for (const liveCert of liveCerts) {
+    const derArray = liveCert.getRawDER();
+    const der = Uint8Array.from(derArray);
+    console.log("certCleanup: scanning for subject=" + liveCert.subjectName);
+    const found = containsSubsequence(dbBytes, der);
+    console.log("certCleanup: " + (found ? "found" : "not found") + " in cert9.db");
+    if (!found) {
+      continue;
     }
-  } catch (e) {
-    Cu.reportError("certCleanup: cert9.db access failed: " + e);
-  } finally {
-    if (conn) {
-      await conn.close();
-      console.log("certCleanup: connection closed");
+    console.log(
+      "certCleanup: found stale cert9.db copy of live cert subject=" +
+        liveCert.subjectName
+    );
+    // Delete via nsIX509CertDB: constructX509() builds a transient,
+    // in-memory certificate object from the duplicate's DER (not tied to
+    // any token/slot), and deleteCertificate() on that object resolves and
+    // removes the matching persisted record through NSS's own softoken
+    // code path (PK11_DeleteTokenCertAndKey / SEC_DeletePermCertificate --
+    // confirmed against nsNSSCertificateDB::DeleteCertificate), the same
+    // path "Delete or Distrust" in Certificate Manager uses -- using NSS's
+    // own already-open handle to cert9.db, not a new connection. If that
+    // resolution ever targeted our *live* token object instead of the
+    // cert9.db duplicate, the call would simply fail rather than corrupt
+    // anything: osclientcerts' own C_DestroyObject is an unconditional
+    // CKR_FUNCTION_NOT_SUPPORTED stub (see src/lib.rs), so an attempt to
+    // destroy anything on our external token is a safe no-op.
+    try {
+      const tempCert = certDB.constructX509(derArray);
+      certDB.deleteCertificate(tempCert);
+      deleted.push({
+        subjectName: liveCert.subjectName,
+        issuerName: liveCert.issuerName,
+        serialNumber: liveCert.serialNumber,
+      });
+    } catch (e) {
+      Cu.reportError(
+        "certCleanup: deleteCertificate failed for subject=" +
+          liveCert.subjectName + ": " + e
+      );
     }
   }
 
