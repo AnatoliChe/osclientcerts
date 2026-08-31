@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.24",
-  "description": "SEND-BUTTON-TRIGGER BUILD, not for production: re-targets the same id-matched \"command\" event technique validated by the sign-checkbox build (v0.4.18-0.4.23) onto the actual Send toolbar button and File > Send Now / Send Later menu items. A capturing listener runs before Thunderbird's own goDoCommand()/GenericSendMessage handling for that same click, so cleanup's disruptive getCerts() call is guaranteed to run before the send proceeds -- unlike compose.onBeforeSend (v0.4.19), which fires from inside Thunderbird's own send pipeline and left reading broken until restart instead of self-healing on send.",
+  "version": "0.4.25",
+  "description": "ON-SEND-ERROR-TRIGGER BUILD, not for production: every prior trigger on this branch ran cleanup proactively (every window-open or every send), disrupting reading even when nothing needed cleaning. This build runs cleanup only reactively, via browser.compose.onAfterSend, when a send actually just failed (sendInfo.error set) -- cutting how often the reading-disruption side effect happens down to only when there's a real problem, at the cost of not being able to fix the send that just failed (the user retries after cleanup finishes).",
+  "permissions": ["compose"],
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",

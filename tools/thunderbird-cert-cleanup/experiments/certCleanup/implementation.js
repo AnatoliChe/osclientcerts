@@ -156,100 +156,26 @@ async function doCleanup() {
   return deleted;
 }
 
-// SEND-BUTTON-TRIGGER BUILD, not for production. Trigger under test: the
-// Send toolbar button and the File > Send Now / Send Later menu items,
-// instead of compose-window-open (v0.4.18), compose.onBeforeSend (v0.4.19,
-// worse than v0.4.18: reading stayed broken until restart), or the sign
-// checkbox (v0.4.18-0.4.23, used to validate this id-matched "command"
-// hooking technique -- see git history on this branch).
+// ON-SEND-ERROR-TRIGGER BUILD, not for production. Every trigger tried so
+// far ran cleanup *proactively*, on every compose-window-open or every
+// send, whether or not a duplicate actually existed -- confirmed to disrupt
+// reading even on a run that found nothing to delete (getCerts() alone is
+// enough). This build instead runs cleanup *reactively*: only when
+// browser.compose.onAfterSend reports sendInfo.error, i.e. only on the rare
+// occasions the underlying stale-duplicate bug has actually just caused a
+// real, visible failure. This can't fix the send that just failed (cleanup
+// runs after the fact), but the user can retry once cleanup's finished; the
+// point is cutting how *often* the known reading-disruption side effect
+// happens, from every window/send down to only when there's an actual
+// problem to fix. The trigger itself lives in background.js (a plain
+// browser.compose.onAfterSend listener, no privileged window-hooking
+// needed for this one) -- see there.
 //
-// Every XUL menuitem/toolbarbutton dispatches a DOM "command" event on
-// activation, regardless of what JS function ends up handling it
-// internally -- confirmed against comm-central's messengercompose.xhtml,
-// where all three ways to send fire "command" with a stable element id:
-// button-send (toolbar button, command="cmd_sendButton"),
-// menu-item-send-now (File > Send Now, command="cmd_sendNow"), and
-// File > Send Later (no id of its own, only command="cmd_sendLater" --
-// matched by that command id instead, since XUL command dispatch surfaces
-// it as well). Matching on id via a *capturing* listener on the compose
-// document means our handler runs before the event reaches the button/menu
-// item itself, i.e. before Thunderbird's own goDoCommand()/GenericSendMessage
-// handling for that same click -- unlike compose.onBeforeSend, which fires
-// from somewhere inside Thunderbird's own send pipeline, quite possibly
-// after it has already resolved and cached the recipient's certificate.
-// cleanup()'s own certDB.getCerts() call (the specific operation already
-// confirmed sufficient by itself to disrupt reading) runs synchronously up
-// to its first await, so it's guaranteed to execute before the send
-// continues; the rest of cleanup (checking cert9.db, deleting) is async and
-// keeps running concurrently with Thunderbird's own send processing.
-const SEND_BUTTON_IDS = new Set([
-  "button-send",
-  "cmd_sendButton",
-  "menu-item-send-now",
-  "cmd_sendNow",
-  "cmd_sendLater",
-]);
-
-function isComposeWindow(win) {
-  return win.document.documentElement.getAttribute("windowtype") === "msgcompose";
-}
-
-function onSendTriggered(id) {
-  console.log(`certCleanup SEND-BUTTON-TRIGGER: #${id} activated, running cleanup`);
-  doCleanup()
-    .then((deleted) => {
-      console.log(
-        `certCleanup SEND-BUTTON-TRIGGER: done, ${deleted.length} deleted -- now try reading encrypted mail`
-      );
-    })
-    .catch((e) => {
-      Cu.reportError("certCleanup SEND-BUTTON-TRIGGER: cleanup failed: " + e);
-    });
-}
-
-function hookComposeWindow(win) {
-  if (win.__certCleanupHooked) {
-    return;
-  }
-  win.__certCleanupHooked = true;
-  win.document.addEventListener(
-    "command",
-    (event) => {
-      const id = event.target && event.target.id;
-      if (SEND_BUTTON_IDS.has(id)) {
-        onSendTriggered(id);
-      }
-    },
-    true // capture, so this still sees the event even if something else stops propagation
-  );
-}
-
-function onWindowOpened(win) {
-  win.addEventListener(
-    "load",
-    function onLoad() {
-      win.removeEventListener("load", onLoad);
-      if (isComposeWindow(win)) {
-        hookComposeWindow(win);
-      }
-    },
-    { once: true }
-  );
-}
-
-const domWindowOpenedObserver = {
-  observe(subject, topic) {
-    if (topic === "domwindowopened") {
-      // "domwindowopened"'s subject is already the raw Window object in JS.
-      onWindowOpened(subject);
-    }
-  },
-};
-
-// Registers the send-button hook for every current and future compose
-// window. Called once from getAPI() below (see the comment there for why
-// module-level top-level code isn't the right place for this), guarded so a
-// second getAPI() call for another context can't register everything twice.
+// Registers the earliest well-known Gecko shutdown phase (ShutdownPhase::
+// AppShutdownConfirmed, topic "quit-application"). Called once from
+// getAPI() below (see the comment there for why module-level top-level
+// code isn't the right place for this), guarded so a second getAPI() call
+// for another context can't register it twice.
 let initialized = false;
 function initialize() {
   if (initialized) {
@@ -257,10 +183,6 @@ function initialize() {
   }
   initialized = true;
   registerShutdownBlocker();
-  Services.obs.addObserver(domWindowOpenedObserver, "domwindowopened");
-  for (const win of Services.wm.getEnumerator("msgcompose")) {
-    hookComposeWindow(win);
-  }
 }
 
 const SHUTDOWN_BLOCKER_NAME =
@@ -298,12 +220,12 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
   // Experiment to become available to a WebExtension context -- unlike bare
   // module-level top-level code, it's guaranteed to run as soon as the
   // add-on actually needs this API, which is the right place for one-time
-  // setup like the listeners below (module-level code turned out to be
-  // unreliable here: Experiment "parent" scripts can be loaded lazily on
-  // first real API access rather than eagerly with the add-on, so with no
-  // WebExtension-side code touching this API at all -- as briefly happened
-  // here once the send-button hook moved entirely into this file --
-  // nothing ever triggered the script to load in the first place).
+  // setup like the shutdown blocker (module-level code turned out to be
+  // unreliable here in an earlier build on this branch: Experiment "parent"
+  // scripts can be loaded lazily on first real API access rather than
+  // eagerly with the add-on, so with no WebExtension-side code touching
+  // this API at all, nothing ever triggered the script to load in the
+  // first place).
   getAPI(context) {
     initialize();
     return {
@@ -313,10 +235,11 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
         // schema.json for why background.js needs to make this call at all
         // rather than relying on getAPI() running on its own.
         activate: async () => {},
-        // Exposed for manual/on-demand use (e.g. from the Browser Console
-        // while testing), but background.js does not call this on any
-        // schedule -- see onQuitApplication above and the send-button
-        // hook above for the only two places cleanup actually runs.
+        // Called by background.js's browser.compose.onAfterSend listener
+        // when a send just failed -- see this file's top comment and
+        // background.js for why that's the trigger now, instead of a
+        // proactive run on every window-open or every send -- and by
+        // onQuitApplication above at shutdown.
         cleanup: doCleanup,
       },
     };
@@ -335,11 +258,10 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
       return;
     }
     // The extension is being disabled/reloaded/uninstalled -- not app
-    // shutdown -- so anything registered in initialize() above would
+    // shutdown -- so the blocker registered in initialize() above would
     // otherwise leak (and, worse, keep referencing this soon-to-be-stale
     // script) across the reload.
     AsyncShutdown.appShutdownConfirmed.removeBlocker(onQuitApplication);
-    Services.obs.removeObserver(domWindowOpenedObserver, "domwindowopened");
     Services.obs.notifyObservers(null, "startupcache-invalidate", null);
   }
 };
