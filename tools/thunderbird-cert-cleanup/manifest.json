@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.13",
-  "description": "GETCERTS-PLUS-LOGOUT CONTROL BUILD, not for production: listModules() turned out to return a Promise on this nightly. enumerate()/findOwnSlot()/getToken()/logoutAndDropAuthenticatedResources() all now await if given a Promise, so the actual logout call finally gets a chance to run.",
+  "version": "0.4.14",
+  "description": "DBKEY-LOOKUP BUILD, not for production: drops getCerts() entirely. Resolves our own cert via each mail identity's signing_cert_dbkey/encryption_cert_dbkey pref and nsIX509CertDB.findCertByDBKey() -- the same targeted lookup Thunderbird's own compose-security code uses when signing/encrypting, which the user found empirically recovers reading after it runs.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",

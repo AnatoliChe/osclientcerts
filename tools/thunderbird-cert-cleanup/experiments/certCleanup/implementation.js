@@ -2,124 +2,159 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-// GETCERTS-PLUS-LOGOUT CONTROL BUILD (experiment/cert-cleanup-mid-session
-// branch), not for production. 0.4.10 (getCerts() alone, no cert9.db
-// access at all) still broke reading encrypted mail. This build calls
-// getCerts() and then immediately calls nsIPK11Token.
-// logoutAndDropAuthenticatedResources() on the "OS Client Cert Token" slot,
-// to test whether that recovers/avoids whatever getCerts() disturbs.
-// logoutAndDropAuthenticatedResources() is the same kind of operation a
-// "Log Out" action in Certificate Manager's Device Manager would perform on
-// a token -- explicitly drops cached/authenticated state for that slot,
-// lighter-weight than a full PKCS#11 module unload+reload.
+// DBKEY-LOOKUP BUILD (experiment/cert-cleanup-mid-session branch), not for
+// production. Every build so far that called nsIX509CertDB.getCerts()
+// mid-session broke reading encrypted mail afterward -- even a build that
+// called *only* getCerts() and touched nothing else. But the user found
+// that composing and sending a signed+encrypted message *recovers* reading
+// in the same session. Thunderbird's own compose-security code
+// (mailnews/extensions/smime/nsMsgComposeSecure.cpp, MimeCryptoHackCerts())
+// never calls getCerts() to find the identity's own certificate -- it reads
+// the "signing_cert_dbkey"/"encryption_cert_dbkey" identity preferences
+// (set once, when the user picks a certificate in Account Settings) and
+// resolves them with nsIX509CertDB.findCertByDBKey(), a single targeted
+// lookup, not a full multi-slot enumeration.
+//
+// This build does the same thing instead of getCerts(): reads those dbkey
+// prefs from every mail identity via MailServices.accounts.allIdentities
+// (a plain Array<nsIMsgIdentity>, not PKCS#11-related, so none of the
+// nsISimpleEnumerator/Promise API-drift pain seen with
+// nsIPKCS11ModuleDB.listModules() on this branch applies to it) and calls
+// findCertByDBKey() for each one -- never calling getCerts() at all. If
+// this build doesn't break reading, that confirms getCerts()'s full
+// enumeration specifically is what corrupts things, not any access to our
+// token whatsoever -- and this becomes the real fix, not just a control
+// build.
 
 const { ExtensionCommon } = ChromeUtils.importESModule(
   "resource://gre/modules/ExtensionCommon.sys.mjs"
 );
 
-const OS_CLIENT_CERTS_TOKEN_NAME = "OS Client Cert Token";
+console.log("certCleanup: implementation.js loaded (dbkey-lookup build)");
 
-console.log("certCleanup: implementation.js loaded (getCerts+logout build)");
-
-// Robust against API drift: this branch has now seen listModules()/
-// listSlots() behave as (a) a classic nsISimpleEnumerator (no for-of
-// support, needs hasMoreElements()/getNext()), (b) something that doesn't
-// support hasMoreElements() either, and (c) a Promise -- on three different
-// Thunderbird Daily nightly builds. The exact XPCOM binding for these
-// methods is apparently still in flux upstream. Handle whichever shape
-// shows up, await-ing first if it's a Promise.
-async function enumerate(result) {
-  if (result == null) {
-    return [];
-  }
-  if (typeof result.then === "function") {
-    return enumerate(await result);
-  }
-  if (typeof result.hasMoreElements === "function") {
-    const items = [];
-    while (result.hasMoreElements()) {
-      items.push(result.getNext());
-    }
-    return items;
-  }
-  if (typeof result[Symbol.iterator] === "function") {
-    return Array.from(result);
-  }
-  if (typeof result.length === "number") {
-    return Array.from({ length: result.length }, (_, i) => result[i]);
-  }
-  console.log("certCleanup: enumerate() got an unrecognized shape: " + result);
-  return [];
+// Plain XPCOM file read (nsIFileInputStream + nsIBinaryInputStream), not
+// Sqlite.sys.mjs -- confirmed safe on its own in 0.4.8 (only getCerts(),
+// not this, broke reading in that build).
+function readFileBytes(file) {
+  const stream = Cc["@mozilla.org/network/file-input-stream;1"].createInstance(
+    Ci.nsIFileInputStream
+  );
+  stream.init(file, -1, -1, 0);
+  const binStream = Cc["@mozilla.org/binaryinputstream;1"].createInstance(
+    Ci.nsIBinaryInputStream
+  );
+  binStream.setInputStream(stream);
+  const bytes = binStream.readByteArray(binStream.available());
+  binStream.close();
+  return new Uint8Array(bytes);
 }
 
-async function findOwnSlot() {
-  const moduleDB = Cc["@mozilla.org/security/pkcs11moduledb;1"].getService(
-    Ci.nsIPKCS11ModuleDB
+function containsSubsequence(haystack, needle) {
+  if (needle.length === 0 || needle.length > haystack.length) {
+    return false;
+  }
+  outer: for (let i = 0; i <= haystack.length - needle.length; i++) {
+    for (let j = 0; j < needle.length; j++) {
+      if (haystack[i + j] !== needle[j]) {
+        continue outer;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+// Finds our own live certificate(s) the same way Thunderbird's own
+// compose-security code does when it's about to sign/encrypt: read the
+// per-identity dbkey preference(s), resolve each with findCertByDBKey().
+// No getCerts() call anywhere in this path.
+function findLiveCertsViaIdentities(certDB) {
+  const { MailServices } = ChromeUtils.importESModule(
+    "resource:///modules/MailServices.sys.mjs"
   );
-  const modules = await enumerate(moduleDB.listModules());
-  console.log("certCleanup: findOwnSlot: " + modules.length + " module(s)");
-  for (const module of modules) {
-    const mod = module.QueryInterface(Ci.nsIPKCS11Module);
-    const slots = await enumerate(mod.listSlots());
-    console.log(
-      "certCleanup: findOwnSlot: module '" + mod.name + "' has " +
-        slots.length + " slot(s)"
-    );
-    for (const slot of slots) {
-      const s = slot.QueryInterface(Ci.nsIPKCS11Slot);
-      console.log("certCleanup: findOwnSlot: slot tokenName='" + s.tokenName + "'");
-      if (s.tokenName === OS_CLIENT_CERTS_TOKEN_NAME) {
-        return s;
+
+  const liveCerts = [];
+  const seenDbKeys = new Set();
+  const identities = MailServices.accounts.allIdentities;
+  console.log("certCleanup: " + identities.length + " mail identity(ies)");
+  for (const identity of identities) {
+    for (const attr of ["signing_cert_dbkey", "encryption_cert_dbkey"]) {
+      let dbKey;
+      try {
+        dbKey = identity.getCharAttribute(attr);
+      } catch (e) {
+        continue;
+      }
+      if (!dbKey || seenDbKeys.has(dbKey)) {
+        continue;
+      }
+      seenDbKeys.add(dbKey);
+      let cert;
+      try {
+        cert = certDB.findCertByDBKey(dbKey);
+      } catch (e) {
+        console.log(
+          "certCleanup: findCertByDBKey failed for " + attr + ": " + e
+        );
+        continue;
+      }
+      if (cert) {
+        console.log(
+          "certCleanup: resolved " + attr + " -> subject=" + cert.subjectName
+        );
+        liveCerts.push(cert);
       }
     }
   }
-  return null;
+  return liveCerts;
 }
 
 async function doCleanup() {
-  console.log("certCleanup: doCleanup starting (getCerts + logout, no file access)");
+  console.log("certCleanup: doCleanup starting (dbkey lookup, no getCerts())");
   const certDB = Cc["@mozilla.org/security/x509certdb;1"].getService(
     Ci.nsIX509CertDB
   );
 
-  const certs = certDB.getCerts();
-  const liveCerts = certs.filter(
-    (cert) => (cert.tokenName || "").trim() === OS_CLIENT_CERTS_TOKEN_NAME
-  );
-  console.log(
-    "certCleanup: getCerts() returned " + certs.length +
-      " total, " + liveCerts.length + " on token '" +
-      OS_CLIENT_CERTS_TOKEN_NAME + "'"
-  );
-
-  const slot = await findOwnSlot();
-  if (!slot) {
-    console.log("certCleanup: could not find our slot, skipping logout");
+  const liveCerts = findLiveCertsViaIdentities(certDB);
+  if (liveCerts.length === 0) {
+    console.log("certCleanup: no live certs resolved via identity dbkeys, nothing to do");
     return [];
   }
-  try {
-    // Same API-drift defensiveness as enumerate(): getToken() might also be
-    // a Promise on this build.
-    let tokenResult = slot.getToken();
-    if (tokenResult && typeof tokenResult.then === "function") {
-      tokenResult = await tokenResult;
+
+  const profileDir = Services.dirsvc.get("ProfD", Ci.nsIFile);
+  const dbFile = profileDir.clone();
+  dbFile.append("cert9.db");
+  const dbBytes = readFileBytes(dbFile);
+  console.log("certCleanup: read " + dbBytes.length + " bytes from cert9.db");
+
+  const deleted = [];
+  for (const liveCert of liveCerts) {
+    const derArray = liveCert.getRawDER();
+    const der = Uint8Array.from(derArray);
+    console.log("certCleanup: scanning for subject=" + liveCert.subjectName);
+    const found = containsSubsequence(dbBytes, der);
+    console.log("certCleanup: " + (found ? "found" : "not found") + " in cert9.db");
+    if (!found) {
+      continue;
     }
-    const token = tokenResult.QueryInterface(Ci.nsIPK11Token);
-    console.log(
-      "certCleanup: calling logoutAndDropAuthenticatedResources() on token '" +
-        token.tokenName + "'"
-    );
-    let logoutResult = token.logoutAndDropAuthenticatedResources();
-    if (logoutResult && typeof logoutResult.then === "function") {
-      await logoutResult;
+    try {
+      const tempCert = certDB.constructX509(derArray);
+      certDB.deleteCertificate(tempCert);
+      deleted.push({
+        subjectName: liveCert.subjectName,
+        issuerName: liveCert.issuerName,
+        serialNumber: liveCert.serialNumber,
+      });
+    } catch (e) {
+      Cu.reportError(
+        "certCleanup: deleteCertificate failed for subject=" +
+          liveCert.subjectName + ": " + e
+      );
     }
-    console.log("certCleanup: logoutAndDropAuthenticatedResources() returned");
-  } catch (e) {
-    Cu.reportError("certCleanup: logout failed: " + e);
   }
 
-  console.log("certCleanup: doCleanup finished");
-  return [];
+  console.log("certCleanup: doCleanup finished, " + deleted.length + " deleted");
+  return deleted;
 }
 
 var certCleanup = class extends ExtensionCommon.ExtensionAPI {
