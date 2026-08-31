@@ -35,6 +35,14 @@ version = "0.5"
 version = "0.3"
 features = ["wincrypt", "bcrypt", "errhandlingapi", "ncrypt"]
 
+[target."cfg(target_os = \"windows\")".dependencies.rusqlite]
+# "bundled" compiles SQLite from source as part of this crate instead of
+# linking a system library, so the Windows CI runner (and anyone building
+# this from source) doesn't need a separate SQLite dev package -- same
+# tradeoff the "bundled" feature is designed for.
+version = "0.31"
+features = ["bundled"]
+
 [build-dependencies]
 bindgen = "0.72"
 

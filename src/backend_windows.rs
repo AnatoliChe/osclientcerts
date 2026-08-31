@@ -199,7 +199,11 @@ impl Cert {
         &self.label
     }
 
-    fn value(&self) -> &[u8] {
+    // pub(crate) rather than private: cert9_cleanup.rs (same crate, different
+    // module) needs the raw DER bytes to compare against cert9.db's own
+    // CKA_VALUE column. Not pub(external) -- this is still purely an
+    // implementation detail of how we represent a certificate internally.
+    pub(crate) fn value(&self) -> &[u8] {
         &self.value
     }
 

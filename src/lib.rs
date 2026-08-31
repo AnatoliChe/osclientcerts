@@ -39,6 +39,8 @@ mod backend_macos;
 mod backend_other;
 #[cfg(target_os = "windows")]
 mod backend_windows;
+#[cfg(target_os = "windows")]
+mod cert9_cleanup;
 mod mechanism;
 
 use manager::ManagerProxy;
@@ -128,6 +130,12 @@ extern "C" fn C_Initialize(_pInitArgs: CK_C_INITIALIZE_ARGS_PTR) -> CK_RV {
         return CKR_CRYPTOKI_ALREADY_INITIALIZED;
     }
     *manager_guard = Some(ManagerProxy::new());
+    // Experimental native cert9.db cleanup (see cert9_cleanup.rs for why this
+    // exists and what it's testing). Idempotent across repeated
+    // C_Initialize calls, so it's safe to call unconditionally here rather
+    // than trying to track init/finalize cycles ourselves.
+    #[cfg(target_os = "windows")]
+    cert9_cleanup::spawn_background_thread();
     debug!("C_Initialize: CKR_OK");
     CKR_OK
 }
