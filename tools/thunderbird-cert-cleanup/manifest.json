@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.22",
-  "description": "SIGN-CHECKBOX-TRIGGER BUILD (v3), not for production: v0.4.21 still logged nothing at all from implementation.js, not even its own registration line. This build adds an unconditional first-line log statement to prove whether the script is executing at all, wraps the one previously-unguarded statement (Services.obs.addObserver) in try/catch so a throw there can't silently prevent the rest of the file (including the ExtensionAPI class) from loading, and has background.js call a new no-op certCleanup.ping() at startup in case Experiment parent scripts load lazily on first API access rather than eagerly with the add-on.",
+  "version": "0.4.23",
+  "description": "SIGN-CHECKBOX-TRIGGER BUILD (v4, cleaned up), not for production: v0.4.22 confirmed working (root cause was lazy Experiment loading -- fixed there with a no-op ping() call). This build is a cleanup pass, not a behavior change: all setup (shutdown blocker, sign-checkbox hook) now lives in getAPI(), the documented lifecycle entry point, instead of bare module-level top-level code; the redundant toggleGlobalSignMessage monkey-patch is removed now that the id-matched \"command\" event listener alone is confirmed to catch both the toolbar button and the menu item (it was firing cleanup twice per toggle); and ping() is renamed to the more honestly-described activate().",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",

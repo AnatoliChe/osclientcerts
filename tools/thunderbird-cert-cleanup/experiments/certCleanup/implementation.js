@@ -6,14 +6,6 @@
 // with full access to Gecko's internal APIs (Cc/Ci), unlike the sandboxed
 // background script. See ../../README.md for why this exists and how it's used.
 //
-// Logged unconditionally, as the literal first statement in the file, before
-// anything else runs: Experiment scripts are known to sometimes keep running
-// a stale cached copy across an in-place update (see onShutdown below) --
-// if this line is ever missing from the console, the version actually
-// executing is not the one just installed, full stop, before debugging
-// anything else in this file.
-console.log("certCleanup: implementation.js module evaluation starting");
-
 // ExtensionCommon is not a predefined global in this scope (unlike Cc/Ci/Cu,
 // which are) -- it must be imported explicitly, same as any other privileged
 // Gecko module.
@@ -164,38 +156,26 @@ async function doCleanup() {
   return deleted;
 }
 
-// SIGN-CHECKBOX-TRIGGER BUILD, not for production. Tests a third trigger
-// point, after compose-window-open (v0.4.18) and compose.onBeforeSend
-// (v0.4.19): the Security > "Digitally Sign This Message" checkbox in the
-// compose window itself. Known reliability caveats, accepted for this
-// experiment: (1) never fires at all for an identity with "always sign" as
-// its default, since the checkbox starts checked and the user never
-// touches it; (2) fires whenever the user happens to toggle it, which could
-// be before or after Thunderbird's own recipient-cert resolution -- unlike
-// compose-window-open, timing here is not guaranteed to be earlier than
-// that resolution.
+// SIGN-CHECKBOX-TRIGGER BUILD, not for production. Trigger under test: the
+// Security > "Digitally Sign This Message" checkbox in the compose window
+// (both the menubar/toolbar menu item and the toolbar button), instead of
+// compose-window-open (v0.4.18) or compose.onBeforeSend (v0.4.19). Known
+// reliability caveats, accepted for this experiment: (1) never fires for an
+// identity that signs by default, since the checkbox starts checked and the
+// user never touches it; (2) fires whenever the user happens to toggle it,
+// which could be before or after Thunderbird's own recipient-cert
+// resolution -- unlike compose-window-open, timing here isn't guaranteed to
+// be earlier than that resolution.
 //
-// v0.4.20 hooked only the compose window's global `toggleGlobalSignMessage`
-// by monkey-patching it, and never fired at all -- no log line, not even
-// "hooked...". Root cause not confirmed (candidates: onOpenWindow/
-// docShell.domWindow throwing silently, or the menu checkbox's oncommand
-// resolving toggleGlobalSignMessage before our patch replaces the global).
-// This build is defensive about it instead of guessing further:
-//   1. Window discovery via nsIObserverService "domwindowopened" (gives the
-//      raw Window directly, no .docShell.domWindow indirection) instead of
-//      nsIWindowMediator.addListener.
-//   2. PRIMARY trigger: a capturing "command" event listener on the
-//      document, matching by element id against every checkbox confirmed in
-//      comm-central's messengercompose.xhtml/MsgComposeCommands.js that can
-//      toggle signing (menu_securitySign_Menubar, menu_securitySign_Toolbar,
-//      button-signing). This doesn't depend on any particular JS function
-//      name or wiring, just the DOM "command" event XUL menuitems/
-//      toolbarbuttons always dispatch when activated.
-//   3. SECONDARY trigger, kept as a fallback and to cross-check: still
-//      monkey-patches toggleGlobalSignMessage() if present.
-//   4. Every step logs explicitly, including inside try/catch around
-//      anything that touches privileged window internals, so a silent
-//      failure this time still leaves a trail in the console.
+// Every XUL menuitem/toolbarbutton dispatches a DOM "command" event on
+// activation, regardless of what JS function ends up handling it
+// internally -- confirmed against comm-central's messengercompose.xhtml,
+// where both the checkbox menu item and the toolbar button fire "command"
+// with a stable element id (menu_securitySign_Menubar,
+// menu_securitySign_Toolbar, button-signing). Matching on that id, via a
+// capturing listener on the compose document, covers every way the user can
+// toggle signing without depending on any particular internal JS function
+// name or wiring.
 const SIGN_CHECKBOX_IDS = new Set([
   "menu_securitySign_Menubar",
   "menu_securitySign_Toolbar",
@@ -203,24 +183,19 @@ const SIGN_CHECKBOX_IDS = new Set([
 ]);
 
 function isComposeWindow(win) {
-  try {
-    return win.document.documentElement.getAttribute("windowtype") === "msgcompose";
-  } catch (e) {
-    console.error("certCleanup SIGN-CHECKBOX-TRIGGER: isComposeWindow check failed: " + e);
-    return false;
-  }
+  return win.document.documentElement.getAttribute("windowtype") === "msgcompose";
 }
 
-function onSignTriggered(reason) {
-  console.log(`certCleanup SIGN-CHECKBOX-TRIGGER (${reason}): running cleanup`);
+function onSignCheckboxToggled(id) {
+  console.log(`certCleanup SIGN-CHECKBOX-TRIGGER: #${id} toggled, running cleanup`);
   doCleanup()
     .then((deleted) => {
       console.log(
-        `certCleanup SIGN-CHECKBOX-TRIGGER (${reason}): done, ${deleted.length} deleted -- now try reading encrypted mail`
+        `certCleanup SIGN-CHECKBOX-TRIGGER: done, ${deleted.length} deleted -- now try reading encrypted mail`
       );
     })
     .catch((e) => {
-      Cu.reportError(`certCleanup SIGN-CHECKBOX-TRIGGER (${reason}): cleanup failed: ` + e);
+      Cu.reportError("certCleanup SIGN-CHECKBOX-TRIGGER: cleanup failed: " + e);
     });
 }
 
@@ -229,100 +204,55 @@ function hookComposeWindow(win) {
     return;
   }
   win.__certCleanupSignHooked = true;
-  console.log("certCleanup SIGN-CHECKBOX-TRIGGER: hookComposeWindow running for a msgcompose window");
-
-  // Primary: direct DOM "command" event, id-matched. XUL menuitems and
-  // toolbarbuttons dispatch this on activation regardless of what JS
-  // function ends up handling it internally.
-  try {
-    win.document.addEventListener(
-      "command",
-      (event) => {
-        const id = event.target && event.target.id;
-        if (SIGN_CHECKBOX_IDS.has(id)) {
-          console.log(`certCleanup SIGN-CHECKBOX-TRIGGER: command event from #${id}`);
-          onSignTriggered("command-event:" + id);
-        }
-      },
-      true // capture, so this still sees the event even if something else stops propagation
-    );
-    console.log("certCleanup SIGN-CHECKBOX-TRIGGER: attached document-level command listener");
-  } catch (e) {
-    console.error("certCleanup SIGN-CHECKBOX-TRIGGER: failed to attach command listener: " + e);
-  }
-
-  // Secondary/fallback: monkey-patch the global function directly, in case
-  // the id-matched command listener above misses something (e.g. a
-  // keyboard shortcut that calls the function without going through one of
-  // the known elements).
-  try {
-    if (typeof win.toggleGlobalSignMessage === "function") {
-      const original = win.toggleGlobalSignMessage;
-      win.toggleGlobalSignMessage = function (...args) {
-        const result = original.apply(this, args);
-        onSignTriggered("toggleGlobalSignMessage-patch");
-        return result;
-      };
-      console.log("certCleanup SIGN-CHECKBOX-TRIGGER: also patched toggleGlobalSignMessage");
-    } else {
-      console.log(
-        "certCleanup SIGN-CHECKBOX-TRIGGER: toggleGlobalSignMessage not found on this window (relying on command listener only)"
-      );
-    }
-  } catch (e) {
-    console.error("certCleanup SIGN-CHECKBOX-TRIGGER: failed to patch toggleGlobalSignMessage: " + e);
-  }
+  win.document.addEventListener(
+    "command",
+    (event) => {
+      const id = event.target && event.target.id;
+      if (SIGN_CHECKBOX_IDS.has(id)) {
+        onSignCheckboxToggled(id);
+      }
+    },
+    true // capture, so this still sees the event even if something else stops propagation
+  );
 }
 
-function maybeHookNewWindow(subject) {
-  try {
-    // "domwindowopened"'s subject is already the raw Window object in JS.
-    const win = subject;
-    win.addEventListener(
-      "load",
-      function onLoad() {
-        win.removeEventListener("load", onLoad);
-        console.log(
-          `certCleanup SIGN-CHECKBOX-TRIGGER: domwindowopened+load fired, windowtype=${
-            win.document?.documentElement?.getAttribute("windowtype")
-          }`
-        );
-        if (isComposeWindow(win)) {
-          hookComposeWindow(win);
-        }
-      },
-      { once: true }
-    );
-  } catch (e) {
-    console.error("certCleanup SIGN-CHECKBOX-TRIGGER: maybeHookNewWindow failed: " + e);
-  }
+function onWindowOpened(win) {
+  win.addEventListener(
+    "load",
+    function onLoad() {
+      win.removeEventListener("load", onLoad);
+      if (isComposeWindow(win)) {
+        hookComposeWindow(win);
+      }
+    },
+    { once: true }
+  );
 }
 
 const domWindowOpenedObserver = {
   observe(subject, topic) {
     if (topic === "domwindowopened") {
-      maybeHookNewWindow(subject);
+      // "domwindowopened"'s subject is already the raw Window object in JS.
+      onWindowOpened(subject);
     }
   },
 };
 
-try {
+// Registers the sign-checkbox hook for every current and future compose
+// window. Called once from getAPI() below (see the comment there for why
+// module-level top-level code isn't the right place for this), guarded so a
+// second getAPI() call for another context can't register everything twice.
+let initialized = false;
+function initialize() {
+  if (initialized) {
+    return;
+  }
+  initialized = true;
+  registerShutdownBlocker();
   Services.obs.addObserver(domWindowOpenedObserver, "domwindowopened");
-  console.log("certCleanup SIGN-CHECKBOX-TRIGGER: domwindowopened observer registered");
-} catch (e) {
-  // Deliberately not swallowed further up: if this throws, everything below
-  // it in the file (the AsyncShutdown blocker, the ExtensionAPI class
-  // itself) would otherwise silently never load either.
-  console.error("certCleanup SIGN-CHECKBOX-TRIGGER: FAILED to register domwindowopened observer: " + e);
-}
-
-// Also hook any compose windows already open when the add-on loads/reloads.
-try {
   for (const win of Services.wm.getEnumerator("msgcompose")) {
     hookComposeWindow(win);
   }
-} catch (e) {
-  console.error("certCleanup SIGN-CHECKBOX-TRIGGER: enumerating existing compose windows failed: " + e);
 }
 
 const SHUTDOWN_BLOCKER_NAME =
@@ -343,34 +273,42 @@ async function onQuitApplication() {
   }
 }
 
-// The earliest well-known Gecko shutdown phase (ShutdownPhase::
-// AppShutdownConfirmed, topic "quit-application"), registered once when this
-// script first loads (module-level code in an Experiment script runs once
-// per load of the extension, independent of how many times getAPI() is
-// called for background-page contexts). Blocking here, rather than doing a
-// fire-and-forget cleanup, guarantees our async cert9.db work finishes
-// before Thunderbird tears down further -- see the long comment in
-// doCleanup() for why shutdown, and not any point during the session, is
-// where this needs to run.
-AsyncShutdown.appShutdownConfirmed.addBlocker(
-  SHUTDOWN_BLOCKER_NAME,
-  onQuitApplication
-);
+// Registers the earliest well-known Gecko shutdown phase (ShutdownPhase::
+// AppShutdownConfirmed, topic "quit-application"). Blocking here, rather
+// than doing a fire-and-forget cleanup, guarantees our async cert9.db work
+// finishes before Thunderbird tears down further -- see the long comment in
+// doCleanup() for why shutdown is one of the two points this needs to run.
+function registerShutdownBlocker() {
+  AsyncShutdown.appShutdownConfirmed.addBlocker(
+    SHUTDOWN_BLOCKER_NAME,
+    onQuitApplication
+  );
+}
 
 var certCleanup = class extends ExtensionCommon.ExtensionAPI {
+  // getAPI() is Thunderbird's documented entry point for a privileged
+  // Experiment to become available to a WebExtension context -- unlike bare
+  // module-level top-level code, it's guaranteed to run as soon as the
+  // add-on actually needs this API, which is the right place for one-time
+  // setup like the listeners below (module-level code turned out to be
+  // unreliable here: Experiment "parent" scripts can be loaded lazily on
+  // first real API access rather than eagerly with the add-on, so with no
+  // WebExtension-side code touching this API at all -- as briefly happened
+  // here once the sign-checkbox hook moved entirely into this file --
+  // nothing ever triggered the script to load in the first place).
   getAPI(context) {
+    initialize();
     return {
       certCleanup: {
-        // No-op; see schema.json for why background.js calls this once at
-        // startup (forces this script to load if Thunderbird would
-        // otherwise only load it lazily on first real API access).
-        ping: async () => {
-          console.log("certCleanup: ping() called, implementation.js is loaded and responsive");
-        },
+        // Called once by background.js at startup. By the time this
+        // resolves, getAPI() above has already run initialize() -- see
+        // schema.json for why background.js needs to make this call at all
+        // rather than relying on getAPI() running on its own.
+        activate: async () => {},
         // Exposed for manual/on-demand use (e.g. from the Browser Console
         // while testing), but background.js does not call this on any
-        // schedule -- see onQuitApplication above for the only place
-        // cleanup actually runs in normal use.
+        // schedule -- see onQuitApplication above and the sign-checkbox
+        // hook above for the only two places cleanup actually runs.
         cleanup: doCleanup,
       },
     };
@@ -389,9 +327,9 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
       return;
     }
     // The extension is being disabled/reloaded/uninstalled -- not app
-    // shutdown -- so the blocker registered above would otherwise leak
-    // (and, worse, keep referencing this soon-to-be-stale script) across
-    // the reload.
+    // shutdown -- so anything registered in initialize() above would
+    // otherwise leak (and, worse, keep referencing this soon-to-be-stale
+    // script) across the reload.
     AsyncShutdown.appShutdownConfirmed.removeBlocker(onQuitApplication);
     Services.obs.removeObserver(domWindowOpenedObserver, "domwindowopened");
     Services.obs.notifyObservers(null, "startupcache-invalidate", null);
