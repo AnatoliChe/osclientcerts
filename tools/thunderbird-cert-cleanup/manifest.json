@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.18",
-  "description": "COMPOSE-WINDOW-TRIGGER BUILD, not for production: trunk's production Sqlite.sys.mjs-based cleanup logic, unchanged, plus one new trigger -- runs immediately when the user opens a new message-compose window (browser.windows.onCreated, type=messageCompose), in addition to the existing shutdown-time run. Tests whether opening a compose window (short of actually sending) recovers or avoids the mid-session reading breakage.",
+  "version": "0.4.19",
+  "description": "BEFORE-SEND-TRIGGER BUILD, not for production: trunk's production Sqlite.sys.mjs-based cleanup logic, unchanged, but the compose-window-open trigger is replaced with browser.compose.onBeforeSend -- runs cleanup right when the user clicks Send, awaited before the send itself proceeds, instead of at compose-window-open. Tests whether shrinking the window between cleanup and the confirmed-recovering real send avoids the mid-session reading breakage, or at least shortens it to near the send's own duration.",
+  "permissions": ["compose"],
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
