@@ -1,12 +1,12 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.5",
-  "description": "EXPERIMENT BUILD, not for production: same as 0.4.4 (single-shot cleanup 10s after startup + PKCS#11 module reload), now with its own update_url so new experiment builds install via 'Check for Updates' instead of re-editing policies.json each time.",
+  "version": "0.4.6",
+  "description": "EXPERIMENT BUILD, not for production: same as 0.4.5, strict_min_version raised to 153.1.1 (current latest Thunderbird ESR) to match the actual test matrix (ESR/release/beta/nightly all >= this).",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
-      "strict_min_version": "128.0",
+      "strict_min_version": "153.1.1",
       "update_url": "https://raw.githubusercontent.com/AnatoliChe/osclientcerts/experiment/cert-cleanup-mid-session/tools/thunderbird-cert-cleanup/updates.json"
     }
   },
