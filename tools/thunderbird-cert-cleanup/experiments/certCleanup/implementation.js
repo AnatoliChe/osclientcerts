@@ -159,81 +159,155 @@ async function doCleanup() {
 // SIGN-CHECKBOX-TRIGGER BUILD, not for production. Tests a third trigger
 // point, after compose-window-open (v0.4.18) and compose.onBeforeSend
 // (v0.4.19): the Security > "Digitally Sign This Message" checkbox in the
-// compose window itself, toggled via the compose window's own global
-// function `toggleGlobalSignMessage()` (confirmed against comm-central's
-// mail/components/compose/content/MsgComposeCommands.js). Known reliability
-// caveats, accepted for this experiment: (1) never fires at all for an
-// identity with "always sign" as its default, since the checkbox starts
-// checked and the user never touches it; (2) fires whenever the user
-// happens to toggle it, which could be before or after Thunderbird's own
-// recipient-cert resolution -- unlike compose-window-open, timing here is
-// not guaranteed to be earlier than that resolution.
+// compose window itself. Known reliability caveats, accepted for this
+// experiment: (1) never fires at all for an identity with "always sign" as
+// its default, since the checkbox starts checked and the user never
+// touches it; (2) fires whenever the user happens to toggle it, which could
+// be before or after Thunderbird's own recipient-cert resolution -- unlike
+// compose-window-open, timing here is not guaranteed to be earlier than
+// that resolution.
 //
-// Since `toggleGlobalSignMessage` is a plain global function in the compose
-// window's own JS scope (not a WebExtension-visible API), this hooks it
-// directly via window enumeration/monkey-patching from the privileged
-// Experiment side -- the same technique legacy XUL overlay add-ons used.
+// v0.4.20 hooked only the compose window's global `toggleGlobalSignMessage`
+// by monkey-patching it, and never fired at all -- no log line, not even
+// "hooked...". Root cause not confirmed (candidates: onOpenWindow/
+// docShell.domWindow throwing silently, or the menu checkbox's oncommand
+// resolving toggleGlobalSignMessage before our patch replaces the global).
+// This build is defensive about it instead of guessing further:
+//   1. Window discovery via nsIObserverService "domwindowopened" (gives the
+//      raw Window directly, no .docShell.domWindow indirection) instead of
+//      nsIWindowMediator.addListener.
+//   2. PRIMARY trigger: a capturing "command" event listener on the
+//      document, matching by element id against every checkbox confirmed in
+//      comm-central's messengercompose.xhtml/MsgComposeCommands.js that can
+//      toggle signing (menu_securitySign_Menubar, menu_securitySign_Toolbar,
+//      button-signing). This doesn't depend on any particular JS function
+//      name or wiring, just the DOM "command" event XUL menuitems/
+//      toolbarbuttons always dispatch when activated.
+//   3. SECONDARY trigger, kept as a fallback and to cross-check: still
+//      monkey-patches toggleGlobalSignMessage() if present.
+//   4. Every step logs explicitly, including inside try/catch around
+//      anything that touches privileged window internals, so a silent
+//      failure this time still leaves a trail in the console.
+const SIGN_CHECKBOX_IDS = new Set([
+  "menu_securitySign_Menubar",
+  "menu_securitySign_Toolbar",
+  "button-signing",
+]);
+
 function isComposeWindow(win) {
   try {
     return win.document.documentElement.getAttribute("windowtype") === "msgcompose";
   } catch (e) {
+    console.error("certCleanup SIGN-CHECKBOX-TRIGGER: isComposeWindow check failed: " + e);
     return false;
   }
+}
+
+function onSignTriggered(reason) {
+  console.log(`certCleanup SIGN-CHECKBOX-TRIGGER (${reason}): running cleanup`);
+  doCleanup()
+    .then((deleted) => {
+      console.log(
+        `certCleanup SIGN-CHECKBOX-TRIGGER (${reason}): done, ${deleted.length} deleted -- now try reading encrypted mail`
+      );
+    })
+    .catch((e) => {
+      Cu.reportError(`certCleanup SIGN-CHECKBOX-TRIGGER (${reason}): cleanup failed: ` + e);
+    });
 }
 
 function hookComposeWindow(win) {
   if (win.__certCleanupSignHooked) {
     return;
   }
-  if (typeof win.toggleGlobalSignMessage !== "function") {
-    console.log(
-      "certCleanup SIGN-CHECKBOX-TRIGGER: toggleGlobalSignMessage not found on this compose window (wrong TB version, or UI changed?)"
-    );
-    return;
-  }
   win.__certCleanupSignHooked = true;
-  const original = win.toggleGlobalSignMessage;
-  win.toggleGlobalSignMessage = function (...args) {
-    const result = original.apply(this, args);
-    console.log(
-      "certCleanup SIGN-CHECKBOX-TRIGGER: toggleGlobalSignMessage fired, gSendSigned now =" +
-        win.gSendSigned + " -- running cleanup"
+  console.log("certCleanup SIGN-CHECKBOX-TRIGGER: hookComposeWindow running for a msgcompose window");
+
+  // Primary: direct DOM "command" event, id-matched. XUL menuitems and
+  // toolbarbuttons dispatch this on activation regardless of what JS
+  // function ends up handling it internally.
+  try {
+    win.document.addEventListener(
+      "command",
+      (event) => {
+        const id = event.target && event.target.id;
+        if (SIGN_CHECKBOX_IDS.has(id)) {
+          console.log(`certCleanup SIGN-CHECKBOX-TRIGGER: command event from #${id}`);
+          onSignTriggered("command-event:" + id);
+        }
+      },
+      true // capture, so this still sees the event even if something else stops propagation
     );
-    doCleanup()
-      .then((deleted) => {
-        console.log(
-          `certCleanup SIGN-CHECKBOX-TRIGGER: done, ${deleted.length} deleted -- now try reading encrypted mail`
-        );
-      })
-      .catch((e) => {
-        Cu.reportError("certCleanup SIGN-CHECKBOX-TRIGGER: cleanup failed: " + e);
-      });
-    return result;
-  };
-  console.log("certCleanup SIGN-CHECKBOX-TRIGGER: hooked toggleGlobalSignMessage on compose window");
+    console.log("certCleanup SIGN-CHECKBOX-TRIGGER: attached document-level command listener");
+  } catch (e) {
+    console.error("certCleanup SIGN-CHECKBOX-TRIGGER: failed to attach command listener: " + e);
+  }
+
+  // Secondary/fallback: monkey-patch the global function directly, in case
+  // the id-matched command listener above misses something (e.g. a
+  // keyboard shortcut that calls the function without going through one of
+  // the known elements).
+  try {
+    if (typeof win.toggleGlobalSignMessage === "function") {
+      const original = win.toggleGlobalSignMessage;
+      win.toggleGlobalSignMessage = function (...args) {
+        const result = original.apply(this, args);
+        onSignTriggered("toggleGlobalSignMessage-patch");
+        return result;
+      };
+      console.log("certCleanup SIGN-CHECKBOX-TRIGGER: also patched toggleGlobalSignMessage");
+    } else {
+      console.log(
+        "certCleanup SIGN-CHECKBOX-TRIGGER: toggleGlobalSignMessage not found on this window (relying on command listener only)"
+      );
+    }
+  } catch (e) {
+    console.error("certCleanup SIGN-CHECKBOX-TRIGGER: failed to patch toggleGlobalSignMessage: " + e);
+  }
 }
 
-const composeWindowWatcher = {
-  onOpenWindow(xulWindow) {
-    const win = xulWindow.docShell.domWindow;
+function maybeHookNewWindow(subject) {
+  try {
+    // "domwindowopened"'s subject is already the raw Window object in JS.
+    const win = subject;
     win.addEventListener(
       "load",
       function onLoad() {
         win.removeEventListener("load", onLoad);
+        console.log(
+          `certCleanup SIGN-CHECKBOX-TRIGGER: domwindowopened+load fired, windowtype=${
+            win.document?.documentElement?.getAttribute("windowtype")
+          }`
+        );
         if (isComposeWindow(win)) {
           hookComposeWindow(win);
         }
       },
       { once: true }
     );
+  } catch (e) {
+    console.error("certCleanup SIGN-CHECKBOX-TRIGGER: maybeHookNewWindow failed: " + e);
+  }
+}
+
+const domWindowOpenedObserver = {
+  observe(subject, topic) {
+    if (topic === "domwindowopened") {
+      maybeHookNewWindow(subject);
+    }
   },
-  onCloseWindow() {},
 };
 
-Services.wm.addListener(composeWindowWatcher);
+Services.obs.addObserver(domWindowOpenedObserver, "domwindowopened");
+console.log("certCleanup SIGN-CHECKBOX-TRIGGER: domwindowopened observer registered");
+
 // Also hook any compose windows already open when the add-on loads/reloads.
-for (const win of Services.wm.getEnumerator("msgcompose")) {
-  hookComposeWindow(win);
+try {
+  for (const win of Services.wm.getEnumerator("msgcompose")) {
+    hookComposeWindow(win);
+  }
+} catch (e) {
+  console.error("certCleanup SIGN-CHECKBOX-TRIGGER: enumerating existing compose windows failed: " + e);
 }
 
 const SHUTDOWN_BLOCKER_NAME =
@@ -298,7 +372,7 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
     // (and, worse, keep referencing this soon-to-be-stale script) across
     // the reload.
     AsyncShutdown.appShutdownConfirmed.removeBlocker(onQuitApplication);
-    Services.wm.removeListener(composeWindowWatcher);
+    Services.obs.removeObserver(domWindowOpenedObserver, "domwindowopened");
     Services.obs.notifyObservers(null, "startupcache-invalidate", null);
   }
 };

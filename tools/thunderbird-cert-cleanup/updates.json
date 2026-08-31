@@ -3,6 +3,10 @@
     "cert-cleanup-experiment@osclientcerts.dev": {
       "updates": [
         {
+          "version": "0.4.21",
+          "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.21-sign-checkbox-trigger-v2/cert-cleanup.xpi"
+        },
+        {
           "version": "0.4.20",
           "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.20-sign-checkbox-trigger/cert-cleanup.xpi"
         },

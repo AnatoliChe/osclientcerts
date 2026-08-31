@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.20",
-  "description": "SIGN-CHECKBOX-TRIGGER BUILD, not for production: trunk's production Sqlite.sys.mjs-based cleanup logic, unchanged, but triggered by toggling the Security > \"Digitally Sign This Message\" checkbox in the compose window, hooked directly via monkey-patching the compose window's own toggleGlobalSignMessage() from the privileged Experiment side (not a WebExtension event). Known caveat: never fires if the identity always signs by default (checkbox starts checked, never toggled), and firing order relative to Thunderbird's own recipient-cert resolution is not guaranteed the way compose-window-open's is.",
+  "version": "0.4.21",
+  "description": "SIGN-CHECKBOX-TRIGGER BUILD (v2, defensive), not for production: v0.4.20's toggleGlobalSignMessage monkey-patch never fired at all (no log line). This build adds a document-level capturing \"command\" event listener matched by element id (menu_securitySign_Menubar/_Toolbar, button-signing) as the primary trigger, keeps the function patch as a fallback, discovers compose windows via the domwindowopened observer instead of nsIWindowMediator.addListener, and wraps every step in try/catch with explicit logging so a silent failure this time still shows up in the console.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
