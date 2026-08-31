@@ -21,15 +21,19 @@ const OS_CLIENT_CERTS_TOKEN_NAME = "OS Client Cert Token";
 
 console.log("certCleanup: implementation.js loaded (getCerts+logout build)");
 
-// Robust against API drift: earlier builds on this branch have seen
-// listModules()/listSlots() behave as a classic nsISimpleEnumerator (no
-// for-of support, needs hasMoreElements()/getNext()) on one nightly build,
-// and apparently *not* support hasMoreElements() at all on a later nightly
-// (this is Thunderbird Daily; the exact XPCOM binding for these methods
-// isn't stable build-to-build). Handle whichever shape shows up.
-function enumerate(result) {
+// Robust against API drift: this branch has now seen listModules()/
+// listSlots() behave as (a) a classic nsISimpleEnumerator (no for-of
+// support, needs hasMoreElements()/getNext()), (b) something that doesn't
+// support hasMoreElements() either, and (c) a Promise -- on three different
+// Thunderbird Daily nightly builds. The exact XPCOM binding for these
+// methods is apparently still in flux upstream. Handle whichever shape
+// shows up, await-ing first if it's a Promise.
+async function enumerate(result) {
   if (result == null) {
     return [];
+  }
+  if (typeof result.then === "function") {
+    return enumerate(await result);
   }
   if (typeof result.hasMoreElements === "function") {
     const items = [];
@@ -48,15 +52,15 @@ function enumerate(result) {
   return [];
 }
 
-function findOwnSlot() {
+async function findOwnSlot() {
   const moduleDB = Cc["@mozilla.org/security/pkcs11moduledb;1"].getService(
     Ci.nsIPKCS11ModuleDB
   );
-  const modules = enumerate(moduleDB.listModules());
+  const modules = await enumerate(moduleDB.listModules());
   console.log("certCleanup: findOwnSlot: " + modules.length + " module(s)");
   for (const module of modules) {
     const mod = module.QueryInterface(Ci.nsIPKCS11Module);
-    const slots = enumerate(mod.listSlots());
+    const slots = await enumerate(mod.listSlots());
     console.log(
       "certCleanup: findOwnSlot: module '" + mod.name + "' has " +
         slots.length + " slot(s)"
@@ -88,18 +92,27 @@ async function doCleanup() {
       OS_CLIENT_CERTS_TOKEN_NAME + "'"
   );
 
-  const slot = findOwnSlot();
+  const slot = await findOwnSlot();
   if (!slot) {
     console.log("certCleanup: could not find our slot, skipping logout");
     return [];
   }
   try {
-    const token = slot.getToken().QueryInterface(Ci.nsIPK11Token);
+    // Same API-drift defensiveness as enumerate(): getToken() might also be
+    // a Promise on this build.
+    let tokenResult = slot.getToken();
+    if (tokenResult && typeof tokenResult.then === "function") {
+      tokenResult = await tokenResult;
+    }
+    const token = tokenResult.QueryInterface(Ci.nsIPK11Token);
     console.log(
       "certCleanup: calling logoutAndDropAuthenticatedResources() on token '" +
         token.tokenName + "'"
     );
-    token.logoutAndDropAuthenticatedResources();
+    let logoutResult = token.logoutAndDropAuthenticatedResources();
+    if (logoutResult && typeof logoutResult.then === "function") {
+      await logoutResult;
+    }
     console.log("certCleanup: logoutAndDropAuthenticatedResources() returned");
   } catch (e) {
     Cu.reportError("certCleanup: logout failed: " + e);

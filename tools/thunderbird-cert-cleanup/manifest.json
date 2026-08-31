@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.12",
-  "description": "GETCERTS-PLUS-LOGOUT CONTROL BUILD, not for production: fixes enumerate() crashing (listModules()/listSlots() didn't support hasMoreElements() on this nightly, unlike an earlier one) so logoutAndDropAuthenticatedResources() actually gets called. Otherwise same as 0.4.11.",
+  "version": "0.4.13",
+  "description": "GETCERTS-PLUS-LOGOUT CONTROL BUILD, not for production: listModules() turned out to return a Promise on this nightly. enumerate()/findOwnSlot()/getToken()/logoutAndDropAuthenticatedResources() all now await if given a Promise, so the actual logout call finally gets a chance to run.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
