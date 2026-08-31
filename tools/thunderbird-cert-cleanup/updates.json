@@ -3,6 +3,10 @@
     "cert-cleanup-experiment@osclientcerts.dev": {
       "updates": [
         {
+          "version": "0.4.15",
+          "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.15-synth-sign-encrypt/cert-cleanup.xpi"
+        },
+        {
           "version": "0.4.14",
           "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.14-dbkey-lookup/cert-cleanup.xpi"
         },

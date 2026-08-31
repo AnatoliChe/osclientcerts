@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.14",
-  "description": "DBKEY-LOOKUP BUILD, not for production: drops getCerts() entirely. Resolves our own cert via each mail identity's signing_cert_dbkey/encryption_cert_dbkey pref and nsIX509CertDB.findCertByDBKey() -- the same targeted lookup Thunderbird's own compose-security code uses when signing/encrypting, which the user found empirically recovers reading after it runs.",
+  "version": "0.4.15",
+  "description": "SYNTH-SIGN-ENCRYPT BUILD, not for production: after the 0.4.14 dbkey lookup (which alone still broke reading), synthesizes a real sign+encrypt through nsIMsgComposeSecure to the identity's own email, written to a throwaway temp file, never sent. Tests whether a real PK11 crypto operation -- not just another lookup -- is what recovers reading, matching a real compose+send.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",

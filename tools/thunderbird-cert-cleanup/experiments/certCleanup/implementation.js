@@ -68,15 +68,9 @@ function containsSubsequence(haystack, needle) {
 // compose-security code does when it's about to sign/encrypt: read the
 // per-identity dbkey preference(s), resolve each with findCertByDBKey().
 // No getCerts() call anywhere in this path.
-function findLiveCertsViaIdentities(certDB) {
-  const { MailServices } = ChromeUtils.importESModule(
-    "resource:///modules/MailServices.sys.mjs"
-  );
-
+function findLiveCertsViaIdentities(certDB, identities) {
   const liveCerts = [];
   const seenDbKeys = new Set();
-  const identities = MailServices.accounts.allIdentities;
-  console.log("certCleanup: " + identities.length + " mail identity(ies)");
   for (const identity of identities) {
     for (const attr of ["signing_cert_dbkey", "encryption_cert_dbkey"]) {
       let dbKey;
@@ -109,13 +103,100 @@ function findLiveCertsViaIdentities(certDB) {
   return liveCerts;
 }
 
+// Synthesizes a real sign+encrypt operation through nsIMsgComposeSecure --
+// the exact same crypto pipeline a real compose+send goes through
+// (mailnews/compose/src/MimeMessage.sys.mjs's real production call
+// sequence, confirmed against that source) -- addressed to the identity's
+// own email, written to a throwaway temp file, never touching nsIMsgSend
+// (the actual SMTP-sending component) at all. The user found that
+// composing and sending a real signed+encrypted message recovers reading
+// after our lookups break it; this tests whether a *real* PK11 sign/
+// encrypt operation through the token (as opposed to a mere certificate
+// lookup, which we already know doesn't help) is what actually does the
+// recovering, by triggering the same kind of operation synthetically.
+async function synthesizeSignEncrypt(identity) {
+  const compFields = Cc[
+    "@mozilla.org/messengercompose/composefields;1"
+  ].createInstance(Ci.nsIMsgCompFields);
+  const composeSecure = Cc[
+    "@mozilla.org/messengercompose/composesecure;1"
+  ].createInstance(Ci.nsIMsgComposeSecure);
+  compFields.composeSecure = composeSecure;
+  composeSecure.signMessage = true;
+  composeSecure.requireEncryptMessage = true;
+  composeSecure.signFormat = "multipart";
+  compFields.to = identity.email;
+
+  if (!composeSecure.requiresCryptoEncapsulation(identity, compFields)) {
+    console.log(
+      "certCleanup: synthesizeSignEncrypt: requiresCryptoEncapsulation() " +
+        "said no (no cert configured for this identity?), skipping"
+    );
+    return false;
+  }
+
+  const tmpFile = Services.dirsvc.get("TmpD", Ci.nsIFile);
+  tmpFile.append("certcleanup-synth.eml");
+  tmpFile.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, 0o600);
+
+  const rawStream = Cc[
+    "@mozilla.org/network/file-output-stream;1"
+  ].createInstance(Ci.nsIFileOutputStream);
+  rawStream.init(tmpFile, -1, -1, 0);
+  const bufStream = Cc[
+    "@mozilla.org/network/buffered-output-stream;1"
+  ].createInstance(Ci.nsIBufferedOutputStream);
+  bufStream.init(rawStream, 16 * 1024);
+
+  const sendReport = Cc[
+    "@mozilla.org/messengercompose/sendreport;1"
+  ].createInstance(Ci.nsIMsgSendReport);
+
+  try {
+    console.log(
+      "certCleanup: synthesizeSignEncrypt: beginCryptoEncapsulation for " +
+        compFields.to
+    );
+    composeSecure.beginCryptoEncapsulation(
+      bufStream,
+      compFields.to,
+      compFields,
+      "",
+      identity,
+      sendReport,
+      true // aIsDraft -- this is never actually sent or saved as a real message
+    );
+    const body = "certCleanup synthetic message, not sent.\r\n";
+    composeSecure.mimeCryptoWriteBlock(body, body.length);
+    composeSecure.finishCryptoEncapsulation(false, sendReport);
+    console.log("certCleanup: synthesizeSignEncrypt: finishCryptoEncapsulation done");
+    return true;
+  } catch (e) {
+    Cu.reportError("certCleanup: synthesizeSignEncrypt failed: " + e);
+    return false;
+  } finally {
+    bufStream.close();
+    rawStream.close();
+    try {
+      tmpFile.remove(false);
+    } catch (e) {
+      // Not load-bearing; leaving a stray temp file behind isn't harmful.
+    }
+  }
+}
+
 async function doCleanup() {
   console.log("certCleanup: doCleanup starting (dbkey lookup, no getCerts())");
   const certDB = Cc["@mozilla.org/security/x509certdb;1"].getService(
     Ci.nsIX509CertDB
   );
+  const { MailServices } = ChromeUtils.importESModule(
+    "resource:///modules/MailServices.sys.mjs"
+  );
+  const identities = MailServices.accounts.allIdentities;
+  console.log("certCleanup: " + identities.length + " mail identity(ies)");
 
-  const liveCerts = findLiveCertsViaIdentities(certDB);
+  const liveCerts = findLiveCertsViaIdentities(certDB, identities);
   if (liveCerts.length === 0) {
     console.log("certCleanup: no live certs resolved via identity dbkeys, nothing to do");
     return [];
@@ -150,6 +231,23 @@ async function doCleanup() {
         "certCleanup: deleteCertificate failed for subject=" +
           liveCert.subjectName + ": " + e
       );
+    }
+  }
+
+  // Recovery step: the user found that a real compose+send (real
+  // sign/encrypt through the token) recovers reading after our lookups
+  // above break it -- but a mere additional certificate *lookup*
+  // (findCertByDBKey, tested in this same build without this step) did
+  // not. This synthesizes that same real sign+encrypt operation, silently,
+  // to test whether it's specifically the crypto operation (not just
+  // another lookup) that recovers things. Runs regardless of whether we
+  // found anything to delete, since a bare lookup alone was already shown
+  // to break reading.
+  if (identities.length > 0) {
+    try {
+      await synthesizeSignEncrypt(identities[0]);
+    } catch (e) {
+      Cu.reportError("certCleanup: synthesizeSignEncrypt threw: " + e);
     }
   }
 
