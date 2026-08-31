@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.28",
-  "description": "ON-COMPOSE-ERROR-TRIGGER BUILD (v3, auto-retry), not for production: production testing showed cleanup + an IMMEDIATE resend (before trying to read anything) leaves reading intact, while resending from an already-observed-broken state does not recover it. This build automates that: auto-dismisses the modal \"couldn't send\" alert (matched by dialog id + .opener), runs cleanup, then automatically retries the send once (tracked send mode, retry-loop guard against retrying a retry).",
+  "version": "0.4.29",
+  "description": "ON-COMPOSE-ERROR-TRIGGER BUILD (v4, dedup fix), not for production: v0.4.28 was observed registering nsIMsgComposeStateListener twice on the same window, so ComposeProcessDone fired twice per real failure -- the retry-loop guard misread the duplicate echo as \"the retry already failed\", sometimes leaving it stuck and silently skipping a later, genuinely new failure on the same window. This build guards RegisterStateListener itself against double registration, and reworks the retry-tracking flag to always reset instead of ever getting permanently stuck.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",

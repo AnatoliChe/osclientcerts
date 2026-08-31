@@ -223,40 +223,60 @@ function isCommonDialogFrom(win, composeWindows) {
   }
 }
 
+// win.__certCleanupHandling tracks "a failure on this window is currently
+// being cleaned up and retried" -- but see registerStateListener below:
+// production testing found ComposeProcessDone firing *twice* for one real
+// failure (a duplicate nsIMsgComposeStateListener registration on the same
+// window), which made the old version of this guard misread the duplicate
+// echo of the ORIGINAL failure as "the retry already failed", giving up
+// without ever actually retrying, and -- worse -- leaving the flag stuck
+// set if that happened to race ahead of the real retry's own outcome, so a
+// later, genuinely new failure on the same window was silently ignored
+// forever. registerStateListener now guards against the duplicate
+// registration directly; this function additionally always clears the flag
+// on every exit path, so even a stray duplicate notification can't
+// permanently block cleanup on this window again.
 function onComposeProcessDone(win, aResult) {
   if (aResult === 0) {
     // NS_OK. Not using Cr.NS_OK to avoid depending on whether Cr
     // (Components.results) is available as a predefined global here the
     // same way Cc/Ci/Cu are -- NS_OK's value (0) is stable across all of
     // Gecko and won't change.
-    win.__certCleanupRetrying = false;
+    win.__certCleanupHandling = false;
     return;
   }
-  if (win.__certCleanupRetrying) {
-    // This is the retry's own failure -- don't retry a retry, that's an
-    // infinite loop waiting to happen if the real problem is something
-    // cleanup can't fix.
+  if (win.__certCleanupHandling) {
+    // Either a duplicate notification of the failure already being
+    // handled, or the retry itself also failed -- can't tell which from
+    // here, but either way don't start an overlapping cleanup/retry cycle.
+    // Clearing the flag (rather than leaving it set) is what lets a later,
+    // genuinely new failure on this window still be handled.
     console.error(
-      `certCleanup ON-COMPOSE-ERROR-TRIGGER: retry also failed (0x${(aResult >>> 0).toString(16)}), giving up`
+      `certCleanup: ComposeProcessDone failed again while already handling a failure on this window (0x${(aResult >>> 0).toString(16)}), not retrying again`
     );
-    win.__certCleanupRetrying = false;
+    win.__certCleanupHandling = false;
     return;
   }
-  win.__certCleanupRetrying = true;
+  win.__certCleanupHandling = true;
   console.log(
-    `certCleanup ON-COMPOSE-ERROR-TRIGGER: ComposeProcessDone failed (0x${(aResult >>> 0).toString(16)}), running cleanup`
+    `certCleanup: send failed (0x${(aResult >>> 0).toString(16)}), running cleanup`
   );
   doCleanup()
     .then((deleted) => {
-      console.log(
-        `certCleanup ON-COMPOSE-ERROR-TRIGGER: done, ${deleted.length} deleted -- retrying send`
-      );
+      if (deleted.length > 0) {
+        console.log(
+          `certCleanup (on-send-failure): removed ${deleted.length} stale certificate record(s), retrying send`,
+          deleted
+        );
+      } else {
+        console.log("certCleanup: nothing to clean up, retrying send anyway");
+      }
       const msgType = win.__certCleanupLastMsgType ?? Ci.nsIMsgCompDeliverMode.Now;
       return win.GenericSendMessage(msgType);
     })
     .catch((e) => {
-      win.__certCleanupRetrying = false;
-      Cu.reportError("certCleanup ON-COMPOSE-ERROR-TRIGGER: cleanup/retry failed: " + e);
+      win.__certCleanupHandling = false;
+      Cu.reportError("certCleanup: cleanup/retry after a failed send failed: " + e);
     });
 }
 
@@ -270,6 +290,19 @@ const GMSGCOMPOSE_POLL_INTERVAL_MS = 100;
 const GMSGCOMPOSE_POLL_MAX_ATTEMPTS = 50;
 
 function registerStateListener(win) {
+  // Guards specifically against a second RegisterStateListener call on this
+  // window, independent of hookComposeWindow's own __certCleanupHooked
+  // guard: production testing observed ComposeProcessDone firing twice for
+  // one real failure, consistent with two separate listener objects having
+  // ended up registered on the same window (root cause not fully pinned
+  // down -- possibly this Experiment's parent script re-evaluating and
+  // re-running its window-hooking loop, since MV3 background contexts can
+  // be non-persistent and reload). This check is cheap insurance regardless
+  // of the exact cause.
+  if (win.__certCleanupStateListenerRegistered) {
+    return;
+  }
+  win.__certCleanupStateListenerRegistered = true;
   // All four nsIMsgComposeStateListener methods must exist as callable
   // functions even though only ComposeProcessDone matters here: this is a
   // [scriptable] XPCOM interface, and Thunderbird's C++ side may call any
@@ -282,7 +315,6 @@ function registerStateListener(win) {
     SaveInFolderDone(folderName) {},
     NotifyComposeBodyReady() {},
   });
-  console.log("certCleanup ON-COMPOSE-ERROR-TRIGGER: registered nsIMsgComposeStateListener");
 }
 
 function wrapGenericSendMessage(win) {
