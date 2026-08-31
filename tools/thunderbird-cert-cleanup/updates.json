@@ -3,6 +3,10 @@
     "cert-cleanup-experiment@osclientcerts.dev": {
       "updates": [
         {
+          "version": "0.4.18",
+          "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.18-compose-window-trigger/cert-cleanup.xpi"
+        },
+        {
           "version": "0.4.17",
           "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.17-synth-sign-encrypt/cert-cleanup.xpi"
         },

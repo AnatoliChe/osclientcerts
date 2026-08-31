@@ -2,310 +2,222 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-// DBKEY-LOOKUP BUILD (experiment/cert-cleanup-mid-session branch), not for
-// production. Every build so far that called nsIX509CertDB.getCerts()
-// mid-session broke reading encrypted mail afterward -- even a build that
-// called *only* getCerts() and touched nothing else. But the user found
-// that composing and sending a signed+encrypted message *recovers* reading
-// in the same session. Thunderbird's own compose-security code
-// (mailnews/extensions/smime/nsMsgComposeSecure.cpp, MimeCryptoHackCerts())
-// never calls getCerts() to find the identity's own certificate -- it reads
-// the "signing_cert_dbkey"/"encryption_cert_dbkey" identity preferences
-// (set once, when the user picks a certificate in Account Settings) and
-// resolves them with nsIX509CertDB.findCertByDBKey(), a single targeted
-// lookup, not a full multi-slot enumeration.
+// Privileged WebExtension Experiment implementation. Runs in the parent process
+// with full access to Gecko's internal APIs (Cc/Ci), unlike the sandboxed
+// background script. See ../../README.md for why this exists and how it's used.
 //
-// This build does the same thing instead of getCerts(): reads those dbkey
-// prefs from every mail identity via MailServices.accounts.allIdentities
-// (a plain Array<nsIMsgIdentity>, not PKCS#11-related, so none of the
-// nsISimpleEnumerator/Promise API-drift pain seen with
-// nsIPKCS11ModuleDB.listModules() on this branch applies to it) and calls
-// findCertByDBKey() for each one -- never calling getCerts() at all. If
-// this build doesn't break reading, that confirms getCerts()'s full
-// enumeration specifically is what corrupts things, not any access to our
-// token whatsoever -- and this becomes the real fix, not just a control
-// build.
-
+// ExtensionCommon is not a predefined global in this scope (unlike Cc/Ci/Cu,
+// which are) -- it must be imported explicitly, same as any other privileged
+// Gecko module.
 const { ExtensionCommon } = ChromeUtils.importESModule(
   "resource://gre/modules/ExtensionCommon.sys.mjs"
 );
+const { AsyncShutdown } = ChromeUtils.importESModule(
+  "resource://gre/modules/AsyncShutdown.sys.mjs"
+);
 
-console.log("certCleanup: implementation.js loaded (dbkey-lookup build)");
+// The PKCS#11 token label the osclientcerts provider reports via C_GetTokenInfo
+// (see TOKEN_LABEL_BYTES in fork-osclientcerts/src/lib.rs).
+const OS_CLIENT_CERTS_TOKEN_NAME = "OS Client Cert Token";
 
-// Plain XPCOM file read (nsIFileInputStream + nsIBinaryInputStream), not
-// Sqlite.sys.mjs -- confirmed safe on its own in 0.4.8 (only getCerts(),
-// not this, broke reading in that build).
-function readFileBytes(file) {
-  const stream = Cc["@mozilla.org/network/file-input-stream;1"].createInstance(
-    Ci.nsIFileInputStream
-  );
-  stream.init(file, -1, -1, 0);
-  const binStream = Cc["@mozilla.org/binaryinputstream;1"].createInstance(
-    Ci.nsIBinaryInputStream
-  );
-  binStream.setInputStream(stream);
-  const bytes = binStream.readByteArray(binStream.available());
-  binStream.close();
-  return new Uint8Array(bytes);
-}
+// cert9.db's SQL schema (table `nssPublic`, one row per PKCS #11 object,
+// columns named "a" + the attribute type in hex -- confirmed against a real
+// profile's cert9.db and against NSS's own lib/softoken/sdb.c, which builds
+// column names via `sqlite3_mprintf("a%x", template[i].type)`). CKA_CLASS is
+// attribute 0x0; CKA_VALUE (the DER-encoded certificate) is 0x11.
+const CKA_CLASS_COLUMN = "a0";
+const CKA_VALUE_COLUMN = "a11";
+const CKO_CERTIFICATE_BYTES = new Uint8Array([0, 0, 0, 1]);
 
-function containsSubsequence(haystack, needle) {
-  if (needle.length === 0 || needle.length > haystack.length) {
-    return false;
-  }
-  outer: for (let i = 0; i <= haystack.length - needle.length; i++) {
-    for (let j = 0; j < needle.length; j++) {
-      if (haystack[i + j] !== needle[j]) {
-        continue outer;
-      }
-    }
-    return true;
-  }
-  return false;
-}
-
-// Finds our own live certificate(s) the same way Thunderbird's own
-// compose-security code does when it's about to sign/encrypt: read the
-// per-identity dbkey preference(s), resolve each with findCertByDBKey().
-// No getCerts() call anywhere in this path.
-function findLiveCertsViaIdentities(certDB, identities) {
-  const liveCerts = [];
-  const seenDbKeys = new Set();
-  for (const identity of identities) {
-    for (const attr of ["signing_cert_dbkey", "encryption_cert_dbkey"]) {
-      let dbKey;
-      try {
-        dbKey = identity.getCharAttribute(attr);
-      } catch (e) {
-        continue;
-      }
-      if (!dbKey || seenDbKeys.has(dbKey)) {
-        continue;
-      }
-      seenDbKeys.add(dbKey);
-      let cert;
-      try {
-        cert = certDB.findCertByDBKey(dbKey);
-      } catch (e) {
-        console.log(
-          "certCleanup: findCertByDBKey failed for " + attr + ": " + e
-        );
-        continue;
-      }
-      if (cert) {
-        console.log(
-          "certCleanup: resolved " + attr + " -> subject=" + cert.subjectName
-        );
-        liveCerts.push(cert);
-      }
-    }
-  }
-  return liveCerts;
-}
-
-// Synthesizes a real sign+encrypt operation through nsIMsgComposeSecure --
-// the exact same crypto pipeline a real compose+send goes through
-// (mailnews/compose/src/MimeMessage.sys.mjs's real production call
-// sequence, confirmed against that source) -- addressed to the identity's
-// own email, written to a throwaway temp file, never touching nsIMsgSend
-// (the actual SMTP-sending component) at all. The user found that
-// composing and sending a real signed+encrypted message recovers reading
-// after our lookups break it; this tests whether a *real* PK11 sign/
-// encrypt operation through the token (as opposed to a mere certificate
-// lookup, which we already know doesn't help) is what actually does the
-// recovering, by triggering the same kind of operation synthetically.
-async function synthesizeSignEncrypt(identity) {
-  const compFields = Cc[
-    "@mozilla.org/messengercompose/composefields;1"
-  ].createInstance(Ci.nsIMsgCompFields);
-  const composeSecure = Cc[
-    "@mozilla.org/messengercompose/composesecure;1"
-  ].createInstance(Ci.nsIMsgComposeSecure);
-  compFields.composeSecure = composeSecure;
-  composeSecure.signMessage = true;
-  composeSecure.requireEncryptMessage = true;
-  composeSecure.signFormat = "multipart";
-  compFields.to = identity.email;
-
-  // Required, non-obvious step: BeginCryptoEncapsulation()'s own C++
-  // comment says the composer "should already have looked up and verified
-  // certificates... and should have used CacheValidCertForEmail" --
-  // MimeCryptoHackCerts() resolves each recipient's cert purely from this
-  // in-memory cache (GetCertDBKeyForEmail()), never doing a lookup itself.
-  // On a cache miss it returns NS_OK with an *empty* dbKey string (not a
-  // failure), which then gets passed straight to findCertByDBKey(""),
-  // which is what actually throws NS_ERROR_ILLEGAL_VALUE. A real compose
-  // window populates this cache as the user types each recipient
-  // (asyncFindCertByEmailAddr); we do the synchronous equivalent here since
-  // we already know our own encryption cert's dbkey and are addressing
-  // ourselves.
-  let encryptionDbKey;
-  try {
-    encryptionDbKey = identity.getCharAttribute("encryption_cert_dbkey");
-  } catch (e) {
-    encryptionDbKey = "";
-  }
-  if (encryptionDbKey) {
-    composeSecure.cacheValidCertForEmail(identity.email, encryptionDbKey);
-    console.log(
-      "certCleanup: synthesizeSignEncrypt: cached encryption cert for " +
-        identity.email
-    );
-  } else {
-    console.log(
-      "certCleanup: synthesizeSignEncrypt: no encryption_cert_dbkey for " +
-        identity.email + ", recipient cert lookup will likely fail"
-    );
-  }
-
-  if (!composeSecure.requiresCryptoEncapsulation(identity, compFields)) {
-    console.log(
-      "certCleanup: synthesizeSignEncrypt: requiresCryptoEncapsulation() " +
-        "said no (no cert configured for this identity?), skipping"
-    );
-    return false;
-  }
-
-  const tmpFile = Services.dirsvc.get("TmpD", Ci.nsIFile);
-  tmpFile.append("certcleanup-synth.eml");
-  tmpFile.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, 0o600);
-
-  const rawStream = Cc[
-    "@mozilla.org/network/file-output-stream;1"
-  ].createInstance(Ci.nsIFileOutputStream);
-  rawStream.init(tmpFile, -1, -1, 0);
-  const bufStream = Cc[
-    "@mozilla.org/network/buffered-output-stream;1"
-  ].createInstance(Ci.nsIBufferedOutputStream);
-  bufStream.init(rawStream, 16 * 1024);
-
-  const sendReport = Cc[
-    "@mozilla.org/messengercompose/sendreport;1"
-  ].createInstance(Ci.nsIMsgSendReport);
-
-  try {
-    const outputStream = bufStream.QueryInterface(Ci.nsIOutputStream);
-    console.log(
-      "certCleanup: synthesizeSignEncrypt: about to call beginCryptoEncapsulation with:\n" +
-        "  outputStream=" + outputStream + " (typeof " + typeof outputStream + ")\n" +
-        "  recipients=" + JSON.stringify(compFields.to) + " (typeof " + typeof compFields.to + ")\n" +
-        "  compFields=" + compFields + "\n" +
-        "  headers=\"\"\n" +
-        "  identity=" + identity + ", identity.email=" + JSON.stringify(identity.email) + "\n" +
-        "  sendReport=" + sendReport + "\n" +
-        "  isDraft=true"
-    );
-    composeSecure.beginCryptoEncapsulation(
-      outputStream,
-      compFields.to,
-      compFields,
-      "",
-      identity,
-      sendReport,
-      true // aIsDraft -- this is never actually sent or saved as a real message
-    );
-    const body = "certCleanup synthetic message, not sent.\r\n";
-    composeSecure.mimeCryptoWriteBlock(body, body.length);
-    composeSecure.finishCryptoEncapsulation(false, sendReport);
-    console.log("certCleanup: synthesizeSignEncrypt: finishCryptoEncapsulation done");
-    return true;
-  } catch (e) {
-    Cu.reportError("certCleanup: synthesizeSignEncrypt failed: " + e);
-    return false;
-  } finally {
-    bufStream.close();
-    rawStream.close();
-    try {
-      tmpFile.remove(false);
-    } catch (e) {
-      // Not load-bearing; leaving a stray temp file behind isn't harmful.
-    }
-  }
-}
-
+// Runs the actual detect-and-delete pass. See the long comment inline below
+// for why detection reads cert9.db directly but deletion goes through
+// nsIX509CertDB, and why this whole pass is only ever run at shutdown -- not
+// periodically during the session -- as of 0.4.0.
 async function doCleanup() {
-  console.log("certCleanup: doCleanup starting (dbkey lookup, no getCerts())");
   const certDB = Cc["@mozilla.org/security/x509certdb;1"].getService(
     Ci.nsIX509CertDB
   );
-  const { MailServices } = ChromeUtils.importESModule(
-    "resource:///modules/MailServices.sys.mjs"
-  );
-  const identities = MailServices.accounts.allIdentities;
-  console.log("certCleanup: " + identities.length + " mail identity(ies)");
 
-  const liveCerts = findLiveCertsViaIdentities(certDB, identities);
+  const certs = certDB.getCerts();
+  const liveCerts = certs.filter(
+    (cert) => (cert.tokenName || "").trim() === OS_CLIENT_CERTS_TOKEN_NAME
+  );
   if (liveCerts.length === 0) {
-    console.log("certCleanup: no live certs resolved via identity dbkeys, nothing to do");
+    // The provider isn't loaded (or has no certs) right now -- don't touch
+    // cert9.db at all, since we have no way to confirm which of its rows, if
+    // any, are safe to remove.
     return [];
   }
 
+  // certDB.getCerts() is *not* a plain listing: Gecko's
+  // nsNSSCertificateDB::GetCerts() calls PK11_ListCerts(PK11CertListUnique,
+  // ...) (confirmed against NSS's own lib/pk11wrap and
+  // security/manager/ssl/nsNSSCertificateDB.cpp), which silently merges a
+  // persisted, keyless cert9.db row with a live token object representing
+  // the same certificate -- so getCerts() never shows the duplicate as a
+  // second entry while the provider is loaded, which is exactly when you'd
+  // want to detect and remove it. NSS has a non-deduplicating list type
+  // (PK11CertListAll), but no JS-facing API exposes it.
+  //
+  // So: *read* cert9.db directly instead, via Sqlite.sys.mjs (Gecko's
+  // sanctioned module for opening additional, concurrent, read-only
+  // connections to a Firefox/Thunderbird-managed sqlite database -- the same
+  // mechanism other in-process code uses for shared databases like
+  // places.sqlite). A row here is a genuine persisted duplicate by
+  // construction: PKCS #11 objects belonging to an *external* token like
+  // ours are never themselves written to cert9.db, so any CKO_CERTIFICATE
+  // row whose DER byte-for-byte matches one of our live certificates cannot
+  // be that live certificate -- it can only be a stale, keyless, NSS-cached
+  // copy.
+  const { Sqlite } = ChromeUtils.importESModule(
+    "resource://gre/modules/Sqlite.sys.mjs"
+  );
   const profileDir = Services.dirsvc.get("ProfD", Ci.nsIFile);
   const dbFile = profileDir.clone();
   dbFile.append("cert9.db");
-  const dbBytes = readFileBytes(dbFile);
-  console.log("certCleanup: read " + dbBytes.length + " bytes from cert9.db");
 
   const deleted = [];
-  for (const liveCert of liveCerts) {
-    const derArray = liveCert.getRawDER();
-    const der = Uint8Array.from(derArray);
-    console.log("certCleanup: scanning for subject=" + liveCert.subjectName);
-    const found = containsSubsequence(dbBytes, der);
-    console.log("certCleanup: " + (found ? "found" : "not found") + " in cert9.db");
-    if (!found) {
-      continue;
-    }
-    try {
-      const tempCert = certDB.constructX509(derArray);
-      certDB.deleteCertificate(tempCert);
-      deleted.push({
-        subjectName: liveCert.subjectName,
-        issuerName: liveCert.issuerName,
-        serialNumber: liveCert.serialNumber,
-      });
-    } catch (e) {
-      Cu.reportError(
-        "certCleanup: deleteCertificate failed for subject=" +
-          liveCert.subjectName + ": " + e
+  let conn;
+  try {
+    conn = await Sqlite.openConnection({
+      path: dbFile.path,
+      openNotExclusive: true,
+      readOnly: true,
+    });
+    for (const liveCert of liveCerts) {
+      const derArray = liveCert.getRawDER();
+      const der = Uint8Array.from(derArray);
+      const rows = await conn.execute(
+        "SELECT id FROM nssPublic WHERE " +
+          CKA_CLASS_COLUMN + " = :cls AND " + CKA_VALUE_COLUMN + " = :der",
+        { cls: CKO_CERTIFICATE_BYTES, der }
       );
+      if (rows.length === 0) {
+        continue;
+      }
+      console.log(
+        "certCleanup: found " + rows.length +
+          " stale cert9.db row(s) duplicating live cert subject=" +
+          liveCert.subjectName
+      );
+      // Delete via nsIX509CertDB, not a second write connection: through
+      // 0.2.2, deletion also went through this same Sqlite.sys.mjs
+      // connection (a raw `DELETE FROM nssPublic ...`). In production
+      // testing that write -- and, as it turned out, *any* mechanism that
+      // removes the duplicate mid-session, including this official API --
+      // left something in Gecko's C++ layer above NSS unable to resolve the
+      // recipient for S/MIME decryption for the rest of that Thunderbird
+      // session (confirmed via RUST_LOG=osclientcerts=debug: later
+      // C_DecryptInit/C_UnwrapKey calls returned CKR_FUNCTION_NOT_SUPPORTED
+      // without even a preceding C_OpenSession, meaning Gecko had stopped
+      // calling into the module at all -- independently reproduced as safe
+      // at the raw NSS/softoken level via a from-source NSS build, so the
+      // stale state lives above NSS, not in it). That's *why* this whole
+      // pass now only ever runs at shutdown (see AsyncShutdown blocker
+      // below): whatever goes stale doesn't matter if the process is about
+      // to exit anyway, and the next session starts with a clean read of
+      // the already-fixed file. constructX509() builds a transient,
+      // in-memory certificate object from the duplicate's DER (not tied to
+      // any token/slot), and deleteCertificate() on that object resolves
+      // and removes the matching persisted record through NSS's own
+      // softoken code path (PK11_DeleteTokenCertAndKey /
+      // SEC_DeletePermCertificate -- confirmed against
+      // nsNSSCertificateDB::DeleteCertificate), the same path "Delete or
+      // Distrust" in Certificate Manager uses. If that resolution ever
+      // targeted our *live* token object instead of the cert9.db
+      // duplicate, the call would simply fail rather than corrupt
+      // anything: osclientcerts' own C_DestroyObject is an unconditional
+      // CKR_FUNCTION_NOT_SUPPORTED stub (see src/lib.rs), so an attempt to
+      // destroy anything on our external token is a safe no-op.
+      try {
+        const tempCert = certDB.constructX509(derArray);
+        certDB.deleteCertificate(tempCert);
+        deleted.push({
+          subjectName: liveCert.subjectName,
+          issuerName: liveCert.issuerName,
+          serialNumber: liveCert.serialNumber,
+          rowCount: rows.length,
+        });
+      } catch (e) {
+        Cu.reportError(
+          "certCleanup: deleteCertificate failed for subject=" +
+            liveCert.subjectName + ": " + e
+        );
+      }
+    }
+  } catch (e) {
+    Cu.reportError("certCleanup: cert9.db access failed: " + e);
+  } finally {
+    if (conn) {
+      await conn.close();
     }
   }
 
-  // Recovery step: the user found that a real compose+send (real
-  // sign/encrypt through the token) recovers reading after our lookups
-  // above break it -- but a mere additional certificate *lookup*
-  // (findCertByDBKey, tested in this same build without this step) did
-  // not. This synthesizes that same real sign+encrypt operation, silently,
-  // to test whether it's specifically the crypto operation (not just
-  // another lookup) that recovers things. Runs regardless of whether we
-  // found anything to delete, since a bare lookup alone was already shown
-  // to break reading.
-  if (identities.length > 0) {
-    try {
-      await synthesizeSignEncrypt(identities[0]);
-    } catch (e) {
-      Cu.reportError("certCleanup: synthesizeSignEncrypt threw: " + e);
-    }
-  }
-
-  console.log("certCleanup: doCleanup finished, " + deleted.length + " deleted");
   return deleted;
 }
+
+const SHUTDOWN_BLOCKER_NAME =
+  "certCleanup: remove stale cert9.db duplicates before quit";
+
+async function onQuitApplication() {
+  try {
+    const deleted = await doCleanup();
+    if (deleted.length > 0) {
+      console.log(
+        "certCleanup (quit-application): removed " + deleted.length +
+          " stale certificate record(s)",
+        deleted
+      );
+    }
+  } catch (e) {
+    Cu.reportError("certCleanup: cleanup on quit failed: " + e);
+  }
+}
+
+// The earliest well-known Gecko shutdown phase (ShutdownPhase::
+// AppShutdownConfirmed, topic "quit-application"), registered once when this
+// script first loads (module-level code in an Experiment script runs once
+// per load of the extension, independent of how many times getAPI() is
+// called for background-page contexts). Blocking here, rather than doing a
+// fire-and-forget cleanup, guarantees our async cert9.db work finishes
+// before Thunderbird tears down further -- see the long comment in
+// doCleanup() for why shutdown, and not any point during the session, is
+// where this needs to run.
+AsyncShutdown.appShutdownConfirmed.addBlocker(
+  SHUTDOWN_BLOCKER_NAME,
+  onQuitApplication
+);
 
 var certCleanup = class extends ExtensionCommon.ExtensionAPI {
   getAPI(context) {
     return {
       certCleanup: {
+        // Exposed for manual/on-demand use (e.g. from the Browser Console
+        // while testing), but background.js does not call this on any
+        // schedule -- see onQuitApplication above for the only place
+        // cleanup actually runs in normal use.
         cleanup: doCleanup,
       },
     };
   }
 
+  // Without this, Thunderbird can keep running a previously-loaded version of
+  // this Experiment's code after the add-on is updated or reloaded (a
+  // documented footgun -- see "Managing your Experiment's lifecycle" in the
+  // Thunderbird WebExtension Experiments guide). Invalidating the startup
+  // cache on every unload is the recommended fix.
   onShutdown(isAppShutdown) {
     if (isAppShutdown) {
+      // The app itself is quitting: our AsyncShutdown blocker above (an
+      // earlier phase than extension teardown) has already run and resolved
+      // by the time this fires, so there's nothing left to do here.
       return;
     }
+    // The extension is being disabled/reloaded/uninstalled -- not app
+    // shutdown -- so the blocker registered above would otherwise leak
+    // (and, worse, keep referencing this soon-to-be-stale script) across
+    // the reload.
+    AsyncShutdown.appShutdownConfirmed.removeBlocker(onQuitApplication);
     Services.obs.notifyObservers(null, "startupcache-invalidate", null);
   }
 };
