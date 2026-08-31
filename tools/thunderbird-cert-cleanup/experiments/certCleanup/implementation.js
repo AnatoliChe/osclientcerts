@@ -156,60 +156,68 @@ async function doCleanup() {
   return deleted;
 }
 
-// SIGN-CHECKBOX-TRIGGER BUILD, not for production. Trigger under test: the
-// Security > "Digitally Sign This Message" checkbox in the compose window
-// (both the menubar/toolbar menu item and the toolbar button), instead of
-// compose-window-open (v0.4.18) or compose.onBeforeSend (v0.4.19). Known
-// reliability caveats, accepted for this experiment: (1) never fires for an
-// identity that signs by default, since the checkbox starts checked and the
-// user never touches it; (2) fires whenever the user happens to toggle it,
-// which could be before or after Thunderbird's own recipient-cert
-// resolution -- unlike compose-window-open, timing here isn't guaranteed to
-// be earlier than that resolution.
+// SEND-BUTTON-TRIGGER BUILD, not for production. Trigger under test: the
+// Send toolbar button and the File > Send Now / Send Later menu items,
+// instead of compose-window-open (v0.4.18), compose.onBeforeSend (v0.4.19,
+// worse than v0.4.18: reading stayed broken until restart), or the sign
+// checkbox (v0.4.18-0.4.23, used to validate this id-matched "command"
+// hooking technique -- see git history on this branch).
 //
 // Every XUL menuitem/toolbarbutton dispatches a DOM "command" event on
 // activation, regardless of what JS function ends up handling it
 // internally -- confirmed against comm-central's messengercompose.xhtml,
-// where both the checkbox menu item and the toolbar button fire "command"
-// with a stable element id (menu_securitySign_Menubar,
-// menu_securitySign_Toolbar, button-signing). Matching on that id, via a
-// capturing listener on the compose document, covers every way the user can
-// toggle signing without depending on any particular internal JS function
-// name or wiring.
-const SIGN_CHECKBOX_IDS = new Set([
-  "menu_securitySign_Menubar",
-  "menu_securitySign_Toolbar",
-  "button-signing",
+// where all three ways to send fire "command" with a stable element id:
+// button-send (toolbar button, command="cmd_sendButton"),
+// menu-item-send-now (File > Send Now, command="cmd_sendNow"), and
+// File > Send Later (no id of its own, only command="cmd_sendLater" --
+// matched by that command id instead, since XUL command dispatch surfaces
+// it as well). Matching on id via a *capturing* listener on the compose
+// document means our handler runs before the event reaches the button/menu
+// item itself, i.e. before Thunderbird's own goDoCommand()/GenericSendMessage
+// handling for that same click -- unlike compose.onBeforeSend, which fires
+// from somewhere inside Thunderbird's own send pipeline, quite possibly
+// after it has already resolved and cached the recipient's certificate.
+// cleanup()'s own certDB.getCerts() call (the specific operation already
+// confirmed sufficient by itself to disrupt reading) runs synchronously up
+// to its first await, so it's guaranteed to execute before the send
+// continues; the rest of cleanup (checking cert9.db, deleting) is async and
+// keeps running concurrently with Thunderbird's own send processing.
+const SEND_BUTTON_IDS = new Set([
+  "button-send",
+  "cmd_sendButton",
+  "menu-item-send-now",
+  "cmd_sendNow",
+  "cmd_sendLater",
 ]);
 
 function isComposeWindow(win) {
   return win.document.documentElement.getAttribute("windowtype") === "msgcompose";
 }
 
-function onSignCheckboxToggled(id) {
-  console.log(`certCleanup SIGN-CHECKBOX-TRIGGER: #${id} toggled, running cleanup`);
+function onSendTriggered(id) {
+  console.log(`certCleanup SEND-BUTTON-TRIGGER: #${id} activated, running cleanup`);
   doCleanup()
     .then((deleted) => {
       console.log(
-        `certCleanup SIGN-CHECKBOX-TRIGGER: done, ${deleted.length} deleted -- now try reading encrypted mail`
+        `certCleanup SEND-BUTTON-TRIGGER: done, ${deleted.length} deleted -- now try reading encrypted mail`
       );
     })
     .catch((e) => {
-      Cu.reportError("certCleanup SIGN-CHECKBOX-TRIGGER: cleanup failed: " + e);
+      Cu.reportError("certCleanup SEND-BUTTON-TRIGGER: cleanup failed: " + e);
     });
 }
 
 function hookComposeWindow(win) {
-  if (win.__certCleanupSignHooked) {
+  if (win.__certCleanupHooked) {
     return;
   }
-  win.__certCleanupSignHooked = true;
+  win.__certCleanupHooked = true;
   win.document.addEventListener(
     "command",
     (event) => {
       const id = event.target && event.target.id;
-      if (SIGN_CHECKBOX_IDS.has(id)) {
-        onSignCheckboxToggled(id);
+      if (SEND_BUTTON_IDS.has(id)) {
+        onSendTriggered(id);
       }
     },
     true // capture, so this still sees the event even if something else stops propagation
@@ -238,7 +246,7 @@ const domWindowOpenedObserver = {
   },
 };
 
-// Registers the sign-checkbox hook for every current and future compose
+// Registers the send-button hook for every current and future compose
 // window. Called once from getAPI() below (see the comment there for why
 // module-level top-level code isn't the right place for this), guarded so a
 // second getAPI() call for another context can't register everything twice.
@@ -294,7 +302,7 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
   // unreliable here: Experiment "parent" scripts can be loaded lazily on
   // first real API access rather than eagerly with the add-on, so with no
   // WebExtension-side code touching this API at all -- as briefly happened
-  // here once the sign-checkbox hook moved entirely into this file --
+  // here once the send-button hook moved entirely into this file --
   // nothing ever triggered the script to load in the first place).
   getAPI(context) {
     initialize();
@@ -307,7 +315,7 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
         activate: async () => {},
         // Exposed for manual/on-demand use (e.g. from the Browser Console
         // while testing), but background.js does not call this on any
-        // schedule -- see onQuitApplication above and the sign-checkbox
+        // schedule -- see onQuitApplication above and the send-button
         // hook above for the only two places cleanup actually runs.
         cleanup: doCleanup,
       },

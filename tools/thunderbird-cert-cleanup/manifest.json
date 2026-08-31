@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.23",
-  "description": "SIGN-CHECKBOX-TRIGGER BUILD (v4, cleaned up), not for production: v0.4.22 confirmed working (root cause was lazy Experiment loading -- fixed there with a no-op ping() call). This build is a cleanup pass, not a behavior change: all setup (shutdown blocker, sign-checkbox hook) now lives in getAPI(), the documented lifecycle entry point, instead of bare module-level top-level code; the redundant toggleGlobalSignMessage monkey-patch is removed now that the id-matched \"command\" event listener alone is confirmed to catch both the toolbar button and the menu item (it was firing cleanup twice per toggle); and ping() is renamed to the more honestly-described activate().",
+  "version": "0.4.24",
+  "description": "SEND-BUTTON-TRIGGER BUILD, not for production: re-targets the same id-matched \"command\" event technique validated by the sign-checkbox build (v0.4.18-0.4.23) onto the actual Send toolbar button and File > Send Now / Send Later menu items. A capturing listener runs before Thunderbird's own goDoCommand()/GenericSendMessage handling for that same click, so cleanup's disruptive getCerts() call is guaranteed to run before the send proceeds -- unlike compose.onBeforeSend (v0.4.19), which fires from inside Thunderbird's own send pipeline and left reading broken until restart instead of self-healing on send.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
