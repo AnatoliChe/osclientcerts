@@ -156,26 +156,111 @@ async function doCleanup() {
   return deleted;
 }
 
-// ON-SEND-ERROR-TRIGGER BUILD, not for production. Every trigger tried so
-// far ran cleanup *proactively*, on every compose-window-open or every
+// ON-COMPOSE-ERROR-TRIGGER BUILD, not for production. Every trigger tried
+// so far ran cleanup *proactively*, on every compose-window-open or every
 // send, whether or not a duplicate actually existed -- confirmed to disrupt
 // reading even on a run that found nothing to delete (getCerts() alone is
-// enough). This build instead runs cleanup *reactively*: only when
-// browser.compose.onAfterSend reports sendInfo.error, i.e. only on the rare
-// occasions the underlying stale-duplicate bug has actually just caused a
-// real, visible failure. This can't fix the send that just failed (cleanup
-// runs after the fact), but the user can retry once cleanup's finished; the
-// point is cutting how *often* the known reading-disruption side effect
-// happens, from every window/send down to only when there's an actual
-// problem to fix. The trigger itself lives in background.js (a plain
-// browser.compose.onAfterSend listener, no privileged window-hooking
-// needed for this one) -- see there.
+// enough). v0.4.25 tried running *reactively* instead, via
+// browser.compose.onAfterSend, but that WebExtension event structurally
+// cannot see this failure: comm-central's MsgComposeCommands.js
+// (CompleteGenericSendMessage) `return`s from its catch block on a send
+// failure *before* ever reaching the `window.dispatchEvent(new
+// CustomEvent("aftersend"))` call that onAfterSend is built on -- confirmed
+// against the actual source, and against a real profile where three failed
+// sends in a row never fired onAfterSend once.
 //
-// Registers the earliest well-known Gecko shutdown phase (ShutdownPhase::
+// This build hooks lower, at the same layer Thunderbird's own compose
+// window code uses to observe its own send outcome: nsIMsgComposeStateListener
+// (nsIMsgCompose.idl), registered via gMsgCompose.RegisterStateListener()
+// -- the exact same public, documented interface
+// mail/components/compose/content/MsgComposeCommands.js registers its own
+// stateListener through. ComposeProcessDone(aResult) fires with the actual
+// nsresult of the compose/send process (NS_OK on success, the real failure
+// code otherwise -- including a finishCryptoEncapsulation failure), driven
+// by nsMsgCompose's own internal completion notification rather than the
+// JS-level try/catch that swallows the exception in
+// CompleteGenericSendMessage. No monkey-patching of internal functions
+// required.
+function isComposeWindow(win) {
+  return win.document.documentElement.getAttribute("windowtype") === "msgcompose";
+}
+
+function onComposeProcessDone(aResult) {
+  if (aResult === 0) {
+    // NS_OK. Not using Cr.NS_OK to avoid depending on whether Cr
+    // (Components.results) is available as a predefined global here the
+    // same way Cc/Ci/Cu are -- NS_OK's value (0) is stable across all of
+    // Gecko and won't change.
+    return;
+  }
+  console.log(
+    `certCleanup ON-COMPOSE-ERROR-TRIGGER: ComposeProcessDone failed (0x${(aResult >>> 0).toString(16)}), running cleanup`
+  );
+  doCleanup()
+    .then((deleted) => {
+      console.log(
+        `certCleanup ON-COMPOSE-ERROR-TRIGGER: done, ${deleted.length} deleted -- try resending, and check whether reading encrypted mail still works`
+      );
+    })
+    .catch((e) => {
+      Cu.reportError("certCleanup ON-COMPOSE-ERROR-TRIGGER: cleanup failed: " + e);
+    });
+}
+
+function hookComposeWindow(win) {
+  if (win.__certCleanupHooked) {
+    return;
+  }
+  win.__certCleanupHooked = true;
+  if (!win.gMsgCompose || typeof win.gMsgCompose.RegisterStateListener !== "function") {
+    console.error(
+      "certCleanup ON-COMPOSE-ERROR-TRIGGER: gMsgCompose.RegisterStateListener not available on this compose window"
+    );
+    return;
+  }
+  // All four nsIMsgComposeStateListener methods must exist as callable
+  // functions even though only ComposeProcessDone matters here: this is a
+  // [scriptable] XPCOM interface, and Thunderbird's C++ side may call any
+  // of them without checking first.
+  win.gMsgCompose.RegisterStateListener({
+    NotifyComposeFieldsReady() {},
+    ComposeProcessDone(aResult) {
+      onComposeProcessDone(aResult);
+    },
+    SaveInFolderDone(folderName) {},
+    NotifyComposeBodyReady() {},
+  });
+  console.log("certCleanup ON-COMPOSE-ERROR-TRIGGER: registered nsIMsgComposeStateListener");
+}
+
+function onWindowOpened(win) {
+  win.addEventListener(
+    "load",
+    function onLoad() {
+      win.removeEventListener("load", onLoad);
+      if (isComposeWindow(win)) {
+        hookComposeWindow(win);
+      }
+    },
+    { once: true }
+  );
+}
+
+const domWindowOpenedObserver = {
+  observe(subject, topic) {
+    if (topic === "domwindowopened") {
+      // "domwindowopened"'s subject is already the raw Window object in JS.
+      onWindowOpened(subject);
+    }
+  },
+};
+
+// Registers the send-failure hook for every current and future compose
+// window, and the earliest well-known Gecko shutdown phase (ShutdownPhase::
 // AppShutdownConfirmed, topic "quit-application"). Called once from
 // getAPI() below (see the comment there for why module-level top-level
 // code isn't the right place for this), guarded so a second getAPI() call
-// for another context can't register it twice.
+// for another context can't register everything twice.
 let initialized = false;
 function initialize() {
   if (initialized) {
@@ -183,6 +268,10 @@ function initialize() {
   }
   initialized = true;
   registerShutdownBlocker();
+  Services.obs.addObserver(domWindowOpenedObserver, "domwindowopened");
+  for (const win of Services.wm.getEnumerator("msgcompose")) {
+    hookComposeWindow(win);
+  }
 }
 
 const SHUTDOWN_BLOCKER_NAME =
@@ -235,11 +324,10 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
         // schema.json for why background.js needs to make this call at all
         // rather than relying on getAPI() running on its own.
         activate: async () => {},
-        // Called by background.js's browser.compose.onAfterSend listener
-        // when a send just failed -- see this file's top comment and
-        // background.js for why that's the trigger now, instead of a
-        // proactive run on every window-open or every send -- and by
-        // onQuitApplication above at shutdown.
+        // Exposed for manual/on-demand use (e.g. from the Browser Console
+        // while testing), but not called from background.js on any
+        // schedule -- see onComposeProcessDone above and onQuitApplication
+        // below for the only two places cleanup actually runs.
         cleanup: doCleanup,
       },
     };
@@ -258,10 +346,11 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
       return;
     }
     // The extension is being disabled/reloaded/uninstalled -- not app
-    // shutdown -- so the blocker registered in initialize() above would
+    // shutdown -- so anything registered in initialize() above would
     // otherwise leak (and, worse, keep referencing this soon-to-be-stale
     // script) across the reload.
     AsyncShutdown.appShutdownConfirmed.removeBlocker(onQuitApplication);
+    Services.obs.removeObserver(domWindowOpenedObserver, "domwindowopened");
     Services.obs.notifyObservers(null, "startupcache-invalidate", null);
   }
 };

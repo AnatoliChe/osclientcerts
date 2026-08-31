@@ -1,9 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.25",
-  "description": "ON-SEND-ERROR-TRIGGER BUILD, not for production: every prior trigger on this branch ran cleanup proactively (every window-open or every send), disrupting reading even when nothing needed cleaning. This build runs cleanup only reactively, via browser.compose.onAfterSend, when a send actually just failed (sendInfo.error set) -- cutting how often the reading-disruption side effect happens down to only when there's a real problem, at the cost of not being able to fix the send that just failed (the user retries after cleanup finishes).",
-  "permissions": ["compose"],
+  "version": "0.4.26",
+  "description": "ON-COMPOSE-ERROR-TRIGGER BUILD, not for production: v0.4.25's browser.compose.onAfterSend never fired for a signing failure (confirmed against comm-central's source: the JS catch block returns before the \"aftersend\" event that API is built on ever dispatches). This build hooks lower, at the same layer Thunderbird's own compose window code uses: nsIMsgComposeStateListener, registered via gMsgCompose.RegisterStateListener() -- ComposeProcessDone(aResult) fires with the real nsresult of the send, including a finishCryptoEncapsulation failure, driven by nsMsgCompose's own completion notification rather than the JS try/catch that swallows it.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
