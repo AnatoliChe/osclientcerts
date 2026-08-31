@@ -153,12 +153,19 @@ async function synthesizeSignEncrypt(identity) {
   ].createInstance(Ci.nsIMsgSendReport);
 
   try {
+    const outputStream = bufStream.QueryInterface(Ci.nsIOutputStream);
     console.log(
-      "certCleanup: synthesizeSignEncrypt: beginCryptoEncapsulation for " +
-        compFields.to
+      "certCleanup: synthesizeSignEncrypt: about to call beginCryptoEncapsulation with:\n" +
+        "  outputStream=" + outputStream + " (typeof " + typeof outputStream + ")\n" +
+        "  recipients=" + JSON.stringify(compFields.to) + " (typeof " + typeof compFields.to + ")\n" +
+        "  compFields=" + compFields + "\n" +
+        "  headers=\"\"\n" +
+        "  identity=" + identity + ", identity.email=" + JSON.stringify(identity.email) + "\n" +
+        "  sendReport=" + sendReport + "\n" +
+        "  isDraft=true"
     );
     composeSecure.beginCryptoEncapsulation(
-      bufStream,
+      outputStream,
       compFields.to,
       compFields,
       "",
