@@ -400,6 +400,13 @@ const hookedComposeWindows = new Set();
 //      lightly wrapping GenericSendMessage (recording the argument only,
 //      not changing its behavior) whenever the user (or our own retry)
 //      calls it.
+// How long to wait after a *successful* send (the first attempt, or a
+// retry) before reinitializing CertVerifier -- see the long comment on
+// POST_SEND_REINIT_DELAY_MS below for why this needs to be delayed rather
+// than immediate, and why it runs on every success, not just after a
+// retry.
+const POST_SEND_REINIT_DELAY_MS = 5000;
+
 function onComposeProcessDone(win, aResult) {
   if (aResult === 0) {
     // NS_OK. Not using Cr.NS_OK to avoid depending on whether Cr
@@ -407,6 +414,33 @@ function onComposeProcessDone(win, aResult) {
     // same way Cc/Ci/Cu are -- NS_OK's value (0) is stable across all of
     // Gecko and won't change.
     win.__certCleanupHandling = false;
+    // A successful send -- first attempt or a retry -- caches a fresh
+    // signer-cert duplicate into cert9.db regardless (established this
+    // session: NSS does this on *every* verified signature, not just
+    // failures). Reinitializing CertVerifier now, proactively, means the
+    // *next* read doesn't have to wait for a future failure to trigger a
+    // cleanup pass first. Delayed (not immediate): production testing
+    // (2026-09-01, v0.5.1) found reinitializing CertVerifier *immediately*
+    // before or during a send reliably makes that same send's own
+    // finishCryptoEncapsulation fail -- a cold, just-rebuilt CertVerifier
+    // can't complete the sender's own synchronous cert verification (its
+    // own C++ comment: "must avoid cert verification... which often
+    // involves async OCSP"). Delaying until well after the send has
+    // finished (and Thunderbird's own self-verification of the just-sent
+    // message into Sent -- confirmed via MOZ_LOG to happen roughly 0.5s
+    // after signing completes -- has had time to run and do whatever
+    // caching it does) avoids interfering with any in-flight crypto
+    // operation. Does *not* run doCleanup() or read cert9.db at all, only
+    // reinitCertVerifier() -- there's nothing to clean up yet immediately
+    // after a successful send, this is purely about the read-side cache.
+    win.setTimeout(() => {
+      console.log(
+        `certCleanup: ${POST_SEND_REINIT_DELAY_MS}ms after a successful send, reinitializing CertVerifier`
+      );
+      reinitCertVerifier().catch((e) => {
+        Cu.reportError("certCleanup: post-send reinitCertVerifier failed: " + e);
+      });
+    }, POST_SEND_REINIT_DELAY_MS);
     return;
   }
   if (win.__certCleanupHandling) {
@@ -427,22 +461,6 @@ function onComposeProcessDone(win, aResult) {
   );
   cleanupAndReinit("on-send-failure")
     .then(() => recreateComposeSecure(win))
-    .then(() => {
-      // recreateComposeSecure()'s own checkRecipientCerts() call just did a
-      // fresh certificate verification pass (asyncFindCertByEmailAddr,
-      // genuinely touching NSS) -- reported 2026-09-01 to break reading the
-      // same way any other cert-lookup/verification event has all session
-      // (getCerts() alone, with zero writes, was enough back in the
-      // earliest tests). cleanupAndReinit() above already reinitialized
-      // CertVerifier once, but that was *before* this fresh disturbance --
-      // do it again now, right before the actual retry, so the last thing
-      // that touches NSS before the send is always the rebuild, not a
-      // lookup it doesn't know about. Unconditional (not gated on cleanup
-      // having found something this time): the disturbance here is from
-      // checkRecipientCerts, not from a cert9.db delete.
-      console.log("certCleanup: reinitializing CertVerifier again after cache rewarm");
-      return reinitCertVerifier();
-    })
     .then(() => {
       console.log("certCleanup: retrying send with a fresh nsIMsgComposeSecure");
       const msgType = win.__certCleanupLastMsgType ?? Ci.nsIMsgCompDeliverMode.Now;
