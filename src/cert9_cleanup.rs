@@ -52,23 +52,45 @@ const CKO_CERTIFICATE_BYTES: [u8; 4] = [0, 0, 0, 1];
 /// synchronize with any particular Thunderbird operation at all.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Locates the active Thunderbird profile directory by reading
+/// Env var that, if set, names the profile directory directly and skips
+/// `profiles.ini` parsing entirely. Needed for setups `profiles.ini`
+/// doesn't (reliably) describe -- e.g. a Daily/Nightly build run from its
+/// own install with a profile not registered in the default
+/// `%APPDATA%\Thunderbird\profiles.ini`, multiple profiles running at
+/// once, or a `-profile <path>` launch override. Same naming convention as
+/// this crate's existing `OSCLIENTCERTS_NSS_REGRESSION_DIR` (see
+/// Cargo.toml). Since this is read by a DLL loaded into thunderbird.exe,
+/// it must be set in the environment *before* Thunderbird starts (a
+/// permanent Windows user/system environment variable, or a launcher
+/// script that does `set OSCLIENTCERTS_PROFILE_DIR=...` before invoking
+/// thunderbird.exe) -- setting it after the process is already running has
+/// no effect.
+const PROFILE_DIR_OVERRIDE_ENV_VAR: &str = "OSCLIENTCERTS_PROFILE_DIR";
+
+/// Locates the active Thunderbird profile directory. Checks
+/// `OSCLIENTCERTS_PROFILE_DIR` first (see above); otherwise reads
 /// `profiles.ini`, the same file Thunderbird itself uses to find its own
 /// default profile -- there is no other way to learn this from a PKCS #11
 /// module, which has no Gecko API access (unlike the WebExtension-based
 /// cleanup tool, which just asks `Services.dirsvc` for `ProfD`).
 ///
-/// Handles both the modern format (an `[InstallXXXXXXXX]` section with its
-/// own `Default=<path>`, which takes precedence when present) and the
-/// legacy format (a `[ProfileN]` section with `Default=1`, falling back to
-/// the first `[ProfileN]` section if none is marked default).
+/// The `profiles.ini` fallback handles both the modern format (an
+/// `[InstallXXXXXXXX]` section with its own `Default=<path>`, which takes
+/// precedence when present) and the legacy format (a `[ProfileN]` section
+/// with `Default=1`, falling back to the first `[ProfileN]` section if
+/// none is marked default).
 ///
-/// Known limitation: always picks *a* default profile, not necessarily the
-/// one actually running this process -- doesn't handle multiple
-/// simultaneously-running profiles or a `-profile <path>` command-line
-/// override. Fine for this experiment; would need addressing before any
-/// production use.
+/// Known limitation of the `profiles.ini` fallback: always picks *a*
+/// default profile, not necessarily the one actually running this process
+/// -- doesn't handle multiple simultaneously-running profiles or a
+/// `-profile <path>` command-line override on its own. Use
+/// `OSCLIENTCERTS_PROFILE_DIR` for those cases.
 fn find_profile_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var(PROFILE_DIR_OVERRIDE_ENV_VAR) {
+        debug!("cert9_cleanup: using {} = {}", PROFILE_DIR_OVERRIDE_ENV_VAR, dir);
+        return Some(PathBuf::from(dir));
+    }
+
     let appdata = std::env::var("APPDATA").ok()?;
     let thunderbird_dir = PathBuf::from(&appdata).join("Thunderbird");
     let ini_path = thunderbird_dir.join("profiles.ini");
