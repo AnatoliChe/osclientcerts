@@ -545,7 +545,16 @@ function onComposeProcessDone(win, aResult) {
       "onComposeProcessDone: scheduling post-send reinitCertVerifier()",
       `delay=${POST_SEND_REINIT_DELAY_MS}ms`
     );
-    win.setTimeout(() => {
+    // Deliberately the module-level setTimeout (imported from Timer.sys.mjs
+    // at the top of this file), NOT win.setTimeout: confirmed via a real
+    // MOZ_LOG capture (2026-09-01) that a window-scoped timer here silently
+    // never fires if the user closes the compose window before the delay
+    // elapses -- completely normal right after a successful send, and
+    // closing a window cancels all of its pending window.setTimeout calls
+    // with no error. The whole point of this reinit is to fix *global* NSS
+    // state that matters for reading mail in *other* windows, so it must
+    // survive this compose window closing.
+    setTimeout(() => {
       logInfo(
         "onComposeProcessDone: post-send delay elapsed, reinitializing CertVerifier",
         `delay was ${POST_SEND_REINIT_DELAY_MS}ms`

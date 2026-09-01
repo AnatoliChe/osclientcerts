@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.5.4",
-  "description": "FRESH-GSMFIELDS-RETRY BUILD (v5, detailed logging): same behavior as 0.5.3 (unconditional reinit before recreateComposeSecure, fresh nsIMsgComposeSecure per retry, delayed post-success reinit), but every action now logs a start line and a finished/FAILED line through logInfo()/logError() -- version, Date.now() timestamp, the specific step, and the error+stack on failure. Covers doCleanup() (getCerts(), the cert9.db SELECT per live cert, each deleteCertificate() attempt), reinitCertVerifier() (each pref read/write and the observer topic wait), recreateComposeSecure() (instance creation, flag copy, cache rewarm), onComposeProcessDone() (every call including its aResult, and each stage of the failure-handling chain), and the window-hooking/shutdown/lifecycle functions.",
+  "version": "0.5.5",
+  "description": "FRESH-GSMFIELDS-RETRY BUILD (v6): the new detailed logging (0.5.4) immediately found a real bug -- a MOZ_LOG capture showed the delayed (5s) post-send reinitCertVerifier() never firing at all, correlated with the user closing the compose window right after a successful send (completely normal). It used win.setTimeout(), a window-scoped timer that Gecko silently cancels along with all of that window's other pending timers when the window closes. Switched to the module-level setTimeout (imported from Timer.sys.mjs), which isn't tied to any compose window's lifecycle -- the whole point of this reinit is fixing global NSS state for reading mail in other windows, so it needs to survive the compose window closing.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
