@@ -52,7 +52,7 @@ const { setTimeout, clearTimeout } = ChromeUtils.importESModule(
 // script has no equivalent of background.js's browser.runtime.getManifest()
 // (that's a WebExtension-context API, not available here), so there's no
 // way to read it back automatically.
-const VERSION = "0.6.4.0";
+const VERSION = "0.6.4.1";
 
 // Every action this build takes is logged through these two: each line
 // carries the version, a Date.now() timestamp (so it lines up with
@@ -99,18 +99,20 @@ async function doCleanup() {
     Ci.nsIX509CertDB
   );
 
-  // TEST BUILD 0.6.4.0: bisection experiment -- the hypothesis is that the
-  // mere acquisition of the nsIX509CertDB service alone (before any getCerts())
-  // already breaks subsequent reading of incoming mail. So: obtain the service,
-  // log that we did, and return without touching getCerts(), cert9.db, or
-  // deleteCertificate() at all. Nothing else in this file runs on the send
-  // path beyond this return (see hookSendButton).
-  logInfo("doCleanup: TEST 0.6.4.0: certDB service acquired, returning without touching anything else");
-  return [];
   let certs;
   try {
+    // TEST BUILD 0.6.4.1: bisection experiment step 2. 0.6.4.0 proved that
+    // merely acquiring the nsIX509CertDB service does NOT break reading of
+    // incoming mail. This build adds the next step: call getCerts() (full
+    // PK11_ListCerts(PK11CertListUnique) enumeration incl. our own token),
+    // log the result, and return immediately -- no email filter, no cert9.db
+    // read, no deleteCertificate(). If reading still works, the breakage must
+    // come from the filter/SQL/delete; if it breaks here, getCerts() alone is
+    // the culprit (as the old 0.4.10 getCerts-only control also suggested).
     certs = certDB.getCerts();
-    logInfo("doCleanup: certDB.getCerts() returned", `${certs.length} total cert(s)`);
+    logInfo("doCleanup: TEST 0.6.4.1: certDB.getCerts() returned", `${certs.length} total cert(s)`);
+    logInfo("doCleanup: TEST 0.6.4.1: returning without touching filter, cert9.db, or deleteCertificate");
+    return [];
   } catch (e) {
     logError("doCleanup: certDB.getCerts()", e);
     return [];

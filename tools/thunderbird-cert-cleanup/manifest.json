@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.6.4.0",
-  "description": "TEST-BISECTION BUILD (v0.6.4.0): PROACTIVE-ONLY three-trigger architecture (1. compose-window-open -> unconditional CertVerifier rebuild; 2. send button/menu intercepted before the real send -> cleanup, no reinit, original send runs exactly once; 3. shutdown -> cleanup), but doCleanup() is a NO-OP after acquiring the nsIX509CertDB service: it gets the service object, logs, and returns [] -- no getCerts(), no cert9.db read, no deleteCertificate. Purpose: test the hypothesis that merely resolving Cc['@mozilla.org/security/x509certdb;1'].getService(Ci.nsIX509CertDB) at send time already corrupts later reading of incoming mail (bisection against 0.6.3 which added getCerts()+SELECT+delete back into the send path; 0.6.2 proved 0 live-certs still broke reading, so state corruption happens even without any delete). Same CA-excluding getEmailAddresses() logic as 0.6.3 is present but unreachable in this build.",
+  "version": "0.6.4.1",
+  "description": "TEST-BISECTION BUILD (v0.6.4.1): PROACTIVE-ONLY three-trigger architecture as in 0.6.4.0, next bisection step. 0.6.4.0 proved acquiring the nsIX509CertDB service alone does NOT break reading of incoming mail. 0.6.4.1 additionally calls certDB.getCerts() (the full PK11_ListCerts(PK11CertListUnique) enumeration incl. our osclientcerts token), logs the count, then returns [] immediately -- no email filter, no cert9.db read, no deleteCertificate. Purpose: isolate whether getCerts() alone (step 1 of doCleanup) corrupts later reading; if it doesn't break, the culprit must be in filter/SQL/delete. Same CA-excluding getEmailAddresses() logic as 0.6.3 remains but is unreachable in this build.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
