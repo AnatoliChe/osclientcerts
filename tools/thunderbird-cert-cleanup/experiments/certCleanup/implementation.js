@@ -195,12 +195,23 @@ async function doCleanup() {
 // (not persisted to any file) import of the OS's enterprise root CAs for
 // the few hundred ms this takes -- a real, supported Gecko feature, not a
 // hack -- reverted immediately after.
-// Logged timestamps use performance.timeOrigin + performance.now() (ms since
-// epoch, sub-ms precision) rather than console.log's own displayed time, so
-// they can be lined up precisely against MOZ_LOG's `timestamp` output when
-// cross-referencing the two logs by hand.
+// Logged timestamps use Date.now() (ms since epoch) rather than console.log's
+// own displayed time, so they can be lined up against MOZ_LOG's `timestamp`
+// output when cross-referencing the two logs by hand.
+//
+// v0.4.32 used performance.timeOrigin + performance.now() here instead --
+// `performance` is a Window/Worker global, not available in this privileged
+// Experiment script's own scope, so every single call into
+// reinitCertVerifier() threw a ReferenceError on its very first line,
+// *before* the function's own try/catch even started (that assignment is
+// outside the try block) -- meaning the entire enterprise-roots pref toggle
+// never ran, not even once, across an entire multi-occurrence production
+// test. Confirmed via a real console-export log: all four cleanup passes in
+// that session hit "ReferenceError: performance is not defined" and nothing
+// past it. Whatever caused that test's improved self-heal behavior, it
+// wasn't this function -- it never executed.
 function nowMs() {
-  return (performance.timeOrigin + performance.now()).toFixed(3);
+  return Date.now();
 }
 
 // No-effect-observed timeout: if "psm:enterprise-certs-imported" never

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.32",
-  "description": "REINIT-CERTVERIFIER-EXPERIMENT BUILD (v2, detailed logging), not for production: 0.4.31's CertVerifier rebuild (toggling security.enterprise_roots.enabled false->true) also had zero observable effect on the self-heal pattern -- same as 0.4.30's PK11 token logout/login before it. This build adds explicit, timestamped step-by-step logging around reinitCertVerifier() (including a timeout on the psm:enterprise-certs-imported wait, since a silent hang was previously indistinguishable from success) to confirm whether the reinit itself is actually succeeding, or failing silently inside its try/catch -- for cross-referencing against a MOZ_LOG=CMS:5,MIMECRYPT:5,pipnss:4,certverifier:4,timestamp capture around the second, non-self-healing occurrence.",
+  "version": "0.4.33",
+  "description": "REINIT-CERTVERIFIER-EXPERIMENT BUILD (v3, fixes a logging bug that silently disabled the reinit entirely), not for production: 0.4.32's timestamp helper used `performance.now()`, which throws ReferenceError in this privileged script's scope (not a Window/Worker global here) -- confirmed via a real console-export log that this crashed reinitCertVerifier() on its very first line, before its own try/catch, on every single occurrence in an entire test session, meaning the enterprise-roots pref toggle never actually ran even once despite what looked like an improved self-heal pattern that session (attributable to something else -- most likely test-sequence luck around send-before-read timing, not this mechanism). Switches the timestamp helper to Date.now(). This is the first build where reinitCertVerifier()'s actual effect (if any) can be validly tested.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
