@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.37",
-  "description": "TRIGGER-SELECTOR BUILD (v2, fixes configure() schema + adds load diagnostics): 0.4.36's configure() parameter schema used an unusual 'type: object, additionalProperties: true' shape with no 'properties' key -- suspected of failing Thunderbird's experiment_apis schema validation at startup, which would explain a report that neither the compose-window-open trigger nor the (unconditional) shutdown cleanup ran at all. Switches to an explicit properties list (the well-established pattern for object parameters in WebExtension schemas), and adds console.log lines confirming the script evaluated, getAPI()/initialize() ran, and each compose window's activeTriggers.windowOpen value at hook time, to pin down the failure precisely if this wasn't the actual cause.",
+  "version": "0.4.38",
+  "description": "TRIGGER-SELECTOR BUILD (v3): confirmed the same-window-resend bug (see 0.4.36's changelog) also fires from a *manual* resend, not just this add-on's former auto-retry -- a user who sees the failure dialog (left visible by the sendError trigger) and clicks Send again on the same window hits the identical uncleared-mCerts corruption. Adds a warning (not a block) on any GenericSendMessage() call on a window that has already seen one failure, via Services.prompt.alert(), telling the user to close and reopen instead of resending from the same window. Also restores a dedup guard (__certCleanupHandlingFailure) on the sendError trigger: ComposeProcessDone was observed firing twice for one real failure again (lost when this build's predecessor was rewritten from the v0.4.35 architecture), causing a redundant second cleanup+reinit pass -- harmless but noisy.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",

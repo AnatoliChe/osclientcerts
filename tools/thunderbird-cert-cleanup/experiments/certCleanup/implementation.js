@@ -361,15 +361,44 @@ function onComposeProcessDone(win, aResult) {
     }
     return;
   }
+  // Marks this window as unsafe to resend from -- see
+  // wrapGenericSendMessage()'s warning below. This is set on *any* failure,
+  // independent of activeTriggers.sendError: the same-window-resend bug
+  // documented there is a real Thunderbird issue, not something specific to
+  // whether this add-on's own cleanup ran.
+  win.__certCleanupSawFailure = true;
   if (!activeTriggers.sendError) {
     return;
   }
+  // win.__certCleanupHandlingFailure guards against a second, overlapping
+  // cleanup pass for one failure: production testing found
+  // ComposeProcessDone firing *twice* for one real failure (root cause not
+  // fully pinned down -- possibly this Experiment's parent script
+  // re-evaluating and re-running its window-hooking loop, since MV3
+  // background contexts can be non-persistent and reload). Redundant
+  // cleanup isn't unsafe by itself (a second pass just finds nothing left
+  // to clean), but it's worth avoiding the noise and the extra
+  // enterprise-roots pref toggle. Reset once this pass finishes, not tied
+  // to any retry (there isn't one here) -- see registerStateListener's own,
+  // separate guard against a duplicate *registration* being the underlying
+  // cause.
+  if (win.__certCleanupHandlingFailure) {
+    console.log("certCleanup: duplicate ComposeProcessDone failure notification, ignoring");
+    return;
+  }
+  win.__certCleanupHandlingFailure = true;
   console.log(
     `certCleanup: send failed (0x${(aResult >>> 0).toString(16)}), running cleanup (no retry -- see comment above)`
   );
-  cleanupAndReinit("on-send-failure").catch((e) => {
-    Cu.reportError("certCleanup: cleanup on send-failure failed: " + e);
-  });
+  (async () => {
+    try {
+      await cleanupAndReinit("on-send-failure");
+    } catch (e) {
+      Cu.reportError("certCleanup: cleanup on send-failure failed: " + e);
+    } finally {
+      win.__certCleanupHandlingFailure = false;
+    }
+  })();
 }
 
 // win.gMsgCompose isn't necessarily ready by the window's "load" event --
@@ -470,12 +499,47 @@ function hookSendButton(win) {
   );
 }
 
+// Warns (does not block) on any second GenericSendMessage() call on a
+// window that has already seen one failure -- see the long comment on
+// onComposeProcessDone above for the underlying bug this warns about
+// (confirmed 2026-09-01 via a real corrupted sent message: a same-window
+// resend, whether triggered by this add-on's own former auto-retry or by
+// the user manually clicking Send again, duplicates every recipient's
+// RecipientInfo and leaves the message undecryptable by anyone, including
+// the sender). Warning rather than blocking respects the user's own
+// judgment call (e.g. if they believe the failure was unrelated to this
+// bug) while making the risk visible instead of a silent trap.
+function wrapGenericSendMessage(win) {
+  if (typeof win.GenericSendMessage !== "function") {
+    console.error(
+      "certCleanup: GenericSendMessage not found on this compose window, can't warn about same-window resend"
+    );
+    return;
+  }
+  const original = win.GenericSendMessage;
+  win.GenericSendMessage = function (msgType, ...rest) {
+    if (win.__certCleanupSawFailure) {
+      Services.prompt.alert(
+        win,
+        "cert-cleanup",
+        "Это окно письма уже пыталось отправиться и получило ошибку. Thunderbird не " +
+          "сбрасывает список получателей шифрования между попытками на одном и том же " +
+          "окне (известный баг) -- повторная отправка отсюда, скорее всего, отправит " +
+          "письмо, которое никто не сможет расшифровать, включая вас самих.\n\n" +
+          "Закройте это окно (черновик можно сохранить) и отправьте из нового."
+      );
+    }
+    return original.call(this, msgType, ...rest);
+  };
+}
+
 function hookComposeWindow(win) {
   if (win.__certCleanupHooked) {
     return;
   }
   win.__certCleanupHooked = true;
   console.log(`certCleanup: hookComposeWindow, activeTriggers.windowOpen=${activeTriggers.windowOpen}`);
+  wrapGenericSendMessage(win);
   hookSendButton(win);
   let attemptsLeft = GMSGCOMPOSE_POLL_MAX_ATTEMPTS;
   const tryRegister = () => {
