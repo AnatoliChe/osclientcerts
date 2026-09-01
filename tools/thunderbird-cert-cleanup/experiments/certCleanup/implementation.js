@@ -195,38 +195,103 @@ async function doCleanup() {
 // (not persisted to any file) import of the OS's enterprise root CAs for
 // the few hundred ms this takes -- a real, supported Gecko feature, not a
 // hack -- reverted immediately after.
-function waitForObserverTopic(topic) {
-  return new Promise((resolve) => {
+// Logged timestamps use performance.timeOrigin + performance.now() (ms since
+// epoch, sub-ms precision) rather than console.log's own displayed time, so
+// they can be lined up precisely against MOZ_LOG's `timestamp` output when
+// cross-referencing the two logs by hand.
+function nowMs() {
+  return (performance.timeOrigin + performance.now()).toFixed(3);
+}
+
+// No-effect-observed timeout: if "psm:enterprise-certs-imported" never
+// fires (task failure, task never dispatched, topic name changed upstream,
+// etc.), the previous version of this function would hang forever inside
+// `await` with no further log line -- indistinguishable from "still
+// running" versus "silently stuck". This turns that into an explicit,
+// timestamped failure instead.
+const REINIT_TIMEOUT_MS = 8000;
+
+function waitForObserverTopic(topic, timeoutMs) {
+  console.log(`certCleanup: [${nowMs()}] waiting for observer topic "${topic}"`);
+  return new Promise((resolve, reject) => {
+    let timer;
     const observer = {
       observe() {
+        clearTimeout(timer);
         Services.obs.removeObserver(observer, topic);
+        console.log(`certCleanup: [${nowMs()}] observer topic "${topic}" fired`);
         resolve();
       },
     };
     Services.obs.addObserver(observer, topic);
+    timer = setTimeout(() => {
+      Services.obs.removeObserver(observer, topic);
+      reject(
+        new Error(
+          `certCleanup: [${nowMs()}] TIMED OUT after ${timeoutMs}ms waiting for observer topic "${topic}" -- it never fired`
+        )
+      );
+    }, timeoutMs);
   });
 }
 
 const ENTERPRISE_ROOTS_PREF = "security.enterprise_roots.enabled";
 
 async function reinitCertVerifier() {
+  const startedAt = nowMs();
+  console.log(`certCleanup: [${startedAt}] reinitCertVerifier: starting`);
   try {
     const original = Services.prefs.getBoolPref(ENTERPRISE_ROOTS_PREF, false);
+    console.log(
+      `certCleanup: [${nowMs()}] reinitCertVerifier: ${ENTERPRISE_ROOTS_PREF} currently ${original}`
+    );
     if (original) {
       // Force a false->true transition below even if already true, since
       // only that direction rebuilds CertVerifier.
       Services.prefs.setBoolPref(ENTERPRISE_ROOTS_PREF, false);
+      console.log(
+        `certCleanup: [${nowMs()}] reinitCertVerifier: forced ${ENTERPRISE_ROOTS_PREF}=false first ` +
+          `(readback: ${Services.prefs.getBoolPref(ENTERPRISE_ROOTS_PREF, false)})`
+      );
     }
-    console.log("certCleanup: reinitializing CertVerifier (enterprise-roots pref toggle)");
-    const imported = waitForObserverTopic("psm:enterprise-certs-imported");
+
+    const imported = waitForObserverTopic(
+      "psm:enterprise-certs-imported",
+      REINIT_TIMEOUT_MS
+    );
     Services.prefs.setBoolPref(ENTERPRISE_ROOTS_PREF, true);
+    console.log(
+      `certCleanup: [${nowMs()}] reinitCertVerifier: set ${ENTERPRISE_ROOTS_PREF}=true ` +
+        `(readback: ${Services.prefs.getBoolPref(ENTERPRISE_ROOTS_PREF, false)}), ` +
+        `awaiting rebuild completion (timeout ${REINIT_TIMEOUT_MS}ms)`
+    );
     await imported;
+
     if (!original) {
       Services.prefs.setBoolPref(ENTERPRISE_ROOTS_PREF, false);
+      console.log(
+        `certCleanup: [${nowMs()}] reinitCertVerifier: restored ${ENTERPRISE_ROOTS_PREF}=false ` +
+          `(readback: ${Services.prefs.getBoolPref(ENTERPRISE_ROOTS_PREF, false)})`
+      );
     }
-    console.log("certCleanup: CertVerifier reinitialized");
+    console.log(
+      `certCleanup: [${nowMs()}] reinitCertVerifier: SUCCESS (started ${startedAt}, ` +
+        `final ${ENTERPRISE_ROOTS_PREF}=${Services.prefs.getBoolPref(ENTERPRISE_ROOTS_PREF, false)}, ` +
+        `matches original=${original}: ${Services.prefs.getBoolPref(ENTERPRISE_ROOTS_PREF, false) === original})`
+    );
     return true;
   } catch (e) {
+    // Was previously easy to miss: Cu.reportError logs to the Browser
+    // Console's error stream, which is easy to lose among the various
+    // unrelated warnings/errors Thunderbird itself prints (e.g. the
+    // pre-existing msgHdrViewSMIMEOverlay.js encryptionStatus crash). Also
+    // logging via console.error with an explicit FAILURE marker and the
+    // stack (if any) makes this impossible to mistake for a benign line
+    // when scanning the log.
+    console.error(
+      `certCleanup: [${nowMs()}] reinitCertVerifier: FAILURE (started ${startedAt}): ${e}` +
+        (e && e.stack ? `\n${e.stack}` : "")
+    );
     Cu.reportError("certCleanup: reinitCertVerifier failed: " + e);
     return false;
   }
@@ -245,7 +310,8 @@ async function cleanupAndReinit(label) {
     `certCleanup (${label}): removed ${deleted.length} stale certificate record(s), reinitializing CertVerifier`,
     deleted
   );
-  await reinitCertVerifier();
+  const reinitOk = await reinitCertVerifier();
+  console.log(`certCleanup (${label}): reinitCertVerifier returned ${reinitOk}`);
   return deleted;
 }
 
