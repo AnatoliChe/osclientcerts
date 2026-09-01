@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.6.0",
-  "description": "PROACTIVE-ONLY BUILD: replaces every reactive/retry design tried since 0.5.0 with three proactive triggers and no retry. (1) New compose window -> unconditional CertVerifier rebuild, well before any send is attempted. (2) Send button/menu, intercepted before the real send starts -> remove a stale cert9.db duplicate only (no reinit), then the original send proceeds exactly once. (3) App shutdown -> remove a stale duplicate. Removing cleanup before this window's only send attempt eliminates the same-window-retry corruption risk (and the need for a fresh nsIMsgComposeSecure/checkRecipientCerts() rewarm) that 0.5.x needed but which kept breaking reading anyway even when it ran and reported success.",
+  "version": "0.6.1",
+  "description": "PROACTIVE-ONLY BUILD (v0.6.1): same three-trigger architecture as 0.6.0 (1. compose-window-open -> unconditional CertVerifier rebuild; 2. send button/menu intercepted before the real send -> duplicate-only cleanup, no reinit, original send runs exactly once; 3. shutdown -> duplicate-only cleanup; no retry), and doCleanup() now additionally requires an email address on every candidate cert (tokenName AND emailAddresses.length > 0). A stale cert9.db duplicate can only cause the signing-confusion bug (P1) for a cert someone might actually sign with; our Rust module's CERT_FIND_HAS_PRIVATE_KEY filter only checks for a CERT_KEY_PROV_INFO_PROP_ID property, not a genuinely usable key, so a chain-only helper cert (a CA) can look 'live' without ever being signable. S/MIME always needs an email cert (RFC 5750) and a CA essentially never has one -- filtering here is a zero-cost local check (no extra cert9.db/NSS touch) that also cuts the per-cert SQL lookups doCleanup() does against cert9.db.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
       "strict_min_version": "153.1.1",
-      "update_url": "https://raw.githubusercontent.com/AnatoliChe/osclientcerts/experiment/cert-cleanup-mid-session/tools/thunderbird-cert-cleanup/updates.json"
+      "update_url": "https://raw.githubusercontent.com/AnatoliChe/osclientcerts/tools-cert-cleanup-v0.6.1-proactive-triggers/tools/thunderbird-cert-cleanup/updates.json"
     }
   },
   "experiment_apis": {

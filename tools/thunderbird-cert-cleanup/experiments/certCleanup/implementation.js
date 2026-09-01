@@ -108,11 +108,27 @@ async function doCleanup() {
     logError("doCleanup: certDB.getCerts()", e);
     return [];
   }
+  // Beyond tokenName, also require an email address (cert.emailAddresses,
+  // which Gecko/NSS populates from *both* the Subject DN's PKCS#9
+  // emailAddress attribute and any SAN rfc822Name/directoryName entries --
+  // see nsNSSCertificate::GetEmailAddresses / NSS's CERT_GetFirstEmailAddress
+  // in alg1485.c). A stale cert9.db duplicate can only ever cause the
+  // original signing-confusion bug (P1) for a certificate someone might
+  // actually sign with -- and our own Rust module's CERT_FIND_HAS_PRIVATE_KEY
+  // filter (backend_windows.rs) only checks for a CERT_KEY_PROV_INFO_PROP_ID
+  // property, not a genuinely usable key, so a chain-only helper cert (a CA)
+  // can show up here as "live" without ever being signable. S/MIME requires
+  // an email address on any cert actually used to sign/encrypt (RFC 5750);
+  // a CA cert essentially never has one. Filtering here is a zero-cost, local
+  // check (no extra cert9.db/NSS touch) that also reduces how many separate
+  // SQL lookups doCleanup() makes against cert9.db per pass.
   const liveCerts = certs.filter(
-    (cert) => (cert.tokenName || "").trim() === OS_CLIENT_CERTS_TOKEN_NAME
+    (cert) =>
+      (cert.tokenName || "").trim() === OS_CLIENT_CERTS_TOKEN_NAME &&
+      cert.emailAddresses.length > 0
   );
   logInfo(
-    "doCleanup: filtered to live certs on our token",
+    "doCleanup: filtered to live certs on our token with an email address",
     `${liveCerts.length} of ${certs.length}`
   );
   if (liveCerts.length === 0) {
