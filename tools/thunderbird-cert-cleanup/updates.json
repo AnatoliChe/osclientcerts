@@ -3,6 +3,10 @@
     "cert-cleanup-experiment@osclientcerts.dev": {
       "updates": [
         {
+          "version": "0.5.5",
+          "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.5.5-fix-window-scoped-timer/cert-cleanup.xpi"
+        },
+        {
           "version": "0.5.4",
           "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.5.4-detailed-logging/cert-cleanup.xpi"
         },
