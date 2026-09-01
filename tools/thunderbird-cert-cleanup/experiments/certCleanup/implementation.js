@@ -52,7 +52,7 @@ const { setTimeout, clearTimeout } = ChromeUtils.importESModule(
 // script has no equivalent of background.js's browser.runtime.getManifest()
 // (that's a WebExtension-context API, not available here), so there's no
 // way to read it back automatically.
-const VERSION = "0.6.4.1";
+const VERSION = "0.6.4.2";
 
 // Every action this build takes is logged through these two: each line
 // carries the version, a Date.now() timestamp (so it lines up with
@@ -406,6 +406,20 @@ function hookSendButton(win) {
       const msgType = commandIdToDeliverMode(id);
       win.__certCleanupInterceptingSend = true;
       logInfo("hookSendButton: intercepted send-button click", `id="${id}", msgType=${msgType}`);
+      // DEBUG 0.6.4.2: discover the actual signing-identity global in this
+      // compose window before wiring the search-only doCleanup(). NOTE:
+      // "emailSigningIdentity" is NOT a stock Thunderbird window global
+      // (checked comm-central MsgComposeCommands.js -- the real one is
+      // `gCurrentIdentity`, `var gCurrentIdentity;` at line 130, and its
+      // signing cert is read via getUnicharAttribute("signing_cert_name"),
+      // MsgComposeCommands.js:1821); these probe lines just log whatever
+      // window globals actually exist so we can see which one to use.
+      console.log("emailSigningIdentity =", win.emailSigningIdentity);
+      console.log("email =", win.emailSigningIdentity?.email);
+      console.log("signingCertName =", win.emailSigningIdentity?.signingCertName);
+      console.log("gCurrentIdentity =", win.gCurrentIdentity);
+      console.log("gCurrentIdentity.email =", win.gCurrentIdentity?.email);
+      console.log("gCurrentIdentity.signingCertName =", win.gCurrentIdentity?.signingCertName);
       doCleanup()
         .then((deleted) => {
           logInfo(

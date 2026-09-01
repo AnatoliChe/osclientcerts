@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.6.4.1",
-  "description": "TEST-BISECTION BUILD (v0.6.4.1): PROACTIVE-ONLY three-trigger architecture as in 0.6.4.0, next bisection step. 0.6.4.0 proved acquiring the nsIX509CertDB service alone does NOT break reading of incoming mail. 0.6.4.1 additionally calls certDB.getCerts() (the full PK11_ListCerts(PK11CertListUnique) enumeration incl. our osclientcerts token), logs the count, then returns [] immediately -- no email filter, no cert9.db read, no deleteCertificate. Purpose: isolate whether getCerts() alone (step 1 of doCleanup) corrupts later reading; if it doesn't break, the culprit must be in filter/SQL/delete. Same CA-excluding getEmailAddresses() logic as 0.6.3 remains but is unreachable in this build.",
+  "version": "0.6.4.2",
+  "description": "DEBUG BUILD (v0.6.4.2): same test doCleanup() as 0.6.4.1 (service + getCerts() + return, no filter/cert9.db/delete -- PROVEN in 0.6.4.1 to break reading at send). Added in hookSendButton, right after the send-button interception and BEFORE doCleanup(), a block of console.log diagnostic lines that dump the signing-identity globals of the compose window: probes for the hypothetical 'emailSigningIdentity' global (NOT a real Thunderbird global -- comm-central MsgComposeCommands.js uses `var gCurrentIdentity;` at line 130 and reads the signing cert via identity.getUnicharAttribute('signing_cert_name') at line 1821) plus the real `gCurrentIdentity`/email/signingCertName, so we can confirm which variable to use for the upcoming search-only doCleanup(). No behavior change otherwise.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
