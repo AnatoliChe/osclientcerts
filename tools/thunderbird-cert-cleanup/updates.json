@@ -3,6 +3,10 @@
     "cert-cleanup-experiment@osclientcerts.dev": {
       "updates": [
         {
+          "version": "0.6.0",
+          "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.6.0-proactive-triggers/cert-cleanup.xpi"
+        },
+        {
           "version": "0.5.5",
           "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.5.5-fix-window-scoped-timer/cert-cleanup.xpi"
         },
