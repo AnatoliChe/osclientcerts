@@ -3,6 +3,10 @@
     "cert-cleanup-experiment@osclientcerts.dev": {
       "updates": [
         {
+          "version": "0.4.39",
+          "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.39-fix-warning-blocking-send/cert-cleanup.xpi"
+        },
+        {
           "version": "0.4.38",
           "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.38-warn-same-window-resend/cert-cleanup.xpi"
         },
