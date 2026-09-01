@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.34",
-  "description": "REINIT-CERTVERIFIER-EXPERIMENT BUILD (v4): 0.4.33 fixed the performance.now() crash and the user confirmed a real result -- reading now self-heals after every send, not just the first occurrence per session, the first mechanism all session to actually change that pattern. 0.4.33's own log showed a second, same-category bug though: waitForObserverTopic()'s timeout guard used setTimeout(), also not a global in this scope, throwing ReferenceError right after the enterprise-roots pref was set to true. The underlying fix still worked despite this -- the pref value change itself (confirmed via readback) is what triggers Gecko's C++-side CertVerifier rebuild, independent of our own JS-side wait/confirm bookkeeping -- but the crash meant our success/failure logging was unreliable and, in an original-pref-was-false scenario, could have skipped restoring the pref afterward. Fixes by importing setTimeout/clearTimeout from resource://gre/modules/Timer.sys.mjs (Gecko's polyfill for privileged scopes lacking Window's own timers).",
+  "version": "0.4.35",
+  "description": "ON-COMPOSE-ERROR-TRIGGER + REINIT-CERTVERIFIER, not for production: ports the confirmed-working reinitCertVerifier() mechanism (v0.4.34, validated by the user: reading now self-heals after every send, not just the first per session) from the proactive compose-open trigger onto the less disruptive reactive-on-send-failure trigger (nsIMsgComposeStateListener.ComposeProcessDone + auto-dismissed failure dialog + GenericSendMessage-wrap/auto-retry, previously shipped standalone as v0.4.29 / trunk's v0.6.0). Cleanup now only runs on an actual signing failure or at shutdown, each followed by the CertVerifier rebuild when it actually removed something.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
