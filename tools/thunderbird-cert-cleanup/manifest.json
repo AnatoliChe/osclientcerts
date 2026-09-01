@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.6.3",
-  "description": "PROACTIVE-ONLY BUILD (v0.6.3): same three-trigger architecture and CA-excluding email filter as v0.6.1/v0.6.2 (1. compose-window-open -> unconditional CertVerifier rebuild; 2. send button/menu intercepted before the real send -> duplicate-only cleanup, no reinit, original send runs exactly once; 3. shutdown -> duplicate-only cleanup; no retry), with the filter fixed to use the API that actually exists: nsIX509Cert exposes emailAddresses only as the METHOD getEmailAddresses() (and the AString attribute emailAddress) -- there is no 'emailAddresses' property. v0.6.1's filter crashed on cert.emailAddresses.length (TypeError), v0.6.2's null-guard silently treated every cert as having no email, so doCleanup() saw 0 live certs and the stale duplicate was never deleted, breaking signing; getEmailAddresses().length correctly returns the real addresses from Subject/SAN so ext.test-style signing certs are kept and chain-only CA certs (no email) are still excluded.",
+  "version": "0.6.4.0",
+  "description": "TEST-BISECTION BUILD (v0.6.4.0): PROACTIVE-ONLY three-trigger architecture (1. compose-window-open -> unconditional CertVerifier rebuild; 2. send button/menu intercepted before the real send -> cleanup, no reinit, original send runs exactly once; 3. shutdown -> cleanup), but doCleanup() is a NO-OP after acquiring the nsIX509CertDB service: it gets the service object, logs, and returns [] -- no getCerts(), no cert9.db read, no deleteCertificate. Purpose: test the hypothesis that merely resolving Cc['@mozilla.org/security/x509certdb;1'].getService(Ci.nsIX509CertDB) at send time already corrupts later reading of incoming mail (bisection against 0.6.3 which added getCerts()+SELECT+delete back into the send path; 0.6.2 proved 0 live-certs still broke reading, so state corruption happens even without any delete). Same CA-excluding getEmailAddresses() logic as 0.6.3 is present but unreachable in this build.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",

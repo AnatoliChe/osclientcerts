@@ -52,7 +52,7 @@ const { setTimeout, clearTimeout } = ChromeUtils.importESModule(
 // script has no equivalent of background.js's browser.runtime.getManifest()
 // (that's a WebExtension-context API, not available here), so there's no
 // way to read it back automatically.
-const VERSION = "0.6.3";
+const VERSION = "0.6.4.0";
 
 // Every action this build takes is logged through these two: each line
 // carries the version, a Date.now() timestamp (so it lines up with
@@ -99,7 +99,14 @@ async function doCleanup() {
     Ci.nsIX509CertDB
   );
 
-  logInfo("doCleanup: calling certDB.getCerts()");
+  // TEST BUILD 0.6.4.0: bisection experiment -- the hypothesis is that the
+  // mere acquisition of the nsIX509CertDB service alone (before any getCerts())
+  // already breaks subsequent reading of incoming mail. So: obtain the service,
+  // log that we did, and return without touching getCerts(), cert9.db, or
+  // deleteCertificate() at all. Nothing else in this file runs on the send
+  // path beyond this return (see hookSendButton).
+  logInfo("doCleanup: TEST 0.6.4.0: certDB service acquired, returning without touching anything else");
+  return [];
   let certs;
   try {
     certs = certDB.getCerts();
