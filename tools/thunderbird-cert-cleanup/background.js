@@ -6,9 +6,10 @@
 // experiments/certCleanup/implementation.js): the
 // AsyncShutdown.appShutdownConfirmed blocker, and an nsIMsgComposeStateListener
 // on each compose window that reacts to a failed send (cleans up, then
-// automatically retries). Since 0.7.0, a cleanup pass that actually removes
-// something is also followed by rebuilding Gecko's CertVerifier singleton
-// (reinitCertVerifier() in implementation.js), which is what makes this
+// automatically retries). Every cleanup pass is unconditionally followed by
+// rebuilding Gecko's CertVerifier singleton (reinitCertVerifier() in
+// implementation.js, since 0.7.0; made unconditional -- not just when a
+// duplicate was actually deleted -- in 0.7.1), which is what makes this
 // self-heal reliably instead of only on the first occurrence per session.
 // See README.md ("Why cleanup runs at shutdown and on a failed send") for
 // why.

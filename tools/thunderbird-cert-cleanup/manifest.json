@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.7.0",
-  "description": "Removes stale, keyless duplicate copies of your OS Client Certs signing certificate that NSS sometimes caches into cert9.db from verified S/MIME signatures, which can silently break outgoing S/MIME signing. Runs at Thunderbird shutdown and, automatically, right after a signing failure -- then retries the send, now paired with a CertVerifier rebuild so decryption of other messages doesn't get corrupted along the way. See README.md.",
+  "version": "0.7.1",
+  "description": "Removes stale, keyless duplicate copies of your OS Client Certs signing certificate that NSS sometimes caches into cert9.db from verified S/MIME signatures, which can silently break outgoing S/MIME signing. Runs at Thunderbird shutdown and, automatically, right after a signing failure -- then retries the send, paired with a CertVerifier rebuild so decryption of other messages doesn't get corrupted along the way. Fix in 0.7.1: that CertVerifier rebuild now always runs after a cleanup pass, not only when the pass found something to delete -- the cert9.db read itself can disturb NSS's cert-resolution state even when nothing was deleted, so 0.7.0 could skip the fix exactly when it was needed. No other change from 0.7.0. See README.md.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup@osclientcerts.dev",

@@ -268,18 +268,23 @@ async function reinitCertVerifier() {
   }
 }
 
-// Runs a cleanup pass and, only if it actually removed something, follows up
-// with reinitCertVerifier() -- no point risking the enterprise-roots pref
-// toggle (and its side effects) on a pass that found nothing stale.
+// Runs a cleanup pass, then unconditionally follows up with
+// reinitCertVerifier() -- even when nothing was deleted. doCleanup() always
+// calls certDB.getCerts() as its first step regardless of outcome, and that
+// call alone (with zero file writes) was established early in this
+// investigation as sufficient on its own to disturb NSS's cert-resolution
+// state for the rest of the session -- so gating the rebuild on
+// deleted.length > 0 (0.7.0's behavior) skipped the fix exactly when a
+// cleanup pass found nothing to remove, which does not mean nothing
+// disruptive happened.
 async function cleanupAndReinit(label) {
   const deleted = await doCleanup();
-  if (deleted.length === 0) {
-    return deleted;
+  if (deleted.length > 0) {
+    console.log(
+      `certCleanup (${label}): removed ${deleted.length} stale certificate record(s), reinitializing CertVerifier`,
+      deleted
+    );
   }
-  console.log(
-    `certCleanup (${label}): removed ${deleted.length} stale certificate record(s), reinitializing CertVerifier`,
-    deleted
-  );
   await reinitCertVerifier();
   return deleted;
 }
