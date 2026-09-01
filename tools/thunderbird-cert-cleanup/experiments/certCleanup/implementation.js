@@ -52,7 +52,7 @@ const { setTimeout, clearTimeout } = ChromeUtils.importESModule(
 // script has no equivalent of background.js's browser.runtime.getManifest()
 // (that's a WebExtension-context API, not available here), so there's no
 // way to read it back automatically.
-const VERSION = "0.6.2";
+const VERSION = "0.6.3";
 
 // Every action this build takes is logged through these two: each line
 // carries the version, a Date.now() timestamp (so it lines up with
@@ -108,8 +108,10 @@ async function doCleanup() {
     logError("doCleanup: certDB.getCerts()", e);
     return [];
   }
-  // Beyond tokenName, also require an email address (cert.emailAddresses,
-  // which Gecko/NSS populates from *both* the Subject DN's PKCS#9
+  // Beyond tokenName, also require an email address (cert.getEmailAddresses(),
+  // the nsIX509Cert method -- there is NO property named "emailAddresses",
+  // only the method and the AString "emailAddress" attribute -- Gecko/NSS
+  // populates it from *both* the Subject DN's PKCS#9
   // emailAddress attribute and any SAN rfc822Name/directoryName entries --
   // see nsNSSCertificate::GetEmailAddresses / NSS's CERT_GetFirstEmailAddress
   // in alg1485.c). A stale cert9.db duplicate can only ever cause the
@@ -125,7 +127,7 @@ async function doCleanup() {
   const liveCerts = certs.filter(
     (cert) =>
       (cert.tokenName || "").trim() === OS_CLIENT_CERTS_TOKEN_NAME &&
-      (cert.emailAddresses || []).length > 0
+      cert.getEmailAddresses().length > 0
   );
   logInfo(
     "doCleanup: filtered to live certs on our token with an email address",
