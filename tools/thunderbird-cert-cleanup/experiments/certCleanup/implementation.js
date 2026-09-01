@@ -32,6 +32,40 @@ const { setTimeout, clearTimeout } = ChromeUtils.importESModule(
 // off -- see recreateComposeSecure() and the long comment on
 // onComposeProcessDone below.
 
+// Kept in sync with manifest.json's "version" by hand -- this privileged
+// script has no equivalent of background.js's browser.runtime.getManifest()
+// (that's a WebExtension-context API, not available here), so there's no
+// way to read it back automatically.
+const VERSION = "0.5.4";
+
+// Every action this build takes is logged through these two, on request
+// (2026-09-01): each line carries the version, a Date.now() timestamp (so
+// it lines up with MOZ_LOG's `timestamp` output and with other builds'
+// [1788...] markers), the specific step, and -- for logError -- the error
+// and its stack if it has one. The goal is that every operation (read
+// cert9.db, attempt a delete, start/finish a CertVerifier reinit, etc.) has
+// both a "starting" and a "finished: <result>" line, so a real log capture
+// shows exactly which step something failed at, not just that something
+// somewhere failed.
+function logInfo(step, detail) {
+  console.log(
+    `certCleanup v${VERSION} [${Date.now()}] ${step}` +
+      (detail !== undefined ? `: ${detail}` : "")
+  );
+}
+function logError(step, err) {
+  console.error(
+    `certCleanup v${VERSION} [${Date.now()}] ${step} FAILED: ${err}` +
+      (err && err.stack ? `\n${err.stack}` : "")
+  );
+}
+
+// Proves this script parsed and evaluated at all: if this line is missing
+// from a log capture, the problem is upstream of this script (e.g. the
+// experiment_apis schema failing validation, or the script failing to
+// parse) rather than in any of the logic below.
+logInfo("implementation.js: evaluated");
+
 // The PKCS#11 token label the osclientcerts provider reports via C_GetTokenInfo
 // (see TOKEN_LABEL_BYTES in fork-osclientcerts/src/lib.rs).
 const OS_CLIENT_CERTS_TOKEN_NAME = "OS Client Cert Token";
@@ -49,18 +83,32 @@ const CKO_CERTIFICATE_BYTES = new Uint8Array([0, 0, 0, 1]);
 // for why detection reads cert9.db directly but deletion goes through
 // nsIX509CertDB.
 async function doCleanup() {
+  logInfo("doCleanup: starting");
   const certDB = Cc["@mozilla.org/security/x509certdb;1"].getService(
     Ci.nsIX509CertDB
   );
 
-  const certs = certDB.getCerts();
+  logInfo("doCleanup: calling certDB.getCerts()");
+  let certs;
+  try {
+    certs = certDB.getCerts();
+    logInfo("doCleanup: certDB.getCerts() returned", `${certs.length} total cert(s)`);
+  } catch (e) {
+    logError("doCleanup: certDB.getCerts()", e);
+    return [];
+  }
   const liveCerts = certs.filter(
     (cert) => (cert.tokenName || "").trim() === OS_CLIENT_CERTS_TOKEN_NAME
+  );
+  logInfo(
+    "doCleanup: filtered to live certs on our token",
+    `${liveCerts.length} of ${certs.length}`
   );
   if (liveCerts.length === 0) {
     // The provider isn't loaded (or has no certs) right now -- don't touch
     // cert9.db at all, since we have no way to confirm which of its rows, if
     // any, are safe to remove.
+    logInfo("doCleanup: no live certs on our token, nothing to check, returning");
     return [];
   }
 
@@ -90,30 +138,44 @@ async function doCleanup() {
   const profileDir = Services.dirsvc.get("ProfD", Ci.nsIFile);
   const dbFile = profileDir.clone();
   dbFile.append("cert9.db");
+  logInfo("doCleanup: cert9.db path", dbFile.path);
 
   const deleted = [];
   let conn;
   try {
+    logInfo("doCleanup: opening cert9.db (openNotExclusive, readOnly)");
     conn = await Sqlite.openConnection({
       path: dbFile.path,
       openNotExclusive: true,
       readOnly: true,
     });
+    logInfo("doCleanup: cert9.db opened");
     for (const liveCert of liveCerts) {
+      logInfo("doCleanup: checking live cert", `subject=${liveCert.subjectName}`);
       const derArray = liveCert.getRawDER();
       const der = Uint8Array.from(derArray);
-      const rows = await conn.execute(
-        "SELECT id FROM nssPublic WHERE " +
-          CKA_CLASS_COLUMN + " = :cls AND " + CKA_VALUE_COLUMN + " = :der",
-        { cls: CKO_CERTIFICATE_BYTES, der }
-      );
-      if (rows.length === 0) {
+      logInfo("doCleanup: querying nssPublic for a matching duplicate row");
+      let rows;
+      try {
+        rows = await conn.execute(
+          "SELECT id FROM nssPublic WHERE " +
+            CKA_CLASS_COLUMN + " = :cls AND " + CKA_VALUE_COLUMN + " = :der",
+          { cls: CKO_CERTIFICATE_BYTES, der }
+        );
+      } catch (e) {
+        logError(`doCleanup: SELECT for subject=${liveCert.subjectName}`, e);
         continue;
       }
-      console.log(
-        "certCleanup: found " + rows.length +
-          " stale cert9.db row(s) duplicating live cert subject=" +
-          liveCert.subjectName
+      if (rows.length === 0) {
+        logInfo(
+          "doCleanup: no duplicate row found",
+          `subject=${liveCert.subjectName}`
+        );
+        continue;
+      }
+      logInfo(
+        "doCleanup: found duplicate row(s)",
+        `${rows.length} row(s), subject=${liveCert.subjectName}`
       );
       // Delete via nsIX509CertDB, not a second write connection (see
       // reinitCertVerifier() below for the other half of this build's fix:
@@ -133,9 +195,17 @@ async function doCleanup() {
       // anything: osclientcerts' own C_DestroyObject is an unconditional
       // CKR_FUNCTION_NOT_SUPPORTED stub (see src/lib.rs), so an attempt to
       // destroy anything on our external token is a safe no-op.
+      logInfo(
+        "doCleanup: attempting deleteCertificate()",
+        `subject=${liveCert.subjectName}`
+      );
       try {
         const tempCert = certDB.constructX509(derArray);
         certDB.deleteCertificate(tempCert);
+        logInfo(
+          "doCleanup: deleteCertificate() succeeded",
+          `subject=${liveCert.subjectName}, ${rows.length} row(s)`
+        );
         deleted.push({
           subjectName: liveCert.subjectName,
           issuerName: liveCert.issuerName,
@@ -143,20 +213,23 @@ async function doCleanup() {
           rowCount: rows.length,
         });
       } catch (e) {
-        Cu.reportError(
-          "certCleanup: deleteCertificate failed for subject=" +
-            liveCert.subjectName + ": " + e
+        logError(
+          `doCleanup: deleteCertificate() for subject=${liveCert.subjectName}`,
+          e
         );
       }
     }
   } catch (e) {
-    Cu.reportError("certCleanup: cert9.db access failed: " + e);
+    logError("doCleanup: cert9.db access", e);
   } finally {
     if (conn) {
+      logInfo("doCleanup: closing cert9.db connection");
       await conn.close();
+      logInfo("doCleanup: cert9.db connection closed");
     }
   }
 
+  logInfo("doCleanup: done", `${deleted.length} record(s) deleted`);
   return deleted;
 }
 
@@ -200,23 +273,25 @@ function nowMs() {
 const REINIT_TIMEOUT_MS = 8000;
 
 function waitForObserverTopic(topic, timeoutMs) {
+  logInfo("waitForObserverTopic: registering observer", `topic="${topic}", timeout=${timeoutMs}ms`);
   return new Promise((resolve, reject) => {
     let timer;
     const observer = {
       observe() {
         clearTimeout(timer);
         Services.obs.removeObserver(observer, topic);
+        logInfo("waitForObserverTopic: topic fired", `topic="${topic}"`);
         resolve();
       },
     };
     Services.obs.addObserver(observer, topic);
     timer = setTimeout(() => {
       Services.obs.removeObserver(observer, topic);
-      reject(
-        new Error(
-          `certCleanup: TIMED OUT after ${timeoutMs}ms waiting for observer topic "${topic}" -- it never fired`
-        )
+      const err = new Error(
+        `TIMED OUT after ${timeoutMs}ms waiting for observer topic "${topic}" -- it never fired`
       );
+      logError("waitForObserverTopic", err);
+      reject(err);
     }, timeoutMs);
   });
 }
@@ -224,27 +299,44 @@ function waitForObserverTopic(topic, timeoutMs) {
 const ENTERPRISE_ROOTS_PREF = "security.enterprise_roots.enabled";
 
 async function reinitCertVerifier() {
+  logInfo("reinitCertVerifier: starting");
   try {
     const original = Services.prefs.getBoolPref(ENTERPRISE_ROOTS_PREF, false);
+    logInfo("reinitCertVerifier: read current pref value", `${ENTERPRISE_ROOTS_PREF}=${original}`);
     if (original) {
       // Force a false->true transition below even if already true, since
       // only that direction rebuilds CertVerifier.
+      logInfo("reinitCertVerifier: pref already true, forcing to false first");
       Services.prefs.setBoolPref(ENTERPRISE_ROOTS_PREF, false);
+      logInfo(
+        "reinitCertVerifier: set pref to false",
+        `readback=${Services.prefs.getBoolPref(ENTERPRISE_ROOTS_PREF, false)}`
+      );
     }
     const imported = waitForObserverTopic(
       "psm:enterprise-certs-imported",
       REINIT_TIMEOUT_MS
     );
+    logInfo("reinitCertVerifier: setting pref to true (triggers the rebuild)");
     Services.prefs.setBoolPref(ENTERPRISE_ROOTS_PREF, true);
+    logInfo(
+      "reinitCertVerifier: set pref to true",
+      `readback=${Services.prefs.getBoolPref(ENTERPRISE_ROOTS_PREF, false)}, awaiting rebuild completion`
+    );
     await imported;
+    logInfo("reinitCertVerifier: rebuild completion observed");
     if (!original) {
+      logInfo("reinitCertVerifier: restoring pref to false (original value)");
       Services.prefs.setBoolPref(ENTERPRISE_ROOTS_PREF, false);
+      logInfo(
+        "reinitCertVerifier: restored pref to false",
+        `readback=${Services.prefs.getBoolPref(ENTERPRISE_ROOTS_PREF, false)}`
+      );
     }
-    console.log(`certCleanup: [${nowMs()}] reinitCertVerifier: SUCCESS`);
+    logInfo("reinitCertVerifier: SUCCESS");
     return true;
   } catch (e) {
-    console.error(`certCleanup: [${nowMs()}] reinitCertVerifier: FAILURE: ${e}`);
-    Cu.reportError("certCleanup: reinitCertVerifier failed: " + e);
+    logError("reinitCertVerifier", e);
     return false;
   }
 }
@@ -253,17 +345,18 @@ async function reinitCertVerifier() {
 // with reinitCertVerifier() -- no point risking the enterprise-roots pref
 // toggle (and its side effects) on a pass that found nothing stale.
 async function cleanupAndReinit(label) {
+  logInfo("cleanupAndReinit: starting", `label="${label}"`);
   const deleted = await doCleanup();
   if (deleted.length === 0) {
-    console.log(`certCleanup (${label}): nothing to clean up`);
+    logInfo("cleanupAndReinit: nothing to clean up, not reinitializing", `label="${label}"`);
     return deleted;
   }
-  console.log(
-    `certCleanup (${label}): removed ${deleted.length} stale certificate record(s), reinitializing CertVerifier`,
-    deleted
+  logInfo(
+    "cleanupAndReinit: cleanup removed record(s), reinitializing CertVerifier",
+    `label="${label}", ${deleted.length} record(s)`
   );
   const reinitOk = await reinitCertVerifier();
-  console.log(`certCleanup (${label}): reinitCertVerifier returned ${reinitOk}`);
+  logInfo("cleanupAndReinit: done", `label="${label}", reinitCertVerifier returned ${reinitOk}`);
   return deleted;
 }
 
@@ -293,7 +386,9 @@ async function cleanupAndReinit(label) {
 // reachable the same way win.GenericSendMessage already is) -- and awaits
 // it before the retry proceeds.
 async function recreateComposeSecure(win) {
+  logInfo("recreateComposeSecure: starting");
   const oldFields = win.gSMFields;
+  logInfo("recreateComposeSecure: creating new nsIMsgComposeSecure instance");
   const freshFields = Cc[
     "@mozilla.org/messengercompose/composesecure;1"
   ].createInstance(Ci.nsIMsgComposeSecure);
@@ -301,35 +396,45 @@ async function recreateComposeSecure(win) {
     freshFields.signMessage = oldFields.signMessage;
     freshFields.signFormat = oldFields.signFormat;
     freshFields.requireEncryptMessage = oldFields.requireEncryptMessage;
+    logInfo(
+      "recreateComposeSecure: copied flags from old instance",
+      `signMessage=${oldFields.signMessage}, signFormat=${oldFields.signFormat}, requireEncryptMessage=${oldFields.requireEncryptMessage}`
+    );
+  } else {
+    logInfo("recreateComposeSecure: no old instance to copy flags from (win.gSMFields was unset)");
   }
   win.gMsgCompose.compFields.composeSecure = freshFields;
   win.gSMFields = freshFields;
-  console.log("certCleanup: recreateComposeSecure: fresh nsIMsgComposeSecure installed");
+  logInfo("recreateComposeSecure: fresh nsIMsgComposeSecure installed as win.gSMFields");
 
   if (
     typeof win.getEncryptionCompatibleRecipients !== "function" ||
     typeof win.checkRecipientCerts !== "function"
   ) {
-    console.error(
-      "certCleanup: getEncryptionCompatibleRecipients/checkRecipientCerts not found on this " +
-        "window -- can't rewarm the fresh nsIMsgComposeSecure's recipient-cert cache, retrying anyway"
+    logError(
+      "recreateComposeSecure",
+      "getEncryptionCompatibleRecipients/checkRecipientCerts not found on this window " +
+        "-- can't rewarm the fresh nsIMsgComposeSecure's recipient-cert cache, retrying anyway"
     );
     return;
   }
+  logInfo("recreateComposeSecure: calling getEncryptionCompatibleRecipients()");
   const recipients = win.getEncryptionCompatibleRecipients();
-  console.log(
-    `certCleanup: recreateComposeSecure: rewarming cert cache for ${recipients.length} recipient(s)`
+  logInfo(
+    "recreateComposeSecure: rewarming cert cache",
+    `${recipients.length} recipient(s): ${JSON.stringify(recipients)}`
   );
   try {
     await win.checkRecipientCerts(recipients);
-    console.log("certCleanup: recreateComposeSecure: cert cache rewarmed");
+    logInfo("recreateComposeSecure: checkRecipientCerts() succeeded, cert cache rewarmed");
   } catch (e) {
     // Non-fatal: proceed to retry anyway with whatever cache state exists.
     // Worst case this specific retry fails with a legible
     // "missing recipient cert" error instead of corrupting the message --
     // still strictly better than the alternative.
-    Cu.reportError("certCleanup: checkRecipientCerts failed while rewarming cert cache: " + e);
+    logError("recreateComposeSecure: checkRecipientCerts()", e);
   }
+  logInfo("recreateComposeSecure: done");
 }
 
 function isComposeWindow(win) {
@@ -408,11 +513,14 @@ const hookedComposeWindows = new Set();
 const POST_SEND_REINIT_DELAY_MS = 5000;
 
 function onComposeProcessDone(win, aResult) {
+  const resultHex = `0x${(aResult >>> 0).toString(16)}`;
+  logInfo("onComposeProcessDone: called", `aResult=${resultHex}`);
   if (aResult === 0) {
     // NS_OK. Not using Cr.NS_OK to avoid depending on whether Cr
     // (Components.results) is available as a predefined global here the
     // same way Cc/Ci/Cu are -- NS_OK's value (0) is stable across all of
     // Gecko and won't change.
+    logInfo("onComposeProcessDone: send succeeded (NS_OK)");
     win.__certCleanupHandling = false;
     // A successful send -- first attempt or a retry -- caches a fresh
     // signer-cert duplicate into cert9.db regardless (established this
@@ -433,12 +541,17 @@ function onComposeProcessDone(win, aResult) {
     // operation. Does *not* run doCleanup() or read cert9.db at all, only
     // reinitCertVerifier() -- there's nothing to clean up yet immediately
     // after a successful send, this is purely about the read-side cache.
+    logInfo(
+      "onComposeProcessDone: scheduling post-send reinitCertVerifier()",
+      `delay=${POST_SEND_REINIT_DELAY_MS}ms`
+    );
     win.setTimeout(() => {
-      console.log(
-        `certCleanup: ${POST_SEND_REINIT_DELAY_MS}ms after a successful send, reinitializing CertVerifier`
+      logInfo(
+        "onComposeProcessDone: post-send delay elapsed, reinitializing CertVerifier",
+        `delay was ${POST_SEND_REINIT_DELAY_MS}ms`
       );
       reinitCertVerifier().catch((e) => {
-        Cu.reportError("certCleanup: post-send reinitCertVerifier failed: " + e);
+        logError("onComposeProcessDone: post-send reinitCertVerifier()", e);
       });
     }, POST_SEND_REINIT_DELAY_MS);
     return;
@@ -449,25 +562,24 @@ function onComposeProcessDone(win, aResult) {
     // here, but either way don't start an overlapping cleanup/retry cycle.
     // Clearing the flag (rather than leaving it set) is what lets a later,
     // genuinely new failure on this window still be handled.
-    console.error(
-      `certCleanup: ComposeProcessDone failed again while already handling a failure on this window (0x${(aResult >>> 0).toString(16)}), not retrying again`
+    logError(
+      "onComposeProcessDone",
+      `failed again while already handling a failure on this window (aResult=${resultHex}), not retrying again`
     );
     win.__certCleanupHandling = false;
     return;
   }
   win.__certCleanupHandling = true;
-  console.log(
-    `certCleanup: send failed (0x${(aResult >>> 0).toString(16)}), running cleanup`
-  );
+  logInfo("onComposeProcessDone: send failed, starting cleanup+reinit+retry cycle", `aResult=${resultHex}`);
   doCleanup()
     .then((deleted) => {
       if (deleted.length > 0) {
-        console.log(
-          `certCleanup (on-send-failure): removed ${deleted.length} stale certificate record(s)`,
-          deleted
+        logInfo(
+          "onComposeProcessDone: doCleanup() removed record(s)",
+          `${deleted.length} record(s): ${JSON.stringify(deleted)}`
         );
       } else {
-        console.log("certCleanup (on-send-failure): nothing to clean up");
+        logInfo("onComposeProcessDone: doCleanup() found nothing to clean up");
       }
       // Unconditional -- unlike cleanupAndReinit() (still used at shutdown,
       // where nothing follows it), this always reinitializes CertVerifier
@@ -482,17 +594,28 @@ function onComposeProcessDone(win, aResult) {
       // unprotected on any cycle where it didn't -- reported 2026-09-01
       // (reading broke after the 3rd or 4th message, with no accompanying
       // duplicate found in that log capture).
+      logInfo("onComposeProcessDone: calling reinitCertVerifier() (unconditional)");
       return reinitCertVerifier();
     })
-    .then(() => recreateComposeSecure(win))
+    .then((reinitOk) => {
+      logInfo("onComposeProcessDone: reinitCertVerifier() returned", reinitOk);
+      logInfo("onComposeProcessDone: calling recreateComposeSecure()");
+      return recreateComposeSecure(win);
+    })
     .then(() => {
-      console.log("certCleanup: retrying send with a fresh nsIMsgComposeSecure");
       const msgType = win.__certCleanupLastMsgType ?? Ci.nsIMsgCompDeliverMode.Now;
+      logInfo(
+        "onComposeProcessDone: retrying send with a fresh nsIMsgComposeSecure",
+        `msgType=${msgType}`
+      );
       return win.GenericSendMessage(msgType);
+    })
+    .then(() => {
+      logInfo("onComposeProcessDone: GenericSendMessage() call returned (its own ComposeProcessDone will report the real outcome)");
     })
     .catch((e) => {
       win.__certCleanupHandling = false;
-      Cu.reportError("certCleanup: cleanup/retry after a failed send failed: " + e);
+      logError("onComposeProcessDone: cleanup/retry cycle", e);
     });
 }
 
@@ -516,9 +639,11 @@ function registerStateListener(win) {
   // be non-persistent and reload). This check is cheap insurance regardless
   // of the exact cause.
   if (win.__certCleanupStateListenerRegistered) {
+    logInfo("registerStateListener: already registered on this window, skipping");
     return;
   }
   win.__certCleanupStateListenerRegistered = true;
+  logInfo("registerStateListener: registering nsIMsgComposeStateListener");
   // All four nsIMsgComposeStateListener methods must exist as callable
   // functions even though only ComposeProcessDone matters here: this is a
   // [scriptable] XPCOM interface, and Thunderbird's C++ side may call any
@@ -531,40 +656,49 @@ function registerStateListener(win) {
     SaveInFolderDone(folderName) {},
     NotifyComposeBodyReady() {},
   });
+  logInfo("registerStateListener: registered");
 }
 
 function wrapGenericSendMessage(win) {
   if (typeof win.GenericSendMessage !== "function") {
-    console.error(
-      "certCleanup: GenericSendMessage not found on this compose window, can't track/retry send mode"
-    );
+    logError("wrapGenericSendMessage", "GenericSendMessage not found on this compose window, can't track/retry send mode");
     return;
   }
   const original = win.GenericSendMessage;
   win.GenericSendMessage = function (msgType, ...rest) {
+    logInfo("wrapGenericSendMessage: GenericSendMessage() called", `msgType=${msgType}`);
     win.__certCleanupLastMsgType = msgType;
     return original.call(this, msgType, ...rest);
   };
+  logInfo("wrapGenericSendMessage: wrapped");
 }
 
 function hookComposeWindow(win) {
   if (win.__certCleanupHooked) {
+    logInfo("hookComposeWindow: already hooked, skipping");
     return;
   }
   win.__certCleanupHooked = true;
+  logInfo("hookComposeWindow: starting to hook a new compose window");
   hookedComposeWindows.add(win);
   win.addEventListener("unload", () => hookedComposeWindows.delete(win), { once: true });
   wrapGenericSendMessage(win);
   let attemptsLeft = GMSGCOMPOSE_POLL_MAX_ATTEMPTS;
   const tryRegister = () => {
     if (win.gMsgCompose && typeof win.gMsgCompose.RegisterStateListener === "function") {
+      logInfo(
+        "hookComposeWindow: gMsgCompose.RegisterStateListener available",
+        `after ${GMSGCOMPOSE_POLL_MAX_ATTEMPTS - attemptsLeft} poll(s)`
+      );
       registerStateListener(win);
       return;
     }
     attemptsLeft -= 1;
     if (attemptsLeft <= 0) {
-      console.error(
-        "certCleanup: gMsgCompose.RegisterStateListener never became available on this compose window"
+      logError(
+        "hookComposeWindow",
+        `gMsgCompose.RegisterStateListener never became available on this compose window ` +
+          `after ${GMSGCOMPOSE_POLL_MAX_ATTEMPTS} poll(s)`
       );
       return;
     }
@@ -579,11 +713,12 @@ function onWindowOpened(win) {
     function onLoad() {
       win.removeEventListener("load", onLoad);
       if (isComposeWindow(win)) {
+        logInfo("onWindowOpened: new compose window loaded");
         hookComposeWindow(win);
         return;
       }
       if (isCommonDialogFrom(win, hookedComposeWindows)) {
-        console.log("certCleanup: auto-dismissing the send-failure alert dialog");
+        logInfo("onWindowOpened: auto-dismissing the send-failure alert dialog");
         win.close();
       }
     },
@@ -609,24 +744,32 @@ const domWindowOpenedObserver = {
 let initialized = false;
 function initialize() {
   if (initialized) {
+    logInfo("initialize: already initialized, skipping");
     return;
   }
   initialized = true;
+  logInfo("initialize: starting");
   registerShutdownBlocker();
   Services.obs.addObserver(domWindowOpenedObserver, "domwindowopened");
-  for (const win of Services.wm.getEnumerator("msgcompose")) {
+  logInfo("initialize: domwindowopened observer registered");
+  const existing = [...Services.wm.getEnumerator("msgcompose")];
+  logInfo("initialize: hooking already-open compose window(s)", `${existing.length} found`);
+  for (const win of existing) {
     hookComposeWindow(win);
   }
+  logInfo("initialize: done");
 }
 
 const SHUTDOWN_BLOCKER_NAME =
   "certCleanup: remove stale cert9.db duplicates before quit";
 
 async function onQuitApplication() {
+  logInfo("onQuitApplication: starting (shutdown blocker fired)");
   try {
     await cleanupAndReinit("quit-application");
+    logInfo("onQuitApplication: done");
   } catch (e) {
-    Cu.reportError("certCleanup: cleanup on quit failed: " + e);
+    logError("onQuitApplication", e);
   }
 }
 
@@ -639,6 +782,7 @@ function registerShutdownBlocker() {
     SHUTDOWN_BLOCKER_NAME,
     onQuitApplication
   );
+  logInfo("registerShutdownBlocker: registered", `name="${SHUTDOWN_BLOCKER_NAME}"`);
 }
 
 var certCleanup = class extends ExtensionCommon.ExtensionAPI {
@@ -653,6 +797,7 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
   // this API at all, nothing ever triggered the script to load in the
   // first place).
   getAPI(context) {
+    logInfo("getAPI: called");
     initialize();
     return {
       certCleanup: {
@@ -660,7 +805,9 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
         // resolves, getAPI() above has already run initialize() -- see
         // schema.json for why background.js needs to make this call at all
         // rather than relying on getAPI() running on its own.
-        activate: async () => {},
+        activate: async () => {
+          logInfo("activate: called");
+        },
         // Exposed for manual/on-demand use (e.g. from the Browser Console
         // while testing), but not called from background.js on any
         // schedule -- see onComposeProcessDone above and onQuitApplication
@@ -676,6 +823,7 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
   // Thunderbird WebExtension Experiments guide). Invalidating the startup
   // cache on every unload is the recommended fix.
   onShutdown(isAppShutdown) {
+    logInfo("onShutdown: called", `isAppShutdown=${isAppShutdown}`);
     if (isAppShutdown) {
       // The app itself is quitting: our AsyncShutdown blocker above (an
       // earlier phase than extension teardown) has already run and resolved
@@ -689,5 +837,6 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
     AsyncShutdown.appShutdownConfirmed.removeBlocker(onQuitApplication);
     Services.obs.removeObserver(domWindowOpenedObserver, "domwindowopened");
     Services.obs.notifyObservers(null, "startupcache-invalidate", null);
+    logInfo("onShutdown: teardown complete");
   }
 };
