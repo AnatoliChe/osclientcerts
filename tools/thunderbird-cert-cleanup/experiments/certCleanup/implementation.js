@@ -18,12 +18,65 @@ const { AsyncShutdown } = ChromeUtils.importESModule(
 // setTimeout/clearTimeout are Window/Worker globals, not available in this
 // privileged Experiment script's own top-level scope. Timer.sys.mjs is
 // Gecko's own polyfill for exactly this situation -- needed by
-// reinitCertVerifier()'s own bookkeeping below. (hookComposeWindow's
-// gMsgCompose poll further down uses `win.setTimeout` instead, which is
-// fine as-is since `win` is a real DOM window with its own native timers.)
+// reinitCertVerifier()'s own bookkeeping below.
 const { setTimeout, clearTimeout } = ChromeUtils.importESModule(
   "resource://gre/modules/Timer.sys.mjs"
 );
+
+// PROACTIVE-ONLY ARCHITECTURE (promoted to trunk as v0.8.0 after the
+// validated 0.6.4.x test series on the experiment branch). Three triggers,
+// all proactive, no reactive failure-handling and no retry at all:
+//   1. Compose window open -> reinitCertVerifier() (unconditional, no
+//      cert9.db read/delete).
+//   2. Send button/menu click, intercepted *before* the actual send starts
+//      -> doCleanup() only (find+delete a stale duplicate), no reinit,
+//      then the original send proceeds exactly once.
+//   3. App shutdown -> doCleanupFin() (the original full pass from v0.6.3).
+//
+// Replaces every reactive/retry design tried on this branch since
+// 2026-09-01 (v0.5.0 through v0.5.5): those all needed
+// recreateComposeSecure() (a fresh nsIMsgComposeSecure + checkRecipientCerts()
+// cache rewarm) to avoid corrupting a retried send, but checkRecipientCerts()
+// is itself a genuine NSS-touching disturbance that kept breaking reading
+// even when every step (including a *correctly firing* delayed
+// reinitCertVerifier()) completed successfully -- confirmed via a complete,
+// gapless log capture (2026-09-01). This design sidesteps both problems at
+// once: cleanup runs *before* the only BeginCryptoEncapsulation() call this
+// window will ever make, so there's no same-window-retry corruption risk
+// and no need for recreateComposeSecure()/checkRecipientCerts() at all;
+// reinitCertVerifier() only ever runs at window-open, well before any send
+// is attempted, so it can never collide with a synchronous crypto operation
+// the way it did when tried immediately before/after a send (v0.5.1: broke
+// the send itself with a cold CertVerifier).
+
+// Kept in sync with manifest.json's "version" by hand -- this privileged
+// script has no equivalent of background.js's browser.runtime.getManifest()
+// (that's a WebExtension-context API, not available here), so there's no
+// way to read it back automatically.
+const VERSION = "0.8.0";
+
+// Every action this build takes is logged through these two: each line
+// carries the version, a Date.now() timestamp (so it lines up with
+// MOZ_LOG's `timestamp` output), the specific step, and -- for logError --
+// the error and its stack if it has one.
+function logInfo(step, detail) {
+  console.log(
+    `certCleanup v${VERSION} [${Date.now()}] ${step}` +
+      (detail !== undefined ? `: ${detail}` : "")
+  );
+}
+function logError(step, err) {
+  console.error(
+    `certCleanup v${VERSION} [${Date.now()}] ${step} FAILED: ${err}` +
+      (err && err.stack ? `\n${err.stack}` : "")
+  );
+}
+
+// Proves this script parsed and evaluated at all: if this line is missing
+// from a log capture, the problem is upstream of this script (e.g. the
+// experiment_apis schema failing validation, or the script failing to
+// parse) rather than in any of the logic below.
+logInfo("implementation.js: evaluated");
 
 // The PKCS#11 token label the osclientcerts provider reports via C_GetTokenInfo
 // (see TOKEN_LABEL_BYTES in fork-osclientcerts/src/lib.rs).
@@ -40,22 +93,160 @@ const CKO_CERTIFICATE_BYTES = new Uint8Array([0, 0, 0, 1]);
 
 // Runs the actual detect-and-delete pass. See the long comment inline below
 // for why detection reads cert9.db directly but deletion goes through
-// nsIX509CertDB, and README.md ("Why cleanup runs at shutdown and on a
-// failed send") for why this only ever runs at those two points and never
-// periodically during the session.
-async function doCleanup() {
+// nsIX509CertDB.
+async function doCleanup(email) {
+  logInfo(
+    "doCleanup: starting",
+    email ? `email="${email}"` : "no email passed, nothing to search for"
+  );
+  if (!email) {
+    return [];
+  }
+
+  // TEST BUILD 0.6.4.5 (SQL-BY-EMAIL): the send path touches NSS not at
+  // all. 0.6.4.1 PROVED certDB.getCerts() breaks reading of incoming mail;
+  // fact #3 shows even a single targeted lookup (findCertByDBKey ->
+  // CERT_FindCertByIssuerAndSN) does too, and findCertByEmailAddress() /
+  // findCertByNickname() do not even exist in nsIX509CertDB. So instead we
+  // read raw cert9.db directly via Sqlite.sys.mjs and locate the stale
+  // duplicate purely by SQL.
+  //
+  // Schema facts (verified against this repo's lib/softoken and a real
+  // profile's cert9.db): each PKCS#11 object is a row in `nssPublic` with
+  // columns named "a"+attr-type-in-hex. CKO_CERTIFICATE rows have
+  // a0 = CKO_CERTIFICATE (0x00000001), their DER is a11 = CKA_VALUE, and --
+  // crucially -- certs stored in the softoken db carry an NSS-specific
+  // CKA_NSS_EMAIL attribute (CKA_NSS+2 = 0x80000000|0x4E534350+2 =
+  // 0xCE534352, column `ace534352`) holding the cert's email address as a
+  // bare ASCII blob. A row here is a genuine persisted duplicate by
+  // construction: PKCS#11 objects belonging to an *external* token like
+  // ours are never written to cert9.db, so a CKO_CERTIFICATE row for our
+  // signing identity can only be the stale, keyless NSS-cached copy.
+  //
+  // Match is case-insensitive (LOWER(email)=LOWER(:email)) so a mismatch in
+  // address casing can't make us miss the duplicate. We only ever DELETE
+  // CKO_CERTIFICATE rows (hex(a0)='00000001'); the nearby CKO_NSS_SMIME row
+  // sharing the same email (class 0xCE534352, email blob NUL-terminated)
+  // is left alone, as are trust rows.
+  const emailBytes = new Uint8Array(email.length);
+  for (let i = 0; i < email.length; i++) {
+    emailBytes[i] = email.charCodeAt(i) & 0xff;
+  }
+  const { Sqlite } = ChromeUtils.importESModule(
+    "resource://gre/modules/Sqlite.sys.mjs"
+  );
+  const profileDir = Services.dirsvc.get("ProfD", Ci.nsIFile);
+  const dbFile = profileDir.clone();
+  dbFile.append("cert9.db");
+  logInfo("doCleanup: cert9.db path", dbFile.path);
+
+  const deleted = [];
+  let conn;
+  try {
+    logInfo("doCleanup: opening cert9.db (openNotExclusive, read/write)");
+    conn = await Sqlite.openConnection({
+      path: dbFile.path,
+      openNotExclusive: true,
+    });
+    logInfo("doCleanup: cert9.db opened");
+    let rows;
+    const select =
+      "SELECT id FROM nssPublic WHERE hex(a0) = '00000001' AND LOWER(ace534352) = LOWER(:email)";
+    const params = { email: emailBytes };
+    try {
+      rows = await conn.execute(select, params);
+    } catch (e) {
+      logError("doCleanup: SELECT by email", e);
+    }
+    if (rows && rows.length > 0) {
+      logInfo(
+        "doCleanup: found duplicate row(s)",
+        `${rows.length} row(s) for email="${email}"`
+      );
+      try {
+        await conn.execute(
+          "DELETE FROM nssPublic WHERE hex(a0) = '00000001' AND LOWER(ace534352) = LOWER(:email)",
+          params
+        );
+        logInfo("doCleanup: SQL DELETE executed", `email="${email}", ${rows.length} row(s)`);
+        deleted.push({
+          subjectName: email,
+          issuerName: "-",
+          serialNumber: "-",
+          rowCount: rows.length,
+        });
+      } catch (e) {
+        logError("doCleanup: SQL DELETE by email", e);
+      }
+    } else {
+      logInfo("doCleanup: no duplicate row found", `email="${email}"`);
+    }
+  } catch (e) {
+    logError("doCleanup: cert9.db access", e);
+  } finally {
+    if (conn) {
+      logInfo("doCleanup: closing cert9.db connection");
+      await conn.close();
+      logInfo("doCleanup: cert9.db connection closed");
+    }
+  }
+
+  logInfo("doCleanup: done", `${deleted.length} record(s) deleted`);
+  return deleted;
+}
+
+// doCleanupFin(): the ORIGINAL doCleanup() from v0.6.3 (commit 134894d),
+// renamed, transferred verbatim, and re-bound ONLY to the app-shutdown
+// trigger (onQuitApplication). The full-getCerts() + email filter + SQL read
+// + constructX509()/deleteCertificate() pass stays safe there because the
+// process is exiting right after, so whatever NSS/PSM state it disturbs
+// (0.6.4.1 proved getCerts() breaks reading of incoming mail mid-session)
+// can never be observed. The send trigger keeps the search-only doCleanup().
+async function doCleanupFin() {
+  logInfo("doCleanupFin: starting");
   const certDB = Cc["@mozilla.org/security/x509certdb;1"].getService(
     Ci.nsIX509CertDB
   );
 
-  const certs = certDB.getCerts();
+  logInfo("doCleanupFin: calling certDB.getCerts()");
+  let certs;
+  try {
+    certs = certDB.getCerts();
+    logInfo("doCleanupFin: certDB.getCerts() returned", `${certs.length} total cert(s)`);
+  } catch (e) {
+    logError("doCleanupFin: certDB.getCerts()", e);
+    return [];
+  }
+  // Beyond tokenName, also require an email address (cert.getEmailAddresses(),
+  // the nsIX509Cert method -- there is NO property named "emailAddresses",
+  // only the method and the AString "emailAddress" attribute -- Gecko/NSS
+  // populates it from *both* the Subject DN's PKCS#9
+  // emailAddress attribute and any SAN rfc822Name/directoryName entries --
+  // see nsNSSCertificate::GetEmailAddresses / NSS's CERT_GetFirstEmailAddress
+  // in alg1485.c). A stale cert9.db duplicate can only ever cause the
+  // original signing-confusion bug (P1) for a certificate someone might
+  // actually sign with -- and our own Rust module's CERT_FIND_HAS_PRIVATE_KEY
+  // filter (backend_windows.rs) only checks for a CERT_KEY_PROV_INFO_PROP_ID
+  // property, not a genuinely usable key, so a chain-only helper cert (a CA)
+  // can show up here as "live" without ever being signable. S/MIME requires
+  // an email address on any cert actually used to sign/encrypt (RFC 5750);
+  // a CA cert essentially never has one. Filtering here is a zero-cost, local
+  // check (no extra cert9.db/NSS touch) that also reduces how many separate
+  // SQL lookups doCleanupFin() makes against cert9.db per pass.
   const liveCerts = certs.filter(
-    (cert) => (cert.tokenName || "").trim() === OS_CLIENT_CERTS_TOKEN_NAME
+    (cert) =>
+      (cert.tokenName || "").trim() === OS_CLIENT_CERTS_TOKEN_NAME &&
+      cert.getEmailAddresses().length > 0
+  );
+  logInfo(
+    "doCleanupFin: filtered to live certs on our token with an email address",
+    `${liveCerts.length} of ${certs.length}`
   );
   if (liveCerts.length === 0) {
     // The provider isn't loaded (or has no certs) right now -- don't touch
     // cert9.db at all, since we have no way to confirm which of its rows, if
     // any, are safe to remove.
+    logInfo("doCleanupFin: no live certs on our token, nothing to check, returning");
     return [];
   }
 
@@ -85,62 +276,69 @@ async function doCleanup() {
   const profileDir = Services.dirsvc.get("ProfD", Ci.nsIFile);
   const dbFile = profileDir.clone();
   dbFile.append("cert9.db");
+  logInfo("doCleanupFin: cert9.db path", dbFile.path);
 
   const deleted = [];
   let conn;
   try {
+    logInfo("doCleanupFin: opening cert9.db (openNotExclusive, readOnly)");
     conn = await Sqlite.openConnection({
       path: dbFile.path,
       openNotExclusive: true,
       readOnly: true,
     });
+    logInfo("doCleanupFin: cert9.db opened");
     for (const liveCert of liveCerts) {
+      logInfo("doCleanupFin: checking live cert", `subject=${liveCert.subjectName}`);
       const derArray = liveCert.getRawDER();
       const der = Uint8Array.from(derArray);
-      const rows = await conn.execute(
-        "SELECT id FROM nssPublic WHERE " +
-          CKA_CLASS_COLUMN + " = :cls AND " + CKA_VALUE_COLUMN + " = :der",
-        { cls: CKO_CERTIFICATE_BYTES, der }
-      );
-      if (rows.length === 0) {
+      logInfo("doCleanupFin: querying nssPublic for a matching duplicate row");
+      let rows;
+      try {
+        rows = await conn.execute(
+          "SELECT id FROM nssPublic WHERE " +
+            CKA_CLASS_COLUMN + " = :cls AND " + CKA_VALUE_COLUMN + " = :der",
+          { cls: CKO_CERTIFICATE_BYTES, der }
+        );
+      } catch (e) {
+        logError(`doCleanupFin: SELECT for subject=${liveCert.subjectName}`, e);
         continue;
       }
-      console.log(
-        "certCleanup: found " + rows.length +
-          " stale cert9.db row(s) duplicating live cert subject=" +
-          liveCert.subjectName
+      if (rows.length === 0) {
+        logInfo(
+          "doCleanupFin: no duplicate row found",
+          `subject=${liveCert.subjectName}`
+        );
+        continue;
+      }
+      logInfo(
+        "doCleanupFin: found duplicate row(s)",
+        `${rows.length} row(s), subject=${liveCert.subjectName}`
       );
-      // Delete via nsIX509CertDB, not a second write connection: through
-      // 0.2.2, deletion also went through this same Sqlite.sys.mjs
-      // connection (a raw `DELETE FROM nssPublic ...`). Through 0.6.0, that
-      // write -- and, as it turned out, *any* mechanism that removes the
-      // duplicate mid-session, including this official API, a native Rust
-      // DLL thread with zero Gecko/JS/XPCOM involvement, and logging the
-      // internal PK11 token out and back in -- left something in Gecko's
-      // C++ layer above NSS unable to resolve the recipient for S/MIME
-      // decryption for the rest of that Thunderbird session (confirmed via
-      // RUST_LOG=osclientcerts=debug: later C_DecryptInit/C_UnwrapKey calls
-      // returned CKR_FUNCTION_NOT_SUPPORTED without even a preceding
-      // C_OpenSession, meaning Gecko had stopped calling into the module at
-      // all -- independently reproduced as safe at the raw NSS/softoken
-      // level via a from-source NSS build, so the stale state lives above
-      // NSS, not in it). See reinitCertVerifier() below for the fix, and
-      // README.md ("Why cleanup runs at shutdown and on a failed send") for
-      // the full writeup. constructX509() builds a transient, in-memory
-      // certificate object from the duplicate's DER (not tied to any
-      // token/slot), and deleteCertificate() on that object resolves and
-      // removes the matching persisted record through NSS's own softoken
-      // code path (PK11_DeleteTokenCertAndKey / SEC_DeletePermCertificate
-      // -- confirmed against nsNSSCertificateDB::DeleteCertificate), the
-      // same path "Delete or Distrust" in Certificate Manager uses. If that
+      // Delete via nsIX509CertDB, not a second write connection.
+      // constructX509() builds a transient, in-memory certificate object
+      // from the duplicate's DER (not tied to any token/slot), and
+      // deleteCertificate() on that object resolves and removes the
+      // matching persisted record through NSS's own softoken code path
+      // (PK11_DeleteTokenCertAndKey / SEC_DeletePermCertificate -- confirmed
+      // against nsNSSCertificateDB::DeleteCertificate), the same path
+      // "Delete or Distrust" in Certificate Manager uses. If that
       // resolution ever targeted our *live* token object instead of the
       // cert9.db duplicate, the call would simply fail rather than corrupt
       // anything: osclientcerts' own C_DestroyObject is an unconditional
       // CKR_FUNCTION_NOT_SUPPORTED stub (see src/lib.rs), so an attempt to
       // destroy anything on our external token is a safe no-op.
+      logInfo(
+        "doCleanupFin: attempting deleteCertificate()",
+        `subject=${liveCert.subjectName}`
+      );
       try {
         const tempCert = certDB.constructX509(derArray);
         certDB.deleteCertificate(tempCert);
+        logInfo(
+          "doCleanupFin: deleteCertificate() succeeded",
+          `subject=${liveCert.subjectName}, ${rows.length} row(s)`
+        );
         deleted.push({
           subjectName: liveCert.subjectName,
           issuerName: liveCert.issuerName,
@@ -148,45 +346,29 @@ async function doCleanup() {
           rowCount: rows.length,
         });
       } catch (e) {
-        Cu.reportError(
-          "certCleanup: deleteCertificate failed for subject=" +
-            liveCert.subjectName + ": " + e
+        logError(
+          `doCleanupFin: deleteCertificate() for subject=${liveCert.subjectName}`,
+          e
         );
       }
     }
   } catch (e) {
-    Cu.reportError("certCleanup: cert9.db access failed: " + e);
+    logError("doCleanupFin: cert9.db access", e);
   } finally {
     if (conn) {
+      logInfo("doCleanupFin: closing cert9.db connection");
       await conn.close();
+      logInfo("doCleanupFin: cert9.db connection closed");
     }
   }
 
+  logInfo("doCleanupFin: done", `${deleted.length} record(s) deleted`);
   return deleted;
 }
 
 // Rebuilds Gecko's process-lifetime CertVerifier singleton
 // (mozilla::psm::CertVerifier, security/certverifier/CertVerifier.h --
-// holds mOCSPCache/mSignatureCache/mTrustCache) after a cleanup pass
-// removes a stale cert9.db row, instead of relying on an incidental
-// subsequent send to mask the problem (the "self-heals on the first
-// occurrence per session, never on the second" behavior of 0.6.0 and
-// earlier). See README.md for the full investigation; in short: every
-// removal mechanism tried, including ones with zero Gecko/JS/XPCOM
-// involvement, showed that same signature, and explicitly logging the
-// *internal* PK11 token out and back in (nsIPKCS11Token.logout()/.login())
-// had zero effect -- ruling out NSS's own PK11/softoken/STAN cache, since
-// that's exactly the layer it operates on. comm-central's own S/MIME
-// verification glue (mailnews/extensions/smime/nsCMS.cpp,
-// myExtraVerificationOnCert / myNSS_CMSSignedData_ImportCerts -- a
-// documented workaround for NSS bug 1738592) calls into CertVerifier on
-// every incoming signed message, which is where this actually lives.
-//
-// CertVerifier::ClearTrustCache() exists in the C++ class but isn't
-// exposed to JS (only ClearOCSPCache() is, via
-// nsIX509CertDB.clearOCSPCache() -- OCSP/revocation-only). Exposing it
-// would mean patching and rebuilding Thunderbird itself. Instead, this
-// uses an already-existing, unpatched mechanism:
+// holds mOCSPCache/mSignatureCache/mTrustCache). Mechanism:
 // nsNSSComponent::UpdateCertVerifierWithEnterpriseRoots()
 // (security/manager/ssl/nsNSSComponent.cpp:1120) replaces
 // mDefaultCertVerifier with a brand-new SharedCertVerifier (same config,
@@ -203,39 +385,37 @@ async function doCleanup() {
 // (not persisted to any file) import of the OS's enterprise root CAs for
 // the time this takes -- a real, supported Gecko feature, not a hack --
 // reverted immediately after.
-//
-// Logged timestamps use Date.now() (ms since epoch) so they can be lined
-// up against a MOZ_LOG capture's `timestamp` output when diagnosing an
-// issue by hand.
 function nowMs() {
   return Date.now();
 }
 
-// If "psm:enterprise-certs-imported" never fires (task failure, task never
-// dispatched, topic name changed upstream, etc.), this would otherwise
-// hang forever inside `await` with no further log line -- indistinguishable
-// from "still running" versus "silently stuck". This turns that into an
-// explicit, timestamped failure instead.
+// No-effect-observed timeout: if "psm:enterprise-certs-imported" never
+// fires (task failure, task never dispatched, topic name changed upstream,
+// etc.), this would otherwise hang forever inside `await` with no further
+// log line -- indistinguishable from "still running" versus "silently
+// stuck". This turns that into an explicit, timestamped failure instead.
 const REINIT_TIMEOUT_MS = 8000;
 
 function waitForObserverTopic(topic, timeoutMs) {
+  logInfo("waitForObserverTopic: registering observer", `topic="${topic}", timeout=${timeoutMs}ms`);
   return new Promise((resolve, reject) => {
     let timer;
     const observer = {
       observe() {
         clearTimeout(timer);
         Services.obs.removeObserver(observer, topic);
+        logInfo("waitForObserverTopic: topic fired", `topic="${topic}"`);
         resolve();
       },
     };
     Services.obs.addObserver(observer, topic);
     timer = setTimeout(() => {
       Services.obs.removeObserver(observer, topic);
-      reject(
-        new Error(
-          `certCleanup: TIMED OUT after ${timeoutMs}ms waiting for observer topic "${topic}" -- it never fired`
-        )
+      const err = new Error(
+        `TIMED OUT after ${timeoutMs}ms waiting for observer topic "${topic}" -- it never fired`
       );
+      logError("waitForObserverTopic", err);
+      reject(err);
     }, timeoutMs);
   });
 }
@@ -243,237 +423,141 @@ function waitForObserverTopic(topic, timeoutMs) {
 const ENTERPRISE_ROOTS_PREF = "security.enterprise_roots.enabled";
 
 async function reinitCertVerifier() {
+  logInfo("reinitCertVerifier: starting");
   try {
     const original = Services.prefs.getBoolPref(ENTERPRISE_ROOTS_PREF, false);
+    logInfo("reinitCertVerifier: read current pref value", `${ENTERPRISE_ROOTS_PREF}=${original}`);
     if (original) {
       // Force a false->true transition below even if already true, since
       // only that direction rebuilds CertVerifier.
+      logInfo("reinitCertVerifier: pref already true, forcing to false first");
       Services.prefs.setBoolPref(ENTERPRISE_ROOTS_PREF, false);
+      logInfo(
+        "reinitCertVerifier: set pref to false",
+        `readback=${Services.prefs.getBoolPref(ENTERPRISE_ROOTS_PREF, false)}`
+      );
     }
     const imported = waitForObserverTopic(
       "psm:enterprise-certs-imported",
       REINIT_TIMEOUT_MS
     );
+    logInfo("reinitCertVerifier: setting pref to true (triggers the rebuild)");
     Services.prefs.setBoolPref(ENTERPRISE_ROOTS_PREF, true);
+    logInfo(
+      "reinitCertVerifier: set pref to true",
+      `readback=${Services.prefs.getBoolPref(ENTERPRISE_ROOTS_PREF, false)}, awaiting rebuild completion`
+    );
     await imported;
+    logInfo("reinitCertVerifier: rebuild completion observed");
     if (!original) {
+      logInfo("reinitCertVerifier: restoring pref to false (original value)");
       Services.prefs.setBoolPref(ENTERPRISE_ROOTS_PREF, false);
+      logInfo(
+        "reinitCertVerifier: restored pref to false",
+        `readback=${Services.prefs.getBoolPref(ENTERPRISE_ROOTS_PREF, false)}`
+      );
     }
-    console.log(`certCleanup: [${nowMs()}] reinitCertVerifier: SUCCESS`);
+    logInfo("reinitCertVerifier: SUCCESS");
     return true;
   } catch (e) {
-    console.error(`certCleanup: [${nowMs()}] reinitCertVerifier: FAILURE: ${e}`);
-    Cu.reportError("certCleanup: reinitCertVerifier failed: " + e);
+    logError("reinitCertVerifier", e);
     return false;
   }
 }
-
-// Runs a cleanup pass, then unconditionally follows up with
-// reinitCertVerifier() -- even when nothing was deleted. doCleanup() always
-// calls certDB.getCerts() as its first step regardless of outcome, and that
-// call alone (with zero file writes) was established early in this
-// investigation as sufficient on its own to disturb NSS's cert-resolution
-// state for the rest of the session -- so gating the rebuild on
-// deleted.length > 0 (0.7.0's behavior) skipped the fix exactly when a
-// cleanup pass found nothing to remove, which does not mean nothing
-// disruptive happened.
-async function cleanupAndReinit(label) {
-  const deleted = await doCleanup();
-  if (deleted.length > 0) {
-    console.log(
-      `certCleanup (${label}): removed ${deleted.length} stale certificate record(s), reinitializing CertVerifier`,
-      deleted
-    );
-  }
-  await reinitCertVerifier();
-  return deleted;
-}
-
-// The second cleanup trigger, alongside shutdown (see registerShutdownBlocker
-// below): a failed send. See README.md ("Why cleanup runs at shutdown and on
-// a failed send") for the full investigation this design is based on; in
-// short:
-//
-// - Removing the duplicate mid-session (which is what a failed send's
-//   underlying cause requires fixing) used to break S/MIME decryption of
-//   other messages in the folder pane for the rest of the session --
-//   confirmed extensively; see the long comment in doCleanup() above.
-//   reinitCertVerifier() above is what actually fixes that now.
-// - Cleanup on a failed send is paired with an automatic, immediate retry
-//   of that same send, which also means the user doesn't have to notice a
-//   signing failure, dismiss a dialog, and manually resend; the whole
-//   recovery happens on its own.
-//
-// Detecting the failure at all needs to bypass browser.compose.onAfterSend:
-// that event structurally cannot see this failure. comm-central's
-// MsgComposeCommands.js (CompleteGenericSendMessage) returns from its catch
-// block on a send failure *before* ever reaching the
-// window.dispatchEvent(new CustomEvent("aftersend")) call onAfterSend is
-// built on. Instead, this hooks the same layer Thunderbird's own compose
-// window code uses to observe its own send outcome:
-// nsIMsgComposeStateListener (nsIMsgCompose.idl), registered via
-// gMsgCompose.RegisterStateListener() -- the exact same public API
-// MsgComposeCommands.js registers its own listener through.
-// ComposeProcessDone(aResult) fires with the actual nsresult of the
-// compose/send process (NS_OK on success, the real failure code otherwise,
-// including a finishCryptoEncapsulation failure), driven by nsMsgCompose's
-// own internal completion notification rather than the JS-level try/catch
-// that swallows the exception in CompleteGenericSendMessage.
-//
-// Three more pieces needed for a clean automatic retry:
-//   1. The failure also pops a modal "couldn't send" alert
-//      (MessageSend.sys.mjs's sendReport.displayReport(), a
-//      Services.prompt.alert() call) that blocks further interaction with
-//      the compose window until dismissed. Auto-closed via the same
-//      domwindowopened observer already used to find compose windows,
-//      matched by the dialog's stable id (commonDialogWindow) and its
-//      .opener being a compose window we're tracking (Services.ww.openWindow
-//      sets .opener to the parentWindow argument -- confirmed against
-//      toolkit/components/prompts/src/Prompter.sys.mjs).
-//   2. GenericSendMessage(msgType)'s msgType isn't included in
-//      ComposeProcessDone's own callback, so it's recorded separately by
-//      lightly wrapping GenericSendMessage (recording the argument only,
-//      not changing its behavior) whenever the user (or our own retry)
-//      calls it, so the retry can use the same send mode (Now/Later/
-//      Background) the user originally chose.
-//   3. registerStateListener guards against a second RegisterStateListener
-//      call on the same window, and onComposeProcessDone's own
-//      __certCleanupHandling flag always resets on every exit path (not
-//      just success): production testing found ComposeProcessDone firing
-//      *twice* for one real failure (a duplicate listener registration on
-//      the same window, root cause not fully pinned down), which made an
-//      earlier version of this guard misread the duplicate echo as "the
-//      retry already failed", give up without ever actually retrying, and
-//      -- worse -- leave the flag permanently stuck, silently ignoring a
-//      later, genuinely new failure on the same window.
-const hookedComposeWindows = new Set();
 
 function isComposeWindow(win) {
   return win.document.documentElement.getAttribute("windowtype") === "msgcompose";
 }
 
-function isCommonDialogFrom(win, composeWindows) {
-  try {
-    return (
-      win.document.documentElement.id === "commonDialogWindow" &&
-      composeWindows.has(win.opener)
-    );
-  } catch (e) {
-    return false;
-  }
+// TRIGGER 2: Send button/menu click, intercepted *before* the send actually
+// starts. This is the only place a stale duplicate gets deleted mid-session
+// -- and since it runs before this window's *only* BeginCryptoEncapsulation()
+// call, there's no same-window-retry risk (see the file-level comment
+// above) and no need to warm any cache afterward: the original send simply
+// proceeds once, exactly as if the user had clicked Send on a window that
+// never had a stale duplicate in the first place.
+const SEND_COMMAND_IDS = new Set([
+  "button-send",
+  "cmd_sendButton",
+  "cmd_sendNow",
+  "cmd_sendLater",
+  "menu-item-send-now",
+]);
+
+function commandIdToDeliverMode(id) {
+  return id === "cmd_sendLater"
+    ? Ci.nsIMsgCompDeliverMode.Later
+    : Ci.nsIMsgCompDeliverMode.Now;
 }
 
-function onComposeProcessDone(win, aResult) {
-  if (aResult === 0) {
-    // NS_OK. Not using Cr.NS_OK to avoid depending on whether Cr
-    // (Components.results) is available as a predefined global here the
-    // same way Cc/Ci/Cu are -- NS_OK's value (0) is stable across all of
-    // Gecko and won't change.
-    win.__certCleanupHandling = false;
-    return;
-  }
-  if (win.__certCleanupHandling) {
-    // Either a duplicate notification of the failure already being
-    // handled, or the retry itself also failed -- can't tell which from
-    // here, but either way don't start an overlapping cleanup/retry cycle.
-    // Clearing the flag (rather than leaving it set) is what lets a later,
-    // genuinely new failure on this window still be handled.
-    console.error(
-      `certCleanup: ComposeProcessDone failed again while already handling a failure on this window (0x${(aResult >>> 0).toString(16)}), not retrying again`
-    );
-    win.__certCleanupHandling = false;
-    return;
-  }
-  win.__certCleanupHandling = true;
-  console.log(
-    `certCleanup: send failed (0x${(aResult >>> 0).toString(16)}), running cleanup`
-  );
-  cleanupAndReinit("on-send-failure")
-    .then(() => {
-      const msgType = win.__certCleanupLastMsgType ?? Ci.nsIMsgCompDeliverMode.Now;
-      return win.GenericSendMessage(msgType);
-    })
-    .catch((e) => {
-      win.__certCleanupHandling = false;
-      Cu.reportError("certCleanup: cleanup/retry after a failed send failed: " + e);
-    });
-}
-
-// win.gMsgCompose isn't necessarily ready by the window's "load" event --
-// confirmed in production testing: RegisterStateListener was unavailable at
-// that point, meaning gMsgCompose's own async setup hadn't finished yet.
-// Polled instead of guessing a more specific ready signal to hook: up to
-// 5 seconds, every 100ms, which comfortably covers real-world compose
-// window startup and fails loudly (one clear log line) if it never shows up.
-const GMSGCOMPOSE_POLL_INTERVAL_MS = 100;
-const GMSGCOMPOSE_POLL_MAX_ATTEMPTS = 50;
-
-function registerStateListener(win) {
-  // Guards specifically against a second RegisterStateListener call on this
-  // window, independent of hookComposeWindow's own __certCleanupHooked
-  // guard: production testing observed ComposeProcessDone firing twice for
-  // one real failure, consistent with two separate listener objects having
-  // ended up registered on the same window (root cause not fully pinned
-  // down -- possibly this Experiment's parent script re-evaluating and
-  // re-running its window-hooking loop, since MV3 background contexts can
-  // be non-persistent and reload). This check is cheap insurance regardless
-  // of the exact cause.
-  if (win.__certCleanupStateListenerRegistered) {
-    return;
-  }
-  win.__certCleanupStateListenerRegistered = true;
-  // All four nsIMsgComposeStateListener methods must exist as callable
-  // functions even though only ComposeProcessDone matters here: this is a
-  // [scriptable] XPCOM interface, and Thunderbird's C++ side may call any
-  // of them without checking first.
-  win.gMsgCompose.RegisterStateListener({
-    NotifyComposeFieldsReady() {},
-    ComposeProcessDone(aResult) {
-      onComposeProcessDone(win, aResult);
+function hookSendButton(win) {
+  win.document.addEventListener(
+    "command",
+    (event) => {
+      if (win.__certCleanupInterceptingSend) {
+        return;
+      }
+      const id = event.target && event.target.id;
+      if (!SEND_COMMAND_IDS.has(id)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const msgType = commandIdToDeliverMode(id);
+      win.__certCleanupInterceptingSend = true;
+      logInfo("hookSendButton: intercepted send-button click", `id="${id}", msgType=${msgType}`);
+      // 0.6.4.2 confirmed via console probes: the compose window's real
+      // signing-identity global is gCurrentIdentity (comm-central
+      // MsgComposeCommands.js:130), its email is .email, and there is NO
+      // window global named "emailSigningIdentity". Hand the signing
+      // identity's email straight to the search-only doCleanup().
+      const cleanEmail = win.gCurrentIdentity?.email;
+      logInfo("hookSendButton: signing identity email", cleanEmail ?? "(none)");
+      doCleanup(cleanEmail)
+        .then((deleted) => {
+          logInfo(
+            "hookSendButton: cleanup done, proceeding with the original send",
+            `${deleted.length} record(s) deleted`
+          );
+        })
+        .catch((e) => {
+          logError("hookSendButton: doCleanup()", e);
+        })
+        .then(() => {
+          win.__certCleanupInterceptingSend = false;
+          if (typeof win.GenericSendMessage !== "function") {
+            logError("hookSendButton", "win.GenericSendMessage not found, can't proceed with the send");
+            return;
+          }
+          logInfo("hookSendButton: calling GenericSendMessage()", `msgType=${msgType}`);
+          win.GenericSendMessage(msgType);
+        });
     },
-    SaveInFolderDone(folderName) {},
-    NotifyComposeBodyReady() {},
-  });
-}
-
-function wrapGenericSendMessage(win) {
-  if (typeof win.GenericSendMessage !== "function") {
-    Cu.reportError(
-      "certCleanup: GenericSendMessage not found on this compose window, can't track/retry send mode"
-    );
-    return;
-  }
-  const original = win.GenericSendMessage;
-  win.GenericSendMessage = function (msgType, ...rest) {
-    win.__certCleanupLastMsgType = msgType;
-    return original.call(this, msgType, ...rest);
-  };
+    true // capturing, so this sees the click before Thunderbird's own handler
+  );
+  logInfo("hookSendButton: hooked");
 }
 
 function hookComposeWindow(win) {
   if (win.__certCleanupHooked) {
+    logInfo("hookComposeWindow: already hooked, skipping");
     return;
   }
   win.__certCleanupHooked = true;
-  hookedComposeWindows.add(win);
-  win.addEventListener("unload", () => hookedComposeWindows.delete(win), { once: true });
-  wrapGenericSendMessage(win);
-  let attemptsLeft = GMSGCOMPOSE_POLL_MAX_ATTEMPTS;
-  const tryRegister = () => {
-    if (win.gMsgCompose && typeof win.gMsgCompose.RegisterStateListener === "function") {
-      registerStateListener(win);
-      return;
-    }
-    attemptsLeft -= 1;
-    if (attemptsLeft <= 0) {
-      Cu.reportError(
-        "certCleanup: gMsgCompose.RegisterStateListener never became available on a compose window"
-      );
-      return;
-    }
-    win.setTimeout(tryRegister, GMSGCOMPOSE_POLL_INTERVAL_MS);
-  };
-  tryRegister();
+  logInfo("hookComposeWindow: starting to hook a new compose window");
+  hookSendButton(win);
+
+  // TRIGGER 1: compose window open -> unconditional reinitCertVerifier(),
+  // no cert9.db read at all. This runs well before any send is attempted,
+  // so it can never collide with a synchronous crypto operation.
+  logInfo("hookComposeWindow: reinitializing CertVerifier (unconditional, on window open)");
+  reinitCertVerifier()
+    .then((ok) => {
+      logInfo("hookComposeWindow: reinitCertVerifier() returned", ok);
+    })
+    .catch((e) => {
+      logError("hookComposeWindow: reinitCertVerifier()", e);
+    });
 }
 
 function onWindowOpened(win) {
@@ -482,11 +566,8 @@ function onWindowOpened(win) {
     function onLoad() {
       win.removeEventListener("load", onLoad);
       if (isComposeWindow(win)) {
+        logInfo("onWindowOpened: new compose window loaded");
         hookComposeWindow(win);
-        return;
-      }
-      if (isCommonDialogFrom(win, hookedComposeWindows)) {
-        win.close();
       }
     },
     { once: true }
@@ -502,46 +583,61 @@ const domWindowOpenedObserver = {
   },
 };
 
-// Registers the failed-send hook for every current and future compose
-// window, and the earliest well-known Gecko shutdown phase (ShutdownPhase::
-// AppShutdownConfirmed, topic "quit-application"). Called once from
-// getAPI() below (see the comment there for why module-level top-level
-// code isn't the right place for this), guarded so a second getAPI() call
-// for another context can't register everything twice.
+// Registers the compose-window-open hook for every current and future
+// compose window, and the earliest well-known Gecko shutdown phase
+// (ShutdownPhase::AppShutdownConfirmed, topic "quit-application"). Called
+// once from getAPI() below (see the comment there for why module-level
+// top-level code isn't the right place for this), guarded so a second
+// getAPI() call for another context can't register everything twice.
 let initialized = false;
 function initialize() {
   if (initialized) {
+    logInfo("initialize: already initialized, skipping");
     return;
   }
   initialized = true;
+  logInfo("initialize: starting");
   registerShutdownBlocker();
   Services.obs.addObserver(domWindowOpenedObserver, "domwindowopened");
-  for (const win of Services.wm.getEnumerator("msgcompose")) {
+  logInfo("initialize: domwindowopened observer registered");
+  const existing = [...Services.wm.getEnumerator("msgcompose")];
+  logInfo("initialize: hooking already-open compose window(s)", `${existing.length} found`);
+  for (const win of existing) {
     hookComposeWindow(win);
   }
+  logInfo("initialize: done");
 }
 
 const SHUTDOWN_BLOCKER_NAME =
   "certCleanup: remove stale cert9.db duplicates before quit";
 
+// TRIGGER 3: app shutdown -> doCleanupFin() (the full v0.6.3-style pass:
+// getCerts() + filter + SQL read + deleteCertificate()). Safe here precisely
+// because it's run at the very end of the process lifetime -- whatever
+// NSS/PSM state the full enumeration disturbs (0.6.4.1 proved getCerts()
+// breaks reading of incoming mail mid-session; the v0.6.3 run also proved a
+// *write* right before shutdown is fine on restart) can never be observed
+// after the process exits. No reinit needed.
 async function onQuitApplication() {
+  logInfo("onQuitApplication: starting (shutdown blocker fired)");
   try {
-    await cleanupAndReinit("quit-application");
+    const deleted = await doCleanupFin();
+    logInfo("onQuitApplication: done", `${deleted.length} record(s) deleted`);
   } catch (e) {
-    Cu.reportError("certCleanup: cleanup on quit failed: " + e);
+    logError("onQuitApplication", e);
   }
 }
 
 // Registers the earliest well-known Gecko shutdown phase (ShutdownPhase::
 // AppShutdownConfirmed, topic "quit-application"). Blocking here, rather
 // than doing a fire-and-forget cleanup, guarantees our async cert9.db work
-// finishes before Thunderbird tears down further -- see the long comment in
-// doCleanup() for why shutdown is one of the two points this needs to run.
+// finishes before Thunderbird tears down further.
 function registerShutdownBlocker() {
   AsyncShutdown.appShutdownConfirmed.addBlocker(
     SHUTDOWN_BLOCKER_NAME,
     onQuitApplication
   );
+  logInfo("registerShutdownBlocker: registered", `name="${SHUTDOWN_BLOCKER_NAME}"`);
 }
 
 var certCleanup = class extends ExtensionCommon.ExtensionAPI {
@@ -549,12 +645,14 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
   // Experiment to become available to a WebExtension context -- unlike bare
   // module-level top-level code, it's guaranteed to run as soon as the
   // add-on actually needs this API, which is the right place for one-time
-  // setup like the listeners above (module-level code is unreliable here:
-  // Experiment "parent" scripts can be loaded lazily on first real API
-  // access rather than eagerly with the add-on, so with no WebExtension-side
-  // code touching this API at all, nothing would trigger the script to load
-  // in the first place -- see background.js's activate() call).
+  // setup like the shutdown blocker (module-level code turned out to be
+  // unreliable here in an earlier build on this branch: Experiment "parent"
+  // scripts can be loaded lazily on first real API access rather than
+  // eagerly with the add-on, so with no WebExtension-side code touching
+  // this API at all, nothing ever triggered the script to load in the
+  // first place).
   getAPI(context) {
+    logInfo("getAPI: called");
     initialize();
     return {
       certCleanup: {
@@ -562,11 +660,14 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
         // resolves, getAPI() above has already run initialize() -- see
         // schema.json for why background.js needs to make this call at all
         // rather than relying on getAPI() running on its own.
-        activate: async () => {},
+        activate: async () => {
+          logInfo("activate: called");
+        },
         // Exposed for manual/on-demand use (e.g. from the Browser Console
         // while testing), but not called from background.js on any
-        // schedule -- see onComposeProcessDone above and onQuitApplication
-        // below for the only two places cleanup actually runs.
+        // schedule -- see hookComposeWindow, hookSendButton, and
+        // onQuitApplication above for the only places cleanup/reinit
+        // actually run.
         cleanup: doCleanup,
       },
     };
@@ -578,6 +679,7 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
   // Thunderbird WebExtension Experiments guide). Invalidating the startup
   // cache on every unload is the recommended fix.
   onShutdown(isAppShutdown) {
+    logInfo("onShutdown: called", `isAppShutdown=${isAppShutdown}`);
     if (isAppShutdown) {
       // The app itself is quitting: our AsyncShutdown blocker above (an
       // earlier phase than extension teardown) has already run and resolved
@@ -591,5 +693,6 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
     AsyncShutdown.appShutdownConfirmed.removeBlocker(onQuitApplication);
     Services.obs.removeObserver(domWindowOpenedObserver, "domwindowopened");
     Services.obs.notifyObservers(null, "startupcache-invalidate", null);
+    logInfo("onShutdown: teardown complete");
   }
 };

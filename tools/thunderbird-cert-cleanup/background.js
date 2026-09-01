@@ -2,23 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-// Cleanup runs from two places, both in the privileged Experiment side (see
-// experiments/certCleanup/implementation.js): the
-// AsyncShutdown.appShutdownConfirmed blocker, and an nsIMsgComposeStateListener
-// on each compose window that reacts to a failed send (cleans up, then
-// automatically retries). Every cleanup pass is unconditionally followed by
-// rebuilding Gecko's CertVerifier singleton (reinitCertVerifier() in
-// implementation.js, since 0.7.0; made unconditional -- not just when a
-// duplicate was actually deleted -- in 0.7.1), which is what makes this
-// self-heal reliably instead of only on the first occurrence per session.
-// See README.md ("Why cleanup runs at shutdown and on a failed send") for
-// why.
+// PROACTIVE-ONLY BUILD, not for production. The trigger logic lives
+// entirely in the privileged Experiment side -- see
+// experiments/certCleanup/implementation.js, which uses three proactive
+// triggers and no reactive failure-handling/retry at all: a new compose
+// window unconditionally rebuilds Gecko's CertVerifier singleton; the
+// Send button/menu, intercepted before the real send starts, only removes
+// a stale cert9.db duplicate (no reinit); app shutdown removes a stale
+// duplicate the same way. Cleanup always runs before this window's only
+// send attempt, so there's no same-window-retry risk and no need to touch
+// nsIMsgComposeSecure at all.
 //
-// certCleanup.activate() is called once at startup purely to guarantee
-// getAPI() has actually run: Thunderbird can load an Experiment's parent
-// script lazily, on first access to its API, rather than eagerly with the
-// add-on, and this file otherwise never touches the API at all -- without
-// this call, implementation.js's setup would silently never run.
+// certCleanup.activate() is called once at startup, purely to guarantee
+// getAPI() has actually run (see implementation.js and schema.json for
+// why) -- nothing else here would ever touch the API otherwise.
 
 const VERSION = browser.runtime.getManifest().version;
 console.log(`certCleanup v${VERSION}: background page loaded`);
