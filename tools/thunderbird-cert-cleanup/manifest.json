@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.6.4.3",
-  "description": "TEST SEARCH-ONLY BUILD (v0.6.4.3): drops certDB.getCerts() from the send path entirely (0.6.4.1 PROVED the full PK11_ListCerts enumeration breaks reading of incoming mail even with zero writes). Instead doCleanup(email) takes the signing identity's email from the compose window (win.gCurrentIdentity.email -- confirmed the real global in 0.6.4.2; 'emailSigningIdentity' does NOT exist), does ONE targeted certDB.findCertByEmailAddress() lookup, then removes the matching stale cert9.db row by DER via a direct SQL DELETE (no constructX509(), no deleteCertificate(), no PKCS#11 sweep). Shutdown trigger passes no email and is effectively disabled in this build. Purpose: see whether a single targeted lookup + pure-SQL delete keeps reading working after a signed send.",
+  "version": "0.6.4.4",
+  "description": "TEST SEARCH-ONLY BUILD (v0.6.4.4) = 0.6.4.3 + full cleanup restored on app shutdown. Send path unchanged from 0.6.4.3: doCleanup(email) via ONE certDB.findCertByEmailAddress() + direct SQL DELETE of the matching cert9.db row by DER (no getCerts(), no constructX509/deleteCertificate -- 0.6.4.1 proved full enumeration breaks reading mid-session). NEW: the original v0.6.3 doCleanup() (getCerts + email filter + SQL read + constructX509/deleteCertificate) is restored verbatim as doCleanupFin() and re-bound ONLY to the app-shutdown trigger, where disturbing NSS/PSM state is harmless because the process exits right after. Purpose: verify 0.6.4.3 cleanly fixes P1 (signing) at send while keeping reading working, with the full session-clearing pass still happening on quit.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
