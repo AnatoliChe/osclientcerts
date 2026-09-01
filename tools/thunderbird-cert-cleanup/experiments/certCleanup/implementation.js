@@ -52,7 +52,7 @@ const { setTimeout, clearTimeout } = ChromeUtils.importESModule(
 // script has no equivalent of background.js's browser.runtime.getManifest()
 // (that's a WebExtension-context API, not available here), so there's no
 // way to read it back automatically.
-const VERSION = "0.6.0";
+const VERSION = "0.6.2";
 
 // Every action this build takes is logged through these two: each line
 // carries the version, a Date.now() timestamp (so it lines up with
@@ -125,7 +125,7 @@ async function doCleanup() {
   const liveCerts = certs.filter(
     (cert) =>
       (cert.tokenName || "").trim() === OS_CLIENT_CERTS_TOKEN_NAME &&
-      cert.emailAddresses.length > 0
+      (cert.emailAddresses || []).length > 0
   );
   logInfo(
     "doCleanup: filtered to live certs on our token with an email address",

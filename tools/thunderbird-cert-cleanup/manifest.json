@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.6.1",
-  "description": "PROACTIVE-ONLY BUILD (v0.6.1): same three-trigger architecture as 0.6.0 (1. compose-window-open -> unconditional CertVerifier rebuild; 2. send button/menu intercepted before the real send -> duplicate-only cleanup, no reinit, original send runs exactly once; 3. shutdown -> duplicate-only cleanup; no retry), and doCleanup() now additionally requires an email address on every candidate cert (tokenName AND emailAddresses.length > 0). A stale cert9.db duplicate can only cause the signing-confusion bug (P1) for a cert someone might actually sign with; our Rust module's CERT_FIND_HAS_PRIVATE_KEY filter only checks for a CERT_KEY_PROV_INFO_PROP_ID property, not a genuinely usable key, so a chain-only helper cert (a CA) can look 'live' without ever being signable. S/MIME always needs an email cert (RFC 5750) and a CA essentially never has one -- filtering here is a zero-cost local check (no extra cert9.db/NSS touch) that also cuts the per-cert SQL lookups doCleanup() does against cert9.db.",
+  "version": "0.6.2",
+  "description": "PROACTIVE-ONLY BUILD (v0.6.2): same three-trigger architecture and email-address filter as v0.6.1 (1. compose-window-open -> unconditional CertVerifier rebuild; 2. send button/menu intercepted before the real send -> duplicate-only cleanup, no reinit, original send runs exactly once; 3. shutdown -> duplicate-only cleanup; no retry), with two fixes: (a) the email-address check is now null-safe -- some nsIX509CertDB cert objects expose no 'emailAddresses' property at all, and the v0.6.1 filter's unchecked cert.emailAddresses.length threw a TypeError that aborted the entire doCleanup() pass on the very first send-button trigger; (b) the hardcoded VERSION string used in every console.log line was still 0.6.0, so 0.6.1 installs logged themselves as 0.6.0 -- the debug version is now bumped in lockstep with manifest.json.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
