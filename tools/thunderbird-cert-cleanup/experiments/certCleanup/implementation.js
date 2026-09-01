@@ -348,6 +348,18 @@ function isComposeWindow(win) {
 // for the user to see and act on normally (close/reopen the compose
 // window, or a new message).
 function onComposeProcessDone(win, aResult) {
+  // Unconditional, regardless of trigger config -- added 2026-09-01 after a
+  // report of the same-window-resend warning appearing on what should have
+  // been a brand new window's first ever send attempt, even right after a
+  // Thunderbird restart. One live hypothesis: ComposeProcessDone might fire
+  // with some non-zero aResult for a reason unrelated to an actual user
+  // Send attempt (a spurious call during compose window setup, or some
+  // other internal compose-process step), which -- since
+  // win.__certCleanupSawFailure was being set on *any* non-zero aResult --
+  // would incorrectly flag a window as "already failed" before the user
+  // ever clicked Send. This line makes every call visible so that can be
+  // confirmed or ruled out from a real console-export log.
+  console.log(`certCleanup: ComposeProcessDone(0x${(aResult >>> 0).toString(16)})`);
   if (aResult === 0) {
     // NS_OK. Not using Cr.NS_OK to avoid depending on whether Cr
     // (Components.results) is available as a predefined global here the
@@ -518,16 +530,25 @@ function wrapGenericSendMessage(win) {
   }
   const original = win.GenericSendMessage;
   win.GenericSendMessage = function (msgType, ...rest) {
+    // Wrapped in try/catch deliberately: this warning must never be able to
+    // block the actual send underneath it. If Services.prompt.alert()
+    // throws in this context for any reason, the send has to proceed
+    // regardless -- a broken warning is a minor annoyance, a broken send is
+    // not.
     if (win.__certCleanupSawFailure) {
-      Services.prompt.alert(
-        win,
-        "cert-cleanup",
-        "Это окно письма уже пыталось отправиться и получило ошибку. Thunderbird не " +
-          "сбрасывает список получателей шифрования между попытками на одном и том же " +
-          "окне (известный баг) -- повторная отправка отсюда, скорее всего, отправит " +
-          "письмо, которое никто не сможет расшифровать, включая вас самих.\n\n" +
-          "Закройте это окно (черновик можно сохранить) и отправьте из нового."
-      );
+      try {
+        Services.prompt.alert(
+          win,
+          "cert-cleanup",
+          "Это окно письма уже пыталось отправиться и получило ошибку. Thunderbird не " +
+            "сбрасывает список получателей шифрования между попытками на одном и том же " +
+            "окне (известный баг) -- повторная отправка отсюда, скорее всего, отправит " +
+            "письмо, которое никто не сможет расшифровать, включая вас самих.\n\n" +
+            "Закройте это окно (черновик можно сохранить) и отправьте из нового."
+        );
+      } catch (e) {
+        Cu.reportError("certCleanup: same-window-resend warning failed to display: " + e);
+      }
     }
     return original.call(this, msgType, ...rest);
   };
