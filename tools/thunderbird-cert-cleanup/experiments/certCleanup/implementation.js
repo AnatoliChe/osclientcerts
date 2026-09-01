@@ -52,7 +52,7 @@ const { setTimeout, clearTimeout } = ChromeUtils.importESModule(
 // script has no equivalent of background.js's browser.runtime.getManifest()
 // (that's a WebExtension-context API, not available here), so there's no
 // way to read it back automatically.
-const VERSION = "0.6.4.2";
+const VERSION = "0.6.4.3";
 
 // Every action this build takes is logged through these two: each line
 // carries the version, a Date.now() timestamp (so it lines up with
@@ -93,83 +93,54 @@ const CKO_CERTIFICATE_BYTES = new Uint8Array([0, 0, 0, 1]);
 // Runs the actual detect-and-delete pass. See the long comment inline below
 // for why detection reads cert9.db directly but deletion goes through
 // nsIX509CertDB.
-async function doCleanup() {
-  logInfo("doCleanup: starting");
+async function doCleanup(email) {
+  logInfo(
+    "doCleanup: starting",
+    email ? `email="${email}"` : "no email passed, nothing to search for"
+  );
+  if (!email) {
+    return [];
+  }
   const certDB = Cc["@mozilla.org/security/x509certdb;1"].getService(
     Ci.nsIX509CertDB
   );
 
-  let certs;
+  // TEST BUILD 0.6.4.3: search-only start. Instead of certDB.getCerts()
+  // (full PK11_ListCerts enumeration -- PROVEN in 0.6.4.1 to break reading
+  // of incoming mail even with zero writes), the pass starts from the single
+  // signing identity's email handed in by the send trigger and does ONE
+  // targeted certDB.findCertByEmailAddress() lookup. No getCerts(), no
+  // constructX509(), no deleteCertificate() (deleteCertificate() would run
+  // PK11_DeleteTokenCertAndKey -> PK11_FindKeyByAnyCert sweeping every slot).
+  logInfo("doCleanup: calling certDB.findCertByEmailAddress()", `email="${email}"`);
+  let liveCert;
   try {
-    // TEST BUILD 0.6.4.1: bisection experiment step 2. 0.6.4.0 proved that
-    // merely acquiring the nsIX509CertDB service does NOT break reading of
-    // incoming mail. This build adds the next step: call getCerts() (full
-    // PK11_ListCerts(PK11CertListUnique) enumeration incl. our own token),
-    // log the result, and return immediately -- no email filter, no cert9.db
-    // read, no deleteCertificate(). If reading still works, the breakage must
-    // come from the filter/SQL/delete; if it breaks here, getCerts() alone is
-    // the culprit (as the old 0.4.10 getCerts-only control also suggested).
-    certs = certDB.getCerts();
-    logInfo("doCleanup: TEST 0.6.4.1: certDB.getCerts() returned", `${certs.length} total cert(s)`);
-    logInfo("doCleanup: TEST 0.6.4.1: returning without touching filter, cert9.db, or deleteCertificate");
-    return [];
+    liveCert = certDB.findCertByEmailAddress(email);
   } catch (e) {
-    logError("doCleanup: certDB.getCerts()", e);
+    logError("doCleanup: certDB.findCertByEmailAddress()", e);
     return [];
   }
-  // Beyond tokenName, also require an email address (cert.getEmailAddresses(),
-  // the nsIX509Cert method -- there is NO property named "emailAddresses",
-  // only the method and the AString "emailAddress" attribute -- Gecko/NSS
-  // populates it from *both* the Subject DN's PKCS#9
-  // emailAddress attribute and any SAN rfc822Name/directoryName entries --
-  // see nsNSSCertificate::GetEmailAddresses / NSS's CERT_GetFirstEmailAddress
-  // in alg1485.c). A stale cert9.db duplicate can only ever cause the
-  // original signing-confusion bug (P1) for a certificate someone might
-  // actually sign with -- and our own Rust module's CERT_FIND_HAS_PRIVATE_KEY
-  // filter (backend_windows.rs) only checks for a CERT_KEY_PROV_INFO_PROP_ID
-  // property, not a genuinely usable key, so a chain-only helper cert (a CA)
-  // can show up here as "live" without ever being signable. S/MIME requires
-  // an email address on any cert actually used to sign/encrypt (RFC 5750);
-  // a CA cert essentially never has one. Filtering here is a zero-cost, local
-  // check (no extra cert9.db/NSS touch) that also reduces how many separate
-  // SQL lookups doCleanup() makes against cert9.db per pass.
-  const liveCerts = certs.filter(
-    (cert) =>
-      (cert.tokenName || "").trim() === OS_CLIENT_CERTS_TOKEN_NAME &&
-      cert.getEmailAddresses().length > 0
-  );
+  if (!liveCert) {
+    logInfo("doCleanup: findCertByEmailAddress() found no cert", `email="${email}"`);
+    return [];
+  }
   logInfo(
-    "doCleanup: filtered to live certs on our token with an email address",
-    `${liveCerts.length} of ${certs.length}`
+    "doCleanup: findCertByEmailAddress() found cert",
+    `subject=${liveCert.subjectName}, tokenName="${liveCert.tokenName || ""}"`
   );
-  if (liveCerts.length === 0) {
-    // The provider isn't loaded (or has no certs) right now -- don't touch
-    // cert9.db at all, since we have no way to confirm which of its rows, if
-    // any, are safe to remove.
-    logInfo("doCleanup: no live certs on our token, nothing to check, returning");
-    return [];
-  }
 
-  // certDB.getCerts() is *not* a plain listing: Gecko's
-  // nsNSSCertificateDB::GetCerts() calls PK11_ListCerts(PK11CertListUnique,
-  // ...) (confirmed against NSS's own lib/pk11wrap and
-  // security/manager/ssl/nsNSSCertificateDB.cpp), which silently merges a
-  // persisted, keyless cert9.db row with a live token object representing
-  // the same certificate -- so getCerts() never shows the duplicate as a
-  // second entry while the provider is loaded, which is exactly when you'd
-  // want to detect and remove it. NSS has a non-deduplicating list type
-  // (PK11CertListAll), but no JS-facing API exposes it.
-  //
-  // So: *read* cert9.db directly instead, via Sqlite.sys.mjs (Gecko's
-  // sanctioned module for opening additional, concurrent, read-only
-  // connections to a Firefox/Thunderbird-managed sqlite database -- the same
-  // mechanism other in-process code uses for shared databases like
-  // places.sqlite). A row here is a genuine persisted duplicate by
-  // construction: PKCS #11 objects belonging to an *external* token like
-  // ours are never themselves written to cert9.db, so any CKO_CERTIFICATE
-  // row whose DER byte-for-byte matches one of our live certificates cannot
+  // Detect+delete the stale duplicate row directly in cert9.db via
+  // Sqlite.sys.mjs (the sanctioned way to touch a Gecko-managed sqlite DB
+  // concurrently -- same mechanism other in-process code uses for shared
+  // databases like places.sqlite). A row here is a genuine persisted
+  // duplicate by construction: PKCS #11 objects belonging to an *external*
+  // token like ours are never themselves written to cert9.db, so any
+  // CKO_CERTIFICATE row whose DER byte-for-byte matches our live cert cannot
   // be that live certificate -- it can only be a stale, keyless, NSS-cached
-  // copy.
+  // copy. Delete via SQL, NOT via nsIX509CertDB.deleteCertificate(), so no
+  // NSS/PKCS#11 side effects beyond a plain sqlite DELETE.
+  const derArray = liveCert.getRawDER();
+  const der = Uint8Array.from(derArray);
   const { Sqlite } = ChromeUtils.importESModule(
     "resource://gre/modules/Sqlite.sys.mjs"
   );
@@ -181,64 +152,34 @@ async function doCleanup() {
   const deleted = [];
   let conn;
   try {
-    logInfo("doCleanup: opening cert9.db (openNotExclusive, readOnly)");
+    logInfo("doCleanup: opening cert9.db (openNotExclusive, read/write)");
     conn = await Sqlite.openConnection({
       path: dbFile.path,
       openNotExclusive: true,
-      readOnly: true,
     });
     logInfo("doCleanup: cert9.db opened");
-    for (const liveCert of liveCerts) {
-      logInfo("doCleanup: checking live cert", `subject=${liveCert.subjectName}`);
-      const derArray = liveCert.getRawDER();
-      const der = Uint8Array.from(derArray);
-      logInfo("doCleanup: querying nssPublic for a matching duplicate row");
-      let rows;
-      try {
-        rows = await conn.execute(
-          "SELECT id FROM nssPublic WHERE " +
-            CKA_CLASS_COLUMN + " = :cls AND " + CKA_VALUE_COLUMN + " = :der",
-          { cls: CKO_CERTIFICATE_BYTES, der }
-        );
-      } catch (e) {
-        logError(`doCleanup: SELECT for subject=${liveCert.subjectName}`, e);
-        continue;
-      }
-      if (rows.length === 0) {
-        logInfo(
-          "doCleanup: no duplicate row found",
-          `subject=${liveCert.subjectName}`
-        );
-        continue;
-      }
+    let rows;
+    try {
+      rows = await conn.execute(
+        "SELECT id FROM nssPublic WHERE " +
+          CKA_CLASS_COLUMN + " = :cls AND " + CKA_VALUE_COLUMN + " = :der",
+        { cls: CKO_CERTIFICATE_BYTES, der }
+      );
+    } catch (e) {
+      logError("doCleanup: SELECT for DER match", e);
+    }
+    if (rows && rows.length > 0) {
       logInfo(
         "doCleanup: found duplicate row(s)",
         `${rows.length} row(s), subject=${liveCert.subjectName}`
       );
-      // Delete via nsIX509CertDB, not a second write connection.
-      // constructX509() builds a transient, in-memory certificate object
-      // from the duplicate's DER (not tied to any token/slot), and
-      // deleteCertificate() on that object resolves and removes the
-      // matching persisted record through NSS's own softoken code path
-      // (PK11_DeleteTokenCertAndKey / SEC_DeletePermCertificate -- confirmed
-      // against nsNSSCertificateDB::DeleteCertificate), the same path
-      // "Delete or Distrust" in Certificate Manager uses. If that
-      // resolution ever targeted our *live* token object instead of the
-      // cert9.db duplicate, the call would simply fail rather than corrupt
-      // anything: osclientcerts' own C_DestroyObject is an unconditional
-      // CKR_FUNCTION_NOT_SUPPORTED stub (see src/lib.rs), so an attempt to
-      // destroy anything on our external token is a safe no-op.
-      logInfo(
-        "doCleanup: attempting deleteCertificate()",
-        `subject=${liveCert.subjectName}`
-      );
       try {
-        const tempCert = certDB.constructX509(derArray);
-        certDB.deleteCertificate(tempCert);
-        logInfo(
-          "doCleanup: deleteCertificate() succeeded",
-          `subject=${liveCert.subjectName}, ${rows.length} row(s)`
+        await conn.execute(
+          "DELETE FROM nssPublic WHERE " +
+            CKA_CLASS_COLUMN + " = :cls AND " + CKA_VALUE_COLUMN + " = :der",
+          { cls: CKO_CERTIFICATE_BYTES, der }
         );
+        logInfo("doCleanup: SQL DELETE executed", `subject=${liveCert.subjectName}`);
         deleted.push({
           subjectName: liveCert.subjectName,
           issuerName: liveCert.issuerName,
@@ -246,11 +187,10 @@ async function doCleanup() {
           rowCount: rows.length,
         });
       } catch (e) {
-        logError(
-          `doCleanup: deleteCertificate() for subject=${liveCert.subjectName}`,
-          e
-        );
+        logError("doCleanup: SQL DELETE for DER match", e);
       }
+    } else {
+      logInfo("doCleanup: no duplicate row found", `subject=${liveCert.subjectName}`);
     }
   } catch (e) {
     logError("doCleanup: cert9.db access", e);
@@ -406,21 +346,14 @@ function hookSendButton(win) {
       const msgType = commandIdToDeliverMode(id);
       win.__certCleanupInterceptingSend = true;
       logInfo("hookSendButton: intercepted send-button click", `id="${id}", msgType=${msgType}`);
-      // DEBUG 0.6.4.2: discover the actual signing-identity global in this
-      // compose window before wiring the search-only doCleanup(). NOTE:
-      // "emailSigningIdentity" is NOT a stock Thunderbird window global
-      // (checked comm-central MsgComposeCommands.js -- the real one is
-      // `gCurrentIdentity`, `var gCurrentIdentity;` at line 130, and its
-      // signing cert is read via getUnicharAttribute("signing_cert_name"),
-      // MsgComposeCommands.js:1821); these probe lines just log whatever
-      // window globals actually exist so we can see which one to use.
-      console.log("emailSigningIdentity =", win.emailSigningIdentity);
-      console.log("email =", win.emailSigningIdentity?.email);
-      console.log("signingCertName =", win.emailSigningIdentity?.signingCertName);
-      console.log("gCurrentIdentity =", win.gCurrentIdentity);
-      console.log("gCurrentIdentity.email =", win.gCurrentIdentity?.email);
-      console.log("gCurrentIdentity.signingCertName =", win.gCurrentIdentity?.signingCertName);
-      doCleanup()
+      // 0.6.4.2 confirmed via console probes: the compose window's real
+      // signing-identity global is gCurrentIdentity (comm-central
+      // MsgComposeCommands.js:130), its email is .email, and there is NO
+      // window global named "emailSigningIdentity". Hand the signing
+      // identity's email straight to the search-only doCleanup().
+      const cleanEmail = win.gCurrentIdentity?.email;
+      logInfo("hookSendButton: signing identity email", cleanEmail ?? "(none)");
+      doCleanup(cleanEmail)
         .then((deleted) => {
           logInfo(
             "hookSendButton: cleanup done, proceeding with the original send",

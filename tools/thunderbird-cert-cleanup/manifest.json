@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.6.4.2",
-  "description": "DEBUG BUILD (v0.6.4.2): same test doCleanup() as 0.6.4.1 (service + getCerts() + return, no filter/cert9.db/delete -- PROVEN in 0.6.4.1 to break reading at send). Added in hookSendButton, right after the send-button interception and BEFORE doCleanup(), a block of console.log diagnostic lines that dump the signing-identity globals of the compose window: probes for the hypothetical 'emailSigningIdentity' global (NOT a real Thunderbird global -- comm-central MsgComposeCommands.js uses `var gCurrentIdentity;` at line 130 and reads the signing cert via identity.getUnicharAttribute('signing_cert_name') at line 1821) plus the real `gCurrentIdentity`/email/signingCertName, so we can confirm which variable to use for the upcoming search-only doCleanup(). No behavior change otherwise.",
+  "version": "0.6.4.3",
+  "description": "TEST SEARCH-ONLY BUILD (v0.6.4.3): drops certDB.getCerts() from the send path entirely (0.6.4.1 PROVED the full PK11_ListCerts enumeration breaks reading of incoming mail even with zero writes). Instead doCleanup(email) takes the signing identity's email from the compose window (win.gCurrentIdentity.email -- confirmed the real global in 0.6.4.2; 'emailSigningIdentity' does NOT exist), does ONE targeted certDB.findCertByEmailAddress() lookup, then removes the matching stale cert9.db row by DER via a direct SQL DELETE (no constructX509(), no deleteCertificate(), no PKCS#11 sweep). Shutdown trigger passes no email and is effectively disabled in this build. Purpose: see whether a single targeted lookup + pure-SQL delete keeps reading working after a signed send.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
