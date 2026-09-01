@@ -15,6 +15,19 @@
         "async": true,
         "description": "Finds certificates known to NSS under more than one issuer+serial-matching record where at least one of those records lives on the OS Client Certs token, and deletes the other (stale, keyless) records. Returns the list of records deleted.",
         "parameters": []
+      },
+      {
+        "name": "configure",
+        "type": "function",
+        "async": true,
+        "description": "Sets which trigger events run cleanup: windowOpen, sendButtonClick, sendError, sendSuccess (each a boolean). Keys not present in the object passed are left unchanged from their current value. App shutdown always runs cleanup regardless of this configuration. Called by background.js once at startup with whatever's saved in storage.local, and again whenever the options page changes it.",
+        "parameters": [
+          {
+            "name": "triggers",
+            "type": "object",
+            "additionalProperties": true
+          }
+        ]
       }
     ]
   }

@@ -1,14 +1,19 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.35",
-  "description": "ON-COMPOSE-ERROR-TRIGGER + REINIT-CERTVERIFIER, not for production: ports the confirmed-working reinitCertVerifier() mechanism (v0.4.34, validated by the user: reading now self-heals after every send, not just the first per session) from the proactive compose-open trigger onto the less disruptive reactive-on-send-failure trigger (nsIMsgComposeStateListener.ComposeProcessDone + auto-dismissed failure dialog + GenericSendMessage-wrap/auto-retry, previously shipped standalone as v0.4.29 / trunk's v0.6.0). Cleanup now only runs on an actual signing failure or at shutdown, each followed by the CertVerifier rebuild when it actually removed something.",
+  "version": "0.4.36",
+  "description": "TRIGGER-SELECTOR BUILD, not for production: adds an options page letting you pick any combination of four trigger events (compose window open, Send button click, send failure, send success) that run cleanup + CertVerifier reinit, persisted via storage.local and reconfigurable live. Also drops the auto-retry-on-failure behavior from earlier builds: retrying a send via GenericSendMessage() a second time on the same compose window was found (2026-09-01) to duplicate RecipientInfo entries in the resulting S/MIME message via a Thunderbird bug in nsMsgComposeSecure's uncleared mCerts, breaking decryption for everyone including the sender. The send-error trigger now only cleans up in the background, leaving the normal failure dialog visible.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
       "strict_min_version": "153.1.1",
       "update_url": "https://raw.githubusercontent.com/AnatoliChe/osclientcerts/experiment/cert-cleanup-mid-session/tools/thunderbird-cert-cleanup/updates.json"
     }
+  },
+  "permissions": ["storage"],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
   },
   "experiment_apis": {
     "certCleanup": {

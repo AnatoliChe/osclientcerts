@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>cert-cleanup triggers</title>
+<style>
+  body { font-family: sans-serif; padding: 1em; max-width: 34em; }
+  label { display: block; margin: 0.7em 0 0.1em; font-weight: 600; }
+  p.hint { color: #555; font-size: 0.88em; margin: 0.15em 0 0.6em 1.6em; }
+  .footnote { color: #777; font-size: 0.85em; margin-top: 1.4em; }
+</style>
+</head>
+<body>
+  <h3>cert-cleanup: события срабатывания</h3>
+  <p>Можно включить несколько одновременно.</p>
+
+  <label><input type="checkbox" id="windowOpen"> При открытии окна нового письма</label>
+  <p class="hint">Проактивно, до любой попытки отправки. Не взаимодействует с багом
+    повторной отправки (см. ниже) — на этот момент письмо ещё не отправлялось ни разу.</p>
+
+  <label><input type="checkbox" id="sendButtonClick"> При нажатии кнопки «Отправить»</label>
+  <p class="hint">Перехватывает нажатие до начала отправки: сначала чистка, потом
+    отправка — ровно один раз. Раньше в этой сессии такое размещение триггера (близко к
+    самой отправке) показывало себя хуже других — стоит перепроверить с текущей
+    переинициализацией CertVerifier.</p>
+
+  <label><input type="checkbox" id="sendError"> При ошибке отправки</label>
+  <p class="hint">Чистит cert9.db и переинициализирует CertVerifier в фоне при
+    неудачной отправке. <b>Не</b> перехватывает диалог ошибки и не повторяет отправку
+    сама — повторный вызов отправки на том же окне письма дублирует получателей
+    шифрования (баг в самом Thunderbird, найден 2026-09-01). Обычный диалог «не удалось
+    отправить» останется виден как есть.</p>
+
+  <label><input type="checkbox" id="sendSuccess"> После успешной отправки</label>
+  <p class="hint">NSS кэширует новый дубликат сертификата при каждой успешной
+    отправке — можно чистить сразу же, не дожидаясь следующей ошибки.</p>
+
+  <p class="footnote">Чистка при выходе из Thunderbird всегда включена, отдельно от
+    этого списка.</p>
+
+  <script src="options.js"></script>
+</body>
+</html>

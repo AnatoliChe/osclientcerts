@@ -22,6 +22,8 @@ cd "${SCRIPT_DIR}"
 zip -r -X "${OUT}" \
     manifest.json \
     background.js \
+    options.html \
+    options.js \
     experiments \
     -x '*.DS_Store'
 
