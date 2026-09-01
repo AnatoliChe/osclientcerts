@@ -52,7 +52,7 @@ const { setTimeout, clearTimeout } = ChromeUtils.importESModule(
 // script has no equivalent of background.js's browser.runtime.getManifest()
 // (that's a WebExtension-context API, not available here), so there's no
 // way to read it back automatically.
-const VERSION = "0.6.4.4";
+const VERSION = "0.6.4.5";
 
 // Every action this build takes is logged through these two: each line
 // carries the version, a Date.now() timestamp (so it lines up with
@@ -101,46 +101,33 @@ async function doCleanup(email) {
   if (!email) {
     return [];
   }
-  const certDB = Cc["@mozilla.org/security/x509certdb;1"].getService(
-    Ci.nsIX509CertDB
-  );
 
-  // TEST BUILD 0.6.4.3: search-only start. Instead of certDB.getCerts()
-  // (full PK11_ListCerts enumeration -- PROVEN in 0.6.4.1 to break reading
-  // of incoming mail even with zero writes), the pass starts from the single
-  // signing identity's email handed in by the send trigger and does ONE
-  // targeted certDB.findCertByEmailAddress() lookup. No getCerts(), no
-  // constructX509(), no deleteCertificate() (deleteCertificate() would run
-  // PK11_DeleteTokenCertAndKey -> PK11_FindKeyByAnyCert sweeping every slot).
-  logInfo("doCleanup: calling certDB.findCertByEmailAddress()", `email="${email}"`);
-  let liveCert;
-  try {
-    liveCert = certDB.findCertByEmailAddress(email);
-  } catch (e) {
-    logError("doCleanup: certDB.findCertByEmailAddress()", e);
-    return [];
-  }
-  if (!liveCert) {
-    logInfo("doCleanup: findCertByEmailAddress() found no cert", `email="${email}"`);
-    return [];
-  }
-  logInfo(
-    "doCleanup: findCertByEmailAddress() found cert",
-    `subject=${liveCert.subjectName}, tokenName="${liveCert.tokenName || ""}"`
-  );
-
-  // Detect+delete the stale duplicate row directly in cert9.db via
-  // Sqlite.sys.mjs (the sanctioned way to touch a Gecko-managed sqlite DB
-  // concurrently -- same mechanism other in-process code uses for shared
-  // databases like places.sqlite). A row here is a genuine persisted
-  // duplicate by construction: PKCS #11 objects belonging to an *external*
-  // token like ours are never themselves written to cert9.db, so any
-  // CKO_CERTIFICATE row whose DER byte-for-byte matches our live cert cannot
-  // be that live certificate -- it can only be a stale, keyless, NSS-cached
-  // copy. Delete via SQL, NOT via nsIX509CertDB.deleteCertificate(), so no
-  // NSS/PKCS#11 side effects beyond a plain sqlite DELETE.
-  const derArray = liveCert.getRawDER();
-  const der = Uint8Array.from(derArray);
+  // TEST BUILD 0.6.4.5 (SQL-BY-EMAIL): the send path touches NSS not at
+  // all. 0.6.4.1 PROVED certDB.getCerts() breaks reading of incoming mail;
+  // fact #3 shows even a single targeted lookup (findCertByDBKey ->
+  // CERT_FindCertByIssuerAndSN) does too, and findCertByEmailAddress() /
+  // findCertByNickname() do not even exist in nsIX509CertDB. So instead we
+  // read raw cert9.db directly via Sqlite.sys.mjs and locate the stale
+  // duplicate purely by SQL.
+  //
+  // Schema facts (verified against this repo's lib/softoken and a real
+  // profile's cert9.db): each PKCS#11 object is a row in `nssPublic` with
+  // columns named "a"+attr-type-in-hex. CKO_CERTIFICATE rows have
+  // a0 = CKO_CERTIFICATE (0x00000001), their DER is a11 = CKA_VALUE, and --
+  // crucially -- certs stored in the softoken db carry an NSS-specific
+  // CKA_NSS_EMAIL attribute (CKA_NSS+2 = 0x80000000|0x4E534350+2 =
+  // 0xCE534352, column `ace534352`) holding the cert's email address as a
+  // bare ASCII blob. A row here is a genuine persisted duplicate by
+  // construction: PKCS#11 objects belonging to an *external* token like
+  // ours are never written to cert9.db, so a CKO_CERTIFICATE row for our
+  // signing identity can only be the stale, keyless NSS-cached copy.
+  //
+  // Match is case-insensitive (LOWER(email)=LOWER(:email)) so a mismatch in
+  // address casing can't make us miss the duplicate. We only ever DELETE
+  // CKO_CERTIFICATE rows (hex(a0)='00000001'); the nearby CKO_NSS_SMIME row
+  // sharing the same email (class 0xCE534352, email blob NUL-terminated)
+  // is left alone, as are trust rows.
+  const emailBytes = new TextEncoder().encode(email);
   const { Sqlite } = ChromeUtils.importESModule(
     "resource://gre/modules/Sqlite.sys.mjs"
   );
@@ -159,38 +146,36 @@ async function doCleanup(email) {
     });
     logInfo("doCleanup: cert9.db opened");
     let rows;
+    const select =
+      "SELECT id FROM nssPublic WHERE hex(a0) = '00000001' AND LOWER(ace534352) = LOWER(:email)";
+    const params = { email: emailBytes };
     try {
-      rows = await conn.execute(
-        "SELECT id FROM nssPublic WHERE " +
-          CKA_CLASS_COLUMN + " = :cls AND " + CKA_VALUE_COLUMN + " = :der",
-        { cls: CKO_CERTIFICATE_BYTES, der }
-      );
+      rows = await conn.execute(select, params);
     } catch (e) {
-      logError("doCleanup: SELECT for DER match", e);
+      logError("doCleanup: SELECT by email", e);
     }
     if (rows && rows.length > 0) {
       logInfo(
         "doCleanup: found duplicate row(s)",
-        `${rows.length} row(s), subject=${liveCert.subjectName}`
+        `${rows.length} row(s) for email="${email}"`
       );
       try {
         await conn.execute(
-          "DELETE FROM nssPublic WHERE " +
-            CKA_CLASS_COLUMN + " = :cls AND " + CKA_VALUE_COLUMN + " = :der",
-          { cls: CKO_CERTIFICATE_BYTES, der }
+          "DELETE FROM nssPublic WHERE hex(a0) = '00000001' AND LOWER(ace534352) = LOWER(:email)",
+          params
         );
-        logInfo("doCleanup: SQL DELETE executed", `subject=${liveCert.subjectName}`);
+        logInfo("doCleanup: SQL DELETE executed", `email="${email}", ${rows.length} row(s)`);
         deleted.push({
-          subjectName: liveCert.subjectName,
-          issuerName: liveCert.issuerName,
-          serialNumber: liveCert.serialNumber,
+          subjectName: email,
+          issuerName: "-",
+          serialNumber: "-",
           rowCount: rows.length,
         });
       } catch (e) {
-        logError("doCleanup: SQL DELETE for DER match", e);
+        logError("doCleanup: SQL DELETE by email", e);
       }
     } else {
-      logInfo("doCleanup: no duplicate row found", `subject=${liveCert.subjectName}`);
+      logInfo("doCleanup: no duplicate row found", `email="${email}"`);
     }
   } catch (e) {
     logError("doCleanup: cert9.db access", e);

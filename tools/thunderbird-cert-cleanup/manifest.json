@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.6.4.4",
-  "description": "TEST SEARCH-ONLY BUILD (v0.6.4.4) = 0.6.4.3 + full cleanup restored on app shutdown. Send path unchanged from 0.6.4.3: doCleanup(email) via ONE certDB.findCertByEmailAddress() + direct SQL DELETE of the matching cert9.db row by DER (no getCerts(), no constructX509/deleteCertificate -- 0.6.4.1 proved full enumeration breaks reading mid-session). NEW: the original v0.6.3 doCleanup() (getCerts + email filter + SQL read + constructX509/deleteCertificate) is restored verbatim as doCleanupFin() and re-bound ONLY to the app-shutdown trigger, where disturbing NSS/PSM state is harmless because the process exits right after. Purpose: verify 0.6.4.3 cleanly fixes P1 (signing) at send while keeping reading working, with the full session-clearing pass still happening on quit.",
+  "version": "0.6.4.5",
+  "description": "TEST SQL-BY-EMAIL BUILD (v0.6.4.5): the send path touches NSS not at all -- doCleanup(email) takes the signing identity's email (win.gCurrentIdentity.email), opens raw cert9.db via Sqlite.sys.mjs, and finds/deletes the stale duplicate purely by SQL using the NSS column ace534352 = CKA_NSS_EMAIL (0xCE534352) with a case-insensitive LOWER() match, only ever on CKO_CERTIFICATE rows (hex(a0)='00000001'). No getCerts()/findCertByDBKey() (referenced via 0.6.4.1 + fact #3); findCertByEmailAddress()/findCertByNickname() do not exist in nsIX509CertDB. Email is Uint8Array-encoded, TextEncoder. Shutdown keeps doCleanupFin() (the full v0.6.3 pass: getCerts + email filter + SQL read + constructX509/deleteCertificate) where disturbing NSS state is harmless at exit. Purpose: verify a signed send with zero NSS-touch keeps reading of incoming mail working.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
