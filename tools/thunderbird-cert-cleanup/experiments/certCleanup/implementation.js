@@ -15,6 +15,16 @@ const { ExtensionCommon } = ChromeUtils.importESModule(
 const { AsyncShutdown } = ChromeUtils.importESModule(
   "resource://gre/modules/AsyncShutdown.sys.mjs"
 );
+// setTimeout/clearTimeout are Window/Worker globals, not available in this
+// privileged Experiment script's own scope either (same category of bug as
+// nowMs() using performance.now() in an earlier build on this branch, and
+// confirmed the same way: a real console-export log showing
+// "ReferenceError: setTimeout is not defined" thrown from inside
+// waitForObserverTopic below). Timer.sys.mjs is Gecko's own polyfill for
+// exactly this situation.
+const { setTimeout, clearTimeout } = ChromeUtils.importESModule(
+  "resource://gre/modules/Timer.sys.mjs"
+);
 
 // The PKCS#11 token label the osclientcerts provider reports via C_GetTokenInfo
 // (see TOKEN_LABEL_BYTES in fork-osclientcerts/src/lib.rs).

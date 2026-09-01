@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.33",
-  "description": "REINIT-CERTVERIFIER-EXPERIMENT BUILD (v3, fixes a logging bug that silently disabled the reinit entirely), not for production: 0.4.32's timestamp helper used `performance.now()`, which throws ReferenceError in this privileged script's scope (not a Window/Worker global here) -- confirmed via a real console-export log that this crashed reinitCertVerifier() on its very first line, before its own try/catch, on every single occurrence in an entire test session, meaning the enterprise-roots pref toggle never actually ran even once despite what looked like an improved self-heal pattern that session (attributable to something else -- most likely test-sequence luck around send-before-read timing, not this mechanism). Switches the timestamp helper to Date.now(). This is the first build where reinitCertVerifier()'s actual effect (if any) can be validly tested.",
+  "version": "0.4.34",
+  "description": "REINIT-CERTVERIFIER-EXPERIMENT BUILD (v4): 0.4.33 fixed the performance.now() crash and the user confirmed a real result -- reading now self-heals after every send, not just the first occurrence per session, the first mechanism all session to actually change that pattern. 0.4.33's own log showed a second, same-category bug though: waitForObserverTopic()'s timeout guard used setTimeout(), also not a global in this scope, throwing ReferenceError right after the enterprise-roots pref was set to true. The underlying fix still worked despite this -- the pref value change itself (confirmed via readback) is what triggers Gecko's C++-side CertVerifier rebuild, independent of our own JS-side wait/confirm bookkeeping -- but the crash meant our success/failure logging was unreliable and, in an original-pref-was-false scenario, could have skipped restoring the pref afterward. Fixes by importing setTimeout/clearTimeout from resource://gre/modules/Timer.sys.mjs (Gecko's polyfill for privileged scopes lacking Window's own timers).",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
