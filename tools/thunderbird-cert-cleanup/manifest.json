@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.30",
-  "description": "REINIT-TOKEN-EXPERIMENT BUILD, not for production: runs cleanup on two triggers -- app shutdown and new compose window open (back to the v0.5.0-style proactive trigger, replacing 0.4.x's reactive-on-send-failure design) -- and, when cleanup actually removes a stale cert9.db row, additionally logs the internal PKCS#11 token out and back in (nsIPKCS11Token.logout()/.login()) to test whether that forces NSS to drop whatever in-memory state goes stale, instead of relying on an incidental subsequent send to mask it.",
+  "version": "0.4.31",
+  "description": "REINIT-CERTVERIFIER-EXPERIMENT BUILD, not for production: runs cleanup on two triggers -- app shutdown and new compose window open -- and, when cleanup actually removes a stale cert9.db row, rebuilds Gecko's process-lifetime CertVerifier singleton from scratch (by toggling security.enterprise_roots.enabled false->true, an existing unpatched mechanism -- see nsNSSComponent::UpdateCertVerifierWithEnterpriseRoots) to test whether that clears whatever in-memory cache (mTrustCache/mSignatureCache, found via source research) goes stale. Replaces 0.4.30's PK11-token-logout/login attempt, which had zero observable effect.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",

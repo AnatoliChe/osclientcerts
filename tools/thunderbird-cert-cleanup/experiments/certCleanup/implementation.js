@@ -100,7 +100,7 @@ async function doCleanup() {
           liveCert.subjectName
       );
       // Delete via nsIX509CertDB, not a second write connection (see
-      // reinitInternalToken() below for the other half of this build's
+      // reinitCertVerifier() below for the other half of this build's
       // experiment: every mechanism tried to *remove* the duplicate --
       // including this one -- has independently been observed to leave
       // something in Gecko's C++ layer above NSS unable to resolve the
@@ -144,62 +144,97 @@ async function doCleanup() {
   return deleted;
 }
 
-// REINIT-TOKEN-EXPERIMENT BUILD, not for production.
+// REINIT-CERTVERIFIER-EXPERIMENT BUILD, not for production.
 //
 // Everything tried on this branch and on experiment/dll-native-cert9-cleanup
-// so far has been about *how* the duplicate gets removed -- nsIX509CertDB,
-// a raw Sqlite.sys.mjs write, even a native Rust thread with zero
-// Gecko/JS/XPCOM involvement. All of them broke S/MIME decryption for the
-// rest of the session regardless of mechanism, which means the corruption
-// isn't about which layer performs the write. Working theory: the live
-// NSS/softoken instance in this same process already has the deleted row
-// cached in memory (STAN's nssTrustDomain cert cache -- see
-// security/nss/lib/certdb/stanpcertdb.c's nssTrustDomain_AddCertToCache),
-// and that in-memory cache is what actually goes stale, independent of who
-// touched the file underneath it.
+// before this build has been about *how* the duplicate gets removed --
+// nsIX509CertDB, a raw Sqlite.sys.mjs write, a native Rust thread with zero
+// Gecko/JS/XPCOM involvement, and (the previous build on this branch)
+// explicitly logging the internal PK11 token out and back in
+// (nsIPKCS11Token.logout()/.login()). All of them show the exact same
+// "self-heals on the first occurrence per session, never on the second"
+// signature -- including the PK11 logout/login, which had *zero*
+// observable effect. That rules out NSS's own PK11/softoken/STAN cert
+// cache as the culprit (a PK11-level logout/login has no code path into
+// anything higher than that).
 //
-// This build tests whether explicitly telling NSS to drop and re-establish
-// its session on the *internal* soft token (the one backing cert9.db, not
-// our own external module) forces that cache to refresh, instead of
-// relying on it happening as an incidental side effect of a subsequent
-// send (the "self-heals on the first occurrence per session, but not the
-// second" pattern from v0.6.0/v0.4.29). nsIPKCS11Token.logout()/.login()
-// (security/manager/ssl/nsIPKCS11Token.idl) is the only Gecko-exposed,
-// documented mechanism for this short of a full NSS_Shutdown+reinit (which
-// Gecko doesn't support doing mid-session at all). logout() is a thin
-// wrapper over PK11_Logout(slot) (security/manager/ssl/PKCS11Token.cpp) --
-// this is a real, existing API, but nothing in its documented behavior
-// guarantees it drops STAN's cert object cache specifically (that's the
-// actual, unverified hypothesis this build exists to test).
-async function reinitInternalToken() {
+// Research (see this branch's history / project memory for the full
+// writeup) found the actual likely culprit one layer up: comm-central's
+// own S/MIME verification glue (mailnews/extensions/smime/nsCMS.cpp,
+// myExtraVerificationOnCert / myNSS_CMSSignedData_ImportCerts -- a
+// documented workaround for NSS bug 1738592) calls into
+// mozilla::psm::CertVerifier (security/certverifier/CertVerifier.h) on
+// every incoming signed message. CertVerifier is a *process-lifetime*
+// singleton (nsNSSComponent::mDefaultCertVerifier) holding three intra-
+// process caches -- mOCSPCache, mSignatureCache, mTrustCache -- entirely
+// separate from the PK11 layer already ruled out above, and exactly
+// matching the "poisoned once, never resets except at restart" signature.
+//
+// CertVerifier::ClearTrustCache()/ClearOCSPCache() exist in the C++ class,
+// but aren't exposed to JS (only ClearOCSPCache() is, via
+// nsIX509CertDB.clearOCSPCache() -- OCSP/revocation-only, not the more
+// plausible trust/signature caches). Patching that exposure means patching
+// and rebuilding Thunderbird itself, which isn't viable here (the target
+// environment runs stock downloaded Daily builds, not a self-built tree).
+//
+// This build instead reinitializes the *entire* CertVerifier object from
+// JS, using an already-existing, unpatched mechanism:
+// nsNSSComponent::UpdateCertVerifierWithEnterpriseRoots()
+// (security/manager/ssl/nsNSSComponent.cpp:1120) replaces
+// mDefaultCertVerifier with a brand-new SharedCertVerifier (same config,
+// but a fresh object -- so all three caches start empty), and runs
+// whenever the security.enterprise_roots.enabled pref transitions false ->
+// true (nsNSSComponent.cpp:1731, via BackgroundImportEnterpriseCertsTask,
+// confirmed complete via the "psm:enterprise-certs-imported" observer
+// topic). The reverse transition (true -> false) only unloads enterprise
+// roots and does *not* rebuild the verifier, so to guarantee a rebuild
+// regardless of the pref's starting value, this forces it to false first
+// (a synchronous, effect-free no-op if it was already false) before
+// setting it to true and waiting for the rebuild, then restores whatever
+// value it started with. The only side effect is a brief, in-memory-only
+// (not persisted to any file) import of the OS's enterprise root CAs for
+// the few hundred ms this takes -- a real, supported Gecko feature, not a
+// hack -- reverted immediately after.
+function waitForObserverTopic(topic) {
+  return new Promise((resolve) => {
+    const observer = {
+      observe() {
+        Services.obs.removeObserver(observer, topic);
+        resolve();
+      },
+    };
+    Services.obs.addObserver(observer, topic);
+  });
+}
+
+const ENTERPRISE_ROOTS_PREF = "security.enterprise_roots.enabled";
+
+async function reinitCertVerifier() {
   try {
-    const moduleDB = Cc["@mozilla.org/security/pkcs11moduledb;1"].getService(
-      Ci.nsIPKCS11ModuleDB
-    );
-    const modules = await moduleDB.listModules();
-    for (const module of modules) {
-      for (const slot of module.slots) {
-        const token = slot.getToken();
-        if (!token.isInternalKeyToken) {
-          continue;
-        }
-        console.log("certCleanup: reinitializing internal PKCS#11 token (logout+login)");
-        await token.logout();
-        await token.login();
-        return true;
-      }
+    const original = Services.prefs.getBoolPref(ENTERPRISE_ROOTS_PREF, false);
+    if (original) {
+      // Force a false->true transition below even if already true, since
+      // only that direction rebuilds CertVerifier.
+      Services.prefs.setBoolPref(ENTERPRISE_ROOTS_PREF, false);
     }
-    console.error("certCleanup: internal PKCS#11 token not found, nothing to reinit");
-    return false;
+    console.log("certCleanup: reinitializing CertVerifier (enterprise-roots pref toggle)");
+    const imported = waitForObserverTopic("psm:enterprise-certs-imported");
+    Services.prefs.setBoolPref(ENTERPRISE_ROOTS_PREF, true);
+    await imported;
+    if (!original) {
+      Services.prefs.setBoolPref(ENTERPRISE_ROOTS_PREF, false);
+    }
+    console.log("certCleanup: CertVerifier reinitialized");
+    return true;
   } catch (e) {
-    Cu.reportError("certCleanup: reinitInternalToken failed: " + e);
+    Cu.reportError("certCleanup: reinitCertVerifier failed: " + e);
     return false;
   }
 }
 
 // Runs a cleanup pass and, only if it actually removed something, follows up
-// with reinitInternalToken() -- no point risking a token logout/login cycle
-// (and Cu.reportError noise) on a pass that found nothing stale.
+// with reinitCertVerifier() -- no point risking the enterprise-roots pref
+// toggle (and its side effects) on a pass that found nothing stale.
 async function cleanupAndReinit(label) {
   const deleted = await doCleanup();
   if (deleted.length === 0) {
@@ -207,10 +242,10 @@ async function cleanupAndReinit(label) {
     return deleted;
   }
   console.log(
-    `certCleanup (${label}): removed ${deleted.length} stale certificate record(s), reinitializing internal token`,
+    `certCleanup (${label}): removed ${deleted.length} stale certificate record(s), reinitializing CertVerifier`,
     deleted
   );
-  await reinitInternalToken();
+  await reinitCertVerifier();
   return deleted;
 }
 
