@@ -3,6 +3,10 @@
     "cert-cleanup-experiment@osclientcerts.dev": {
       "updates": [
         {
+          "version": "0.4.35",
+          "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.35-error-trigger-reinit/cert-cleanup.xpi"
+        },
+        {
           "version": "0.4.34",
           "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.34-fix-settimeout-bug/cert-cleanup.xpi"
         },
