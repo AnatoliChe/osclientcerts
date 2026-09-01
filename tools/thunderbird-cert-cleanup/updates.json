@@ -3,6 +3,10 @@
     "cert-cleanup@osclientcerts.dev": {
       "updates": [
         {
+          "version": "0.7.0",
+          "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.7.0/cert-cleanup.xpi"
+        },
+        {
           "version": "0.6.0",
           "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.6.0/cert-cleanup.xpi"
         },

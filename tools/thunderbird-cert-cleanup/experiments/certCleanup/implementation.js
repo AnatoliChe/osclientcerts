@@ -15,6 +15,15 @@ const { ExtensionCommon } = ChromeUtils.importESModule(
 const { AsyncShutdown } = ChromeUtils.importESModule(
   "resource://gre/modules/AsyncShutdown.sys.mjs"
 );
+// setTimeout/clearTimeout are Window/Worker globals, not available in this
+// privileged Experiment script's own top-level scope. Timer.sys.mjs is
+// Gecko's own polyfill for exactly this situation -- needed by
+// reinitCertVerifier()'s own bookkeeping below. (hookComposeWindow's
+// gMsgCompose poll further down uses `win.setTimeout` instead, which is
+// fine as-is since `win` is a real DOM window with its own native timers.)
+const { setTimeout, clearTimeout } = ChromeUtils.importESModule(
+  "resource://gre/modules/Timer.sys.mjs"
+);
 
 // The PKCS#11 token label the osclientcerts provider reports via C_GetTokenInfo
 // (see TOKEN_LABEL_BYTES in fork-osclientcerts/src/lib.rs).
@@ -103,27 +112,27 @@ async function doCleanup() {
       );
       // Delete via nsIX509CertDB, not a second write connection: through
       // 0.2.2, deletion also went through this same Sqlite.sys.mjs
-      // connection (a raw `DELETE FROM nssPublic ...`). In production
-      // testing that write -- and, as it turned out, *any* mechanism that
-      // removes the duplicate mid-session, including this official API --
-      // left something in Gecko's C++ layer above NSS unable to resolve the
-      // recipient for S/MIME decryption for the rest of that Thunderbird
-      // session (confirmed via RUST_LOG=osclientcerts=debug: later
-      // C_DecryptInit/C_UnwrapKey calls returned CKR_FUNCTION_NOT_SUPPORTED
-      // without even a preceding C_OpenSession, meaning Gecko had stopped
-      // calling into the module at all -- independently reproduced as safe
-      // at the raw NSS/softoken level via a from-source NSS build, so the
-      // stale state lives above NSS, not in it). That's *why* this only
-      // runs at shutdown or on a failed send, each followed by something
-      // that resets it (process exit, or the auto-retried send -- see
-      // README.md), rather than at arbitrary points during the session.
-      // constructX509() builds a transient, in-memory certificate object
-      // from the duplicate's DER (not tied to any token/slot), and
-      // deleteCertificate() on that object resolves and removes the
-      // matching persisted record through NSS's own softoken code path
-      // (PK11_DeleteTokenCertAndKey / SEC_DeletePermCertificate --
-      // confirmed against nsNSSCertificateDB::DeleteCertificate), the same
-      // path "Delete or Distrust" in Certificate Manager uses. If that
+      // connection (a raw `DELETE FROM nssPublic ...`). Through 0.6.0, that
+      // write -- and, as it turned out, *any* mechanism that removes the
+      // duplicate mid-session, including this official API, a native Rust
+      // DLL thread with zero Gecko/JS/XPCOM involvement, and logging the
+      // internal PK11 token out and back in -- left something in Gecko's
+      // C++ layer above NSS unable to resolve the recipient for S/MIME
+      // decryption for the rest of that Thunderbird session (confirmed via
+      // RUST_LOG=osclientcerts=debug: later C_DecryptInit/C_UnwrapKey calls
+      // returned CKR_FUNCTION_NOT_SUPPORTED without even a preceding
+      // C_OpenSession, meaning Gecko had stopped calling into the module at
+      // all -- independently reproduced as safe at the raw NSS/softoken
+      // level via a from-source NSS build, so the stale state lives above
+      // NSS, not in it). See reinitCertVerifier() below for the fix, and
+      // README.md ("Why cleanup runs at shutdown and on a failed send") for
+      // the full writeup. constructX509() builds a transient, in-memory
+      // certificate object from the duplicate's DER (not tied to any
+      // token/slot), and deleteCertificate() on that object resolves and
+      // removes the matching persisted record through NSS's own softoken
+      // code path (PK11_DeleteTokenCertAndKey / SEC_DeletePermCertificate
+      // -- confirmed against nsNSSCertificateDB::DeleteCertificate), the
+      // same path "Delete or Distrust" in Certificate Manager uses. If that
       // resolution ever targeted our *live* token object instead of the
       // cert9.db duplicate, the call would simply fail rather than corrupt
       // anything: osclientcerts' own C_DestroyObject is an unconditional
@@ -156,25 +165,139 @@ async function doCleanup() {
   return deleted;
 }
 
+// Rebuilds Gecko's process-lifetime CertVerifier singleton
+// (mozilla::psm::CertVerifier, security/certverifier/CertVerifier.h --
+// holds mOCSPCache/mSignatureCache/mTrustCache) after a cleanup pass
+// removes a stale cert9.db row, instead of relying on an incidental
+// subsequent send to mask the problem (the "self-heals on the first
+// occurrence per session, never on the second" behavior of 0.6.0 and
+// earlier). See README.md for the full investigation; in short: every
+// removal mechanism tried, including ones with zero Gecko/JS/XPCOM
+// involvement, showed that same signature, and explicitly logging the
+// *internal* PK11 token out and back in (nsIPKCS11Token.logout()/.login())
+// had zero effect -- ruling out NSS's own PK11/softoken/STAN cache, since
+// that's exactly the layer it operates on. comm-central's own S/MIME
+// verification glue (mailnews/extensions/smime/nsCMS.cpp,
+// myExtraVerificationOnCert / myNSS_CMSSignedData_ImportCerts -- a
+// documented workaround for NSS bug 1738592) calls into CertVerifier on
+// every incoming signed message, which is where this actually lives.
+//
+// CertVerifier::ClearTrustCache() exists in the C++ class but isn't
+// exposed to JS (only ClearOCSPCache() is, via
+// nsIX509CertDB.clearOCSPCache() -- OCSP/revocation-only). Exposing it
+// would mean patching and rebuilding Thunderbird itself. Instead, this
+// uses an already-existing, unpatched mechanism:
+// nsNSSComponent::UpdateCertVerifierWithEnterpriseRoots()
+// (security/manager/ssl/nsNSSComponent.cpp:1120) replaces
+// mDefaultCertVerifier with a brand-new SharedCertVerifier (same config,
+// but a fresh object -- so all three caches start empty), and runs
+// whenever the security.enterprise_roots.enabled pref transitions false ->
+// true (nsNSSComponent.cpp:1731, via BackgroundImportEnterpriseCertsTask,
+// completion signaled by the "psm:enterprise-certs-imported" observer
+// topic). The reverse transition (true -> false) only unloads enterprise
+// roots and does *not* rebuild the verifier, so to guarantee a rebuild
+// regardless of the pref's starting value, this forces it to false first
+// (a synchronous, effect-free no-op if it was already false) before
+// setting it to true and waiting for the rebuild, then restores whatever
+// value it started with. The only side effect is a brief, in-memory-only
+// (not persisted to any file) import of the OS's enterprise root CAs for
+// the time this takes -- a real, supported Gecko feature, not a hack --
+// reverted immediately after.
+//
+// Logged timestamps use Date.now() (ms since epoch) so they can be lined
+// up against a MOZ_LOG capture's `timestamp` output when diagnosing an
+// issue by hand.
+function nowMs() {
+  return Date.now();
+}
+
+// If "psm:enterprise-certs-imported" never fires (task failure, task never
+// dispatched, topic name changed upstream, etc.), this would otherwise
+// hang forever inside `await` with no further log line -- indistinguishable
+// from "still running" versus "silently stuck". This turns that into an
+// explicit, timestamped failure instead.
+const REINIT_TIMEOUT_MS = 8000;
+
+function waitForObserverTopic(topic, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let timer;
+    const observer = {
+      observe() {
+        clearTimeout(timer);
+        Services.obs.removeObserver(observer, topic);
+        resolve();
+      },
+    };
+    Services.obs.addObserver(observer, topic);
+    timer = setTimeout(() => {
+      Services.obs.removeObserver(observer, topic);
+      reject(
+        new Error(
+          `certCleanup: TIMED OUT after ${timeoutMs}ms waiting for observer topic "${topic}" -- it never fired`
+        )
+      );
+    }, timeoutMs);
+  });
+}
+
+const ENTERPRISE_ROOTS_PREF = "security.enterprise_roots.enabled";
+
+async function reinitCertVerifier() {
+  try {
+    const original = Services.prefs.getBoolPref(ENTERPRISE_ROOTS_PREF, false);
+    if (original) {
+      // Force a false->true transition below even if already true, since
+      // only that direction rebuilds CertVerifier.
+      Services.prefs.setBoolPref(ENTERPRISE_ROOTS_PREF, false);
+    }
+    const imported = waitForObserverTopic(
+      "psm:enterprise-certs-imported",
+      REINIT_TIMEOUT_MS
+    );
+    Services.prefs.setBoolPref(ENTERPRISE_ROOTS_PREF, true);
+    await imported;
+    if (!original) {
+      Services.prefs.setBoolPref(ENTERPRISE_ROOTS_PREF, false);
+    }
+    console.log(`certCleanup: [${nowMs()}] reinitCertVerifier: SUCCESS`);
+    return true;
+  } catch (e) {
+    console.error(`certCleanup: [${nowMs()}] reinitCertVerifier: FAILURE: ${e}`);
+    Cu.reportError("certCleanup: reinitCertVerifier failed: " + e);
+    return false;
+  }
+}
+
+// Runs a cleanup pass and, only if it actually removed something, follows up
+// with reinitCertVerifier() -- no point risking the enterprise-roots pref
+// toggle (and its side effects) on a pass that found nothing stale.
+async function cleanupAndReinit(label) {
+  const deleted = await doCleanup();
+  if (deleted.length === 0) {
+    return deleted;
+  }
+  console.log(
+    `certCleanup (${label}): removed ${deleted.length} stale certificate record(s), reinitializing CertVerifier`,
+    deleted
+  );
+  await reinitCertVerifier();
+  return deleted;
+}
+
 // The second cleanup trigger, alongside shutdown (see registerShutdownBlocker
 // below): a failed send. See README.md ("Why cleanup runs at shutdown and on
 // a failed send") for the full investigation this design is based on; in
 // short:
 //
 // - Removing the duplicate mid-session (which is what a failed send's
-//   underlying cause requires fixing) breaks S/MIME decryption of other
-//   messages in the folder pane for the rest of the session -- confirmed
-//   extensively; see the long comment in doCleanup() above.
-// - That breakage self-heals the moment a real send completes -- but only
-//   if the retry happens *before* anything tries to read a message in the
-//   meantime. Production testing (three-scenario comparison) confirmed: an
-//   immediate retry after cleanup leaves reading intact; reading a message
-//   first, then retrying, does not recover it.
-// - So cleanup on a failed send is paired with an automatic, immediate
-//   retry of that same send, before the user gets a chance to go read
-//   anything in between -- which also means the user doesn't have to
-//   notice a signing failure, dismiss a dialog, and manually resend; the
-//   whole recovery happens on its own.
+//   underlying cause requires fixing) used to break S/MIME decryption of
+//   other messages in the folder pane for the rest of the session --
+//   confirmed extensively; see the long comment in doCleanup() above.
+//   reinitCertVerifier() above is what actually fixes that now.
+// - Cleanup on a failed send is paired with an automatic, immediate retry
+//   of that same send, which also means the user doesn't have to notice a
+//   signing failure, dismiss a dialog, and manually resend; the whole
+//   recovery happens on its own.
 //
 // Detecting the failure at all needs to bypass browser.compose.onAfterSend:
 // that event structurally cannot see this failure. comm-central's
@@ -192,7 +315,7 @@ async function doCleanup() {
 // own internal completion notification rather than the JS-level try/catch
 // that swallows the exception in CompleteGenericSendMessage.
 //
-// Two more pieces needed for a clean automatic retry:
+// Three more pieces needed for a clean automatic retry:
 //   1. The failure also pops a modal "couldn't send" alert
 //      (MessageSend.sys.mjs's sendReport.displayReport(), a
 //      Services.prompt.alert() call) that blocks further interaction with
@@ -208,6 +331,16 @@ async function doCleanup() {
 //      not changing its behavior) whenever the user (or our own retry)
 //      calls it, so the retry can use the same send mode (Now/Later/
 //      Background) the user originally chose.
+//   3. registerStateListener guards against a second RegisterStateListener
+//      call on the same window, and onComposeProcessDone's own
+//      __certCleanupHandling flag always resets on every exit path (not
+//      just success): production testing found ComposeProcessDone firing
+//      *twice* for one real failure (a duplicate listener registration on
+//      the same window, root cause not fully pinned down), which made an
+//      earlier version of this guard misread the duplicate echo as "the
+//      retry already failed", give up without ever actually retrying, and
+//      -- worse -- leave the flag permanently stuck, silently ignoring a
+//      later, genuinely new failure on the same window.
 const hookedComposeWindows = new Set();
 
 function isComposeWindow(win) {
@@ -231,38 +364,32 @@ function onComposeProcessDone(win, aResult) {
     // (Components.results) is available as a predefined global here the
     // same way Cc/Ci/Cu are -- NS_OK's value (0) is stable across all of
     // Gecko and won't change.
-    win.__certCleanupRetrying = false;
+    win.__certCleanupHandling = false;
     return;
   }
-  if (win.__certCleanupRetrying) {
-    // This is the retry's own failure -- don't retry a retry, that's an
-    // infinite loop waiting to happen if the real problem is something
-    // cleanup can't fix.
+  if (win.__certCleanupHandling) {
+    // Either a duplicate notification of the failure already being
+    // handled, or the retry itself also failed -- can't tell which from
+    // here, but either way don't start an overlapping cleanup/retry cycle.
+    // Clearing the flag (rather than leaving it set) is what lets a later,
+    // genuinely new failure on this window still be handled.
     console.error(
-      `certCleanup: retry also failed (0x${(aResult >>> 0).toString(16)}), giving up`
+      `certCleanup: ComposeProcessDone failed again while already handling a failure on this window (0x${(aResult >>> 0).toString(16)}), not retrying again`
     );
-    win.__certCleanupRetrying = false;
+    win.__certCleanupHandling = false;
     return;
   }
-  win.__certCleanupRetrying = true;
+  win.__certCleanupHandling = true;
   console.log(
     `certCleanup: send failed (0x${(aResult >>> 0).toString(16)}), running cleanup`
   );
-  doCleanup()
-    .then((deleted) => {
-      if (deleted.length > 0) {
-        console.log(
-          `certCleanup (on-send-failure): removed ${deleted.length} stale certificate record(s), retrying send`,
-          deleted
-        );
-      } else {
-        console.log("certCleanup: nothing to clean up, retrying send anyway");
-      }
+  cleanupAndReinit("on-send-failure")
+    .then(() => {
       const msgType = win.__certCleanupLastMsgType ?? Ci.nsIMsgCompDeliverMode.Now;
       return win.GenericSendMessage(msgType);
     })
     .catch((e) => {
-      win.__certCleanupRetrying = false;
+      win.__certCleanupHandling = false;
       Cu.reportError("certCleanup: cleanup/retry after a failed send failed: " + e);
     });
 }
@@ -277,6 +404,19 @@ const GMSGCOMPOSE_POLL_INTERVAL_MS = 100;
 const GMSGCOMPOSE_POLL_MAX_ATTEMPTS = 50;
 
 function registerStateListener(win) {
+  // Guards specifically against a second RegisterStateListener call on this
+  // window, independent of hookComposeWindow's own __certCleanupHooked
+  // guard: production testing observed ComposeProcessDone firing twice for
+  // one real failure, consistent with two separate listener objects having
+  // ended up registered on the same window (root cause not fully pinned
+  // down -- possibly this Experiment's parent script re-evaluating and
+  // re-running its window-hooking loop, since MV3 background contexts can
+  // be non-persistent and reload). This check is cheap insurance regardless
+  // of the exact cause.
+  if (win.__certCleanupStateListenerRegistered) {
+    return;
+  }
+  win.__certCleanupStateListenerRegistered = true;
   // All four nsIMsgComposeStateListener methods must exist as callable
   // functions even though only ComposeProcessDone matters here: this is a
   // [scriptable] XPCOM interface, and Thunderbird's C++ side may call any
@@ -381,14 +521,7 @@ const SHUTDOWN_BLOCKER_NAME =
 
 async function onQuitApplication() {
   try {
-    const deleted = await doCleanup();
-    if (deleted.length > 0) {
-      console.log(
-        "certCleanup (quit-application): removed " + deleted.length +
-          " stale certificate record(s)",
-        deleted
-      );
-    }
+    await cleanupAndReinit("quit-application");
   } catch (e) {
     Cu.reportError("certCleanup: cleanup on quit failed: " + e);
   }

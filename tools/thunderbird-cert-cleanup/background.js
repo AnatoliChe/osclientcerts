@@ -6,8 +6,12 @@
 // experiments/certCleanup/implementation.js): the
 // AsyncShutdown.appShutdownConfirmed blocker, and an nsIMsgComposeStateListener
 // on each compose window that reacts to a failed send (cleans up, then
-// automatically retries). See README.md ("Why cleanup runs at shutdown and
-// on a failed send") for why.
+// automatically retries). Since 0.7.0, a cleanup pass that actually removes
+// something is also followed by rebuilding Gecko's CertVerifier singleton
+// (reinitCertVerifier() in implementation.js), which is what makes this
+// self-heal reliably instead of only on the first occurrence per session.
+// See README.md ("Why cleanup runs at shutdown and on a failed send") for
+// why.
 //
 // certCleanup.activate() is called once at startup purely to guarantee
 // getAPI() has actually run: Thunderbird can load an Experiment's parent

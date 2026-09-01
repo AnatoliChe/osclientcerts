@@ -185,6 +185,34 @@ mail in between, which production testing confirmed is what makes the difference
 glitch self-healing on that same send (nobody ever observes it) versus needing a restart (reading a
 message from the now-broken state, *then* retrying the send, does not recover it).
 
+That self-heal-on-retry trick had its own limit, though: it only ever worked on the *first*
+cleanup+retry occurrence in a session. NSS caches the signer's certificate into `cert9.db` on
+*every* successfully verified send, not just failures, so a second, later occurrence in the same
+session is common -- and it never self-healed no matter how immediately the retry happened. Neither
+does explicitly logging the *internal* PK11 soft token (the one backing `cert9.db`, not this
+add-on's own token) out and back in via `nsIPKCS11Token.logout()`/`.login()`, which rules out NSS's
+own PK11/softoken cert cache as the culprit, since that's exactly the layer it operates on.
+
+**0.7.0 fixes this for real, by rebuilding Gecko's own `CertVerifier` after a cleanup pass removes
+something**, instead of relying on an incidental subsequent send to mask the problem.
+`mozilla::psm::CertVerifier` (`security/certverifier/CertVerifier.h`) is a process-lifetime
+singleton holding three intra-process caches (`mOCSPCache`/`mSignatureCache`/`mTrustCache`), and
+comm-central's own S/MIME verification glue (`mailnews/extensions/smime/nsCMS.cpp`,
+`myExtraVerificationOnCert`/`myNSS_CMSSignedData_ImportCerts` -- itself a documented workaround for
+NSS bug 1738592) calls into it on every incoming signed message, which is where the stale state
+that survives a plain cert9.db delete actually lives. `CertVerifier::ClearTrustCache()` exists in
+the C++ class but isn't exposed to JS (only `ClearOCSPCache()` is, via
+`nsIX509CertDB.clearOCSPCache()` -- OCSP/revocation-only, not the more plausible trust/signature
+caches), and exposing it would mean patching and rebuilding Thunderbird itself. Instead, this uses
+an already-existing, unpatched mechanism: `nsNSSComponent::UpdateCertVerifierWithEnterpriseRoots()`
+(`security/manager/ssl/nsNSSComponent.cpp:1120`) replaces the whole `CertVerifier` object (same
+config, but a fresh instance -- so all three caches start empty) whenever the
+`security.enterprise_roots.enabled` preference transitions `false -> true`. `reinitCertVerifier()`
+in `implementation.js` forces that transition (temporarily, restoring whatever value the preference
+started with) and waits for Gecko's own `"psm:enterprise-certs-imported"` completion signal.
+Confirmed in production testing across five consecutive cleanup+retry cycles in a single session:
+neither sending nor reading broke even once.
+
 Mechanically, in `experiments/certCleanup/implementation.js`:
 
 1. Detecting the failure at all needs to bypass `browser.compose.onAfterSend`: that WebExtension
@@ -207,9 +235,16 @@ Mechanically, in `experiments/certCleanup/implementation.js`:
    so it's recorded separately by lightly wrapping `GenericSendMessage` (recording the argument
    only, not changing its behavior) whenever the user, or this add-on's own retry, calls it -- so
    the retry uses the same send mode (Now/Later/Background) the user originally chose.
-4. A `__certCleanupRetrying` guard on the compose window prevents retrying a retry: if the retried
+4. A `__certCleanupHandling` guard on the compose window prevents retrying a retry: if the retried
    send also fails, this add-on gives up and leaves the normal failure dialog for the user to deal
-   with, rather than looping.
+   with, rather than looping. It's always cleared on every exit path (not just success), and
+   `registerStateListener` separately guards against a second `RegisterStateListener` call on the
+   same window -- production testing found `ComposeProcessDone` firing twice for one real failure
+   (root cause not fully pinned down), which made an earlier, simpler version of this guard misread
+   the duplicate echo as "the retry already failed" and could leave it permanently stuck, silently
+   ignoring a later, genuinely new failure on the same window.
+5. `reinitCertVerifier()` runs after a cleanup pass that actually removed something -- see above for
+   what it does and why.
 
 The shutdown trigger stays in place alongside this one, for whatever duplicate accumulates in a
 session where no send ever fails (or a send fails for an unrelated reason and the user never
