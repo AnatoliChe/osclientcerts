@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.5.2",
-  "description": "FRESH-GSMFIELDS-RETRY BUILD (v3): 0.5.1's second reinitCertVerifier() call, placed immediately before the retry send, was found (production log: 5 consecutive cycles, every retry failing with the identical finishCryptoEncapsulation error) to reliably break that same send -- a cold, just-rebuilt CertVerifier can't complete the sender's own synchronous cert verification during the send. Removed. Replaced with a delayed (5s, user-suggested) reinitCertVerifier() that runs after any *successful* send (first attempt or retry) instead of before one, doing nothing else (no doCleanup(), no cert9.db read) -- proactively keeps the next read clean without ever interfering with an in-flight crypto operation.",
+  "version": "0.5.3",
+  "description": "FRESH-GSMFIELDS-RETRY BUILD (v4): 0.5.2 was reported to still break reading, after the 3rd or 4th message. A production osclientcerts.log showed a full doCleanup()-triggered cert enumeration followed by repeated CERT_FindCertByIssuerAndSN-style lookups (from recreateComposeSecure()'s checkRecipientCerts()) immediately preceding the established CKR_FUNCTION_NOT_SUPPORTED 'reading broke' signature -- on a cycle where doCleanup() apparently found nothing to delete, so cleanupAndReinit()'s reinit was skipped, leaving checkRecipientCerts()'s own NSS-touching disturbance completely unprotected. The failure-handling path in onComposeProcessDone now always reinitializes CertVerifier after doCleanup(), regardless of whether anything was actually deleted that cycle, before recreateComposeSecure() runs -- cleanupAndReinit() itself (still gated) is now only used at shutdown, where nothing follows it.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",

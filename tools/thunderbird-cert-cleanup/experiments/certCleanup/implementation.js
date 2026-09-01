@@ -459,7 +459,31 @@ function onComposeProcessDone(win, aResult) {
   console.log(
     `certCleanup: send failed (0x${(aResult >>> 0).toString(16)}), running cleanup`
   );
-  cleanupAndReinit("on-send-failure")
+  doCleanup()
+    .then((deleted) => {
+      if (deleted.length > 0) {
+        console.log(
+          `certCleanup (on-send-failure): removed ${deleted.length} stale certificate record(s)`,
+          deleted
+        );
+      } else {
+        console.log("certCleanup (on-send-failure): nothing to clean up");
+      }
+      // Unconditional -- unlike cleanupAndReinit() (still used at shutdown,
+      // where nothing follows it), this always reinitializes CertVerifier
+      // regardless of whether doCleanup() actually found something.
+      // recreateComposeSecure() below always runs checkRecipientCerts(), a
+      // genuine NSS-touching certificate verification pass (confirmed via
+      // a production osclientcerts.log: repeated CERT_FindCertByIssuerAndSN-
+      // style lookups immediately preceded a C_GetMechanismInfo/C_UnwrapKey/
+      // C_DecryptInit: CKR_FUNCTION_NOT_SUPPORTED cascade -- the established
+      // "reading broke" signature). Gating the reinit on "did cleanup find
+      // a duplicate this cycle" left that disturbance completely
+      // unprotected on any cycle where it didn't -- reported 2026-09-01
+      // (reading broke after the 3rd or 4th message, with no accompanying
+      // duplicate found in that log capture).
+      return reinitCertVerifier();
+    })
     .then(() => recreateComposeSecure(win))
     .then(() => {
       console.log("certCleanup: retrying send with a fresh nsIMsgComposeSecure");
