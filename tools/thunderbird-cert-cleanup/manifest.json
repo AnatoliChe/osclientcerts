@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.29",
-  "description": "ON-COMPOSE-ERROR-TRIGGER BUILD (v4, dedup fix), not for production: v0.4.28 was observed registering nsIMsgComposeStateListener twice on the same window, so ComposeProcessDone fired twice per real failure -- the retry-loop guard misread the duplicate echo as \"the retry already failed\", sometimes leaving it stuck and silently skipping a later, genuinely new failure on the same window. This build guards RegisterStateListener itself against double registration, and reworks the retry-tracking flag to always reset instead of ever getting permanently stuck.",
+  "version": "0.4.30",
+  "description": "REINIT-TOKEN-EXPERIMENT BUILD, not for production: runs cleanup on two triggers -- app shutdown and new compose window open (back to the v0.5.0-style proactive trigger, replacing 0.4.x's reactive-on-send-failure design) -- and, when cleanup actually removes a stale cert9.db row, additionally logs the internal PKCS#11 token out and back in (nsIPKCS11Token.logout()/.login()) to test whether that forces NSS to drop whatever in-memory state goes stale, instead of relying on an incidental subsequent send to mask it.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
