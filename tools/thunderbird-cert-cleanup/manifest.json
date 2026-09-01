@@ -1,19 +1,14 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.39",
-  "description": "TRIGGER-SELECTOR BUILD (v4): 0.4.38's same-window-resend warning was reported to make sending stop working entirely, appearing even on what should be a brand new window's first attempt right after a Thunderbird restart. Two defensive fixes while this is investigated: (1) the Services.prompt.alert() warning call is now wrapped in try/catch -- if it throws in this context for any reason, the real send underneath it must still proceed, since a broken warning is a minor annoyance but a broken send is not; (2) every ComposeProcessDone(aResult) call is now logged unconditionally (not just when sendError is enabled), to confirm or rule out the live hypothesis that it fires with a non-zero code for reasons unrelated to an actual failed Send click, which would incorrectly flag a brand new window as already-failed.",
+  "version": "0.5.0",
+  "description": "FRESH-GSMFIELDS-RETRY BUILD, not for production: single reactive-on-send-failure trigger (no trigger selector, back to the v0.7.0/trunk shape) plus a shutdown cleanup, both followed by a CertVerifier rebuild when cleanup finds something. Fixes (not just fences off) the duplicate-RecipientInfo corruption bug found 2026-09-01: the automatic retry now uses a freshly recreated nsIMsgComposeSecure instance, with its recipient-cert cache rewarmed via Thunderbird's own getEncryptionCompatibleRecipients()/checkRecipientCerts(), instead of reusing the failed attempt's -- so BeginCryptoEncapsulation() only ever runs once per instance.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
       "strict_min_version": "153.1.1",
       "update_url": "https://raw.githubusercontent.com/AnatoliChe/osclientcerts/experiment/cert-cleanup-mid-session/tools/thunderbird-cert-cleanup/updates.json"
     }
-  },
-  "permissions": ["storage"],
-  "options_ui": {
-    "page": "options.html",
-    "open_in_tab": true
   },
   "experiment_apis": {
     "certCleanup": {

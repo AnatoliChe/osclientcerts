@@ -16,44 +16,21 @@ const { AsyncShutdown } = ChromeUtils.importESModule(
   "resource://gre/modules/AsyncShutdown.sys.mjs"
 );
 // setTimeout/clearTimeout are Window/Worker globals, not available in this
-// privileged Experiment script's own top-level scope (confirmed via a real
-// console-export log: an earlier build on this branch threw
-// "ReferenceError: setTimeout is not defined" from inside
-// waitForObserverTopic below). Timer.sys.mjs is Gecko's own polyfill for
-// exactly this situation. Note this is only needed for reinitCertVerifier()'s
-// own bookkeeping below -- hookComposeWindow's gMsgCompose poll further down
-// uses `win.setTimeout`, which is fine as-is since `win` is a real DOM
-// window with its own native timers.
+// privileged Experiment script's own top-level scope. Timer.sys.mjs is
+// Gecko's own polyfill for exactly this situation -- needed by
+// reinitCertVerifier()'s own bookkeeping below. (hookComposeWindow's
+// gMsgCompose poll further down uses `win.setTimeout`, which is fine as-is
+// since `win` is a real DOM window with its own native timers.)
 const { setTimeout, clearTimeout } = ChromeUtils.importESModule(
   "resource://gre/modules/Timer.sys.mjs"
 );
 
-// Proves this script parsed and evaluated at all -- diagnostic added
-// 2026-09-01 after a report that neither the compose-window-open trigger
-// nor the (unconditional) shutdown cleanup ran. If this line is missing
-// from the console, the problem is upstream of this script (e.g. the
-// experiment_apis schema failing validation) rather than in the trigger
-// logic below.
-console.log("certCleanup: implementation.js evaluated");
-
-// TRIGGER-SELECTOR BUILD, not for production.
-//
-// Which of the four possible trigger events actually run cleanup, settable
-// live from the add-on's options page (options.html/options.js) via
-// browser.storage.local -- see configure() below and schema.json.
-// Unconfigured default matches this branch's previously-shipped behavior
-// (react to a send failure only).
-let activeTriggers = {
-  windowOpen: false,
-  sendButtonClick: false,
-  sendError: true,
-  sendSuccess: false,
-};
-
-function setTriggers(triggers) {
-  Object.assign(activeTriggers, triggers || {});
-  console.log("certCleanup: active triggers now " + JSON.stringify(activeTriggers));
-}
+// FRESH-GSMFIELDS-RETRY BUILD, not for production. Single behavior, no
+// trigger selector: back to a plain, always-on reactive-on-send-failure
+// trigger (the v0.7.0 / trunk shape), but with the actual bug this whole
+// branch has been chasing since 2026-09-01 fixed instead of just fenced
+// off -- see recreateComposeSecure() and the long comment on
+// onComposeProcessDone below.
 
 // The PKCS#11 token label the osclientcerts provider reports via C_GetTokenInfo
 // (see TOKEN_LABEL_BYTES in fork-osclientcerts/src/lib.rs).
@@ -187,18 +164,13 @@ async function doCleanup() {
 // (mozilla::psm::CertVerifier, security/certverifier/CertVerifier.h --
 // holds mOCSPCache/mSignatureCache/mTrustCache) after a cleanup pass
 // removes a stale cert9.db row, instead of relying on an incidental
-// subsequent send to mask the problem.
-//
-// CONFIRMED WORKING (2026-09-01, on this branch's proactive compose-open
-// trigger build): before this, every mechanism tried -- raw SQL delete,
-// nsIX509CertDB.deleteCertificate(), a native Rust DLL thread with zero
-// Gecko/JS/XPCOM involvement, and explicitly logging the *internal* PK11
-// token out and back in (nsIPKCS11Token.logout()/.login(), which rules out
-// NSS's own PK11/softoken/STAN cache as the culprit since that's exactly
-// the layer it operates on) -- showed the same "self-heals on the first
-// occurrence per session, never on the second" signature. This mechanism
-// is the first one that changed that: self-heal now works after *every*
-// send, not just the first.
+// subsequent send to mask the problem. Confirmed working 2026-09-01: every
+// mechanism tried before this (raw SQL delete, nsIX509CertDB.deleteCertificate(),
+// a native Rust DLL thread with zero Gecko/JS/XPCOM involvement, and
+// explicitly logging the *internal* PK11 token out and back in) showed the
+// same "self-heals on the first occurrence per session, never on the
+// second" signature. This mechanism is the first one that changed that:
+// self-heal now works after *every* send, not just the first.
 //
 // Mechanism: nsNSSComponent::UpdateCertVerifierWithEnterpriseRoots()
 // (security/manager/ssl/nsNSSComponent.cpp:1120) replaces
@@ -216,11 +188,6 @@ async function doCleanup() {
 // (not persisted to any file) import of the OS's enterprise root CAs for
 // the time this takes -- a real, supported Gecko feature, not a hack --
 // reverted immediately after.
-//
-// Logged timestamps use Date.now() (ms since epoch) rather than
-// console.log's own displayed time, so they can be lined up against
-// MOZ_LOG's `timestamp` output when cross-referencing the two logs by
-// hand.
 function nowMs() {
   return Date.now();
 }
@@ -300,117 +267,175 @@ async function cleanupAndReinit(label) {
   return deleted;
 }
 
+// THE ACTUAL FIX for the same-window-resend bug (found 2026-09-01 via ASN.1
+// inspection of a real corrupted sent message -- see the long comment on
+// onComposeProcessDone below for the full mechanism). Rather than warning
+// about it or avoiding a retry altogether, this gives the retry a genuinely
+// fresh nsIMsgComposeSecure instance instead of reusing the failed
+// attempt's -- so BeginCryptoEncapsulation() only ever runs once per
+// instance, exactly as its own IDL doc comment says it's meant to
+// ("related to exactly one email message while the user is composing it").
+//
+// Simply calling `Cc["@mozilla.org/messengercompose/composesecure;1"]
+// .createInstance(...)` isn't enough on its own: BeginCryptoEncapsulation()
+// must stay synchronous and relies on a pre-warmed recipient-cert cache
+// (populated via cacheValidCertForEmail(), normally kept warm continuously
+// in the background as the user edits the recipient list -- see
+// checkRecipientCerts() in MsgComposeCommands.js). A brand new instance's
+// cache starts empty, and BeginCryptoEncapsulation() explicitly does *not*
+// do an async lookup itself if it's missing (its own C++ comment: "must
+// avoid cert verification or looking up certs, which often involves async
+// OCSP"). So this calls the same JS-level machinery Thunderbird's own
+// compose window code uses to warm that cache in the first place --
+// win.getEncryptionCompatibleRecipients() (reads the To/Cc/Bcc address
+// pills) and win.checkRecipientCerts() (async lookup + cacheValidCertForEmail,
+// both plain functions in MsgComposeCommands.js's window-global scope, so
+// reachable the same way win.GenericSendMessage already is) -- and awaits
+// it before the retry proceeds.
+async function recreateComposeSecure(win) {
+  const oldFields = win.gSMFields;
+  const freshFields = Cc[
+    "@mozilla.org/messengercompose/composesecure;1"
+  ].createInstance(Ci.nsIMsgComposeSecure);
+  if (oldFields) {
+    freshFields.signMessage = oldFields.signMessage;
+    freshFields.signFormat = oldFields.signFormat;
+    freshFields.requireEncryptMessage = oldFields.requireEncryptMessage;
+  }
+  win.gMsgCompose.compFields.composeSecure = freshFields;
+  win.gSMFields = freshFields;
+  console.log("certCleanup: recreateComposeSecure: fresh nsIMsgComposeSecure installed");
+
+  if (
+    typeof win.getEncryptionCompatibleRecipients !== "function" ||
+    typeof win.checkRecipientCerts !== "function"
+  ) {
+    console.error(
+      "certCleanup: getEncryptionCompatibleRecipients/checkRecipientCerts not found on this " +
+        "window -- can't rewarm the fresh nsIMsgComposeSecure's recipient-cert cache, retrying anyway"
+    );
+    return;
+  }
+  const recipients = win.getEncryptionCompatibleRecipients();
+  console.log(
+    `certCleanup: recreateComposeSecure: rewarming cert cache for ${recipients.length} recipient(s)`
+  );
+  try {
+    await win.checkRecipientCerts(recipients);
+    console.log("certCleanup: recreateComposeSecure: cert cache rewarmed");
+  } catch (e) {
+    // Non-fatal: proceed to retry anyway with whatever cache state exists.
+    // Worst case this specific retry fails with a legible
+    // "missing recipient cert" error instead of corrupting the message --
+    // still strictly better than the alternative.
+    Cu.reportError("certCleanup: checkRecipientCerts failed while rewarming cert cache: " + e);
+  }
+}
+
 function isComposeWindow(win) {
   return win.document.documentElement.getAttribute("windowtype") === "msgcompose";
 }
 
-// TRIGGER: send failure. Detecting it at all needs to bypass
-// browser.compose.onAfterSend: that WebExtension event structurally cannot
-// see this failure. comm-central's MsgComposeCommands.js
-// (CompleteGenericSendMessage) `return`s from its catch block on a send
-// failure *before* ever reaching the `window.dispatchEvent(new
-// CustomEvent("aftersend"))` call that onAfterSend is built on -- confirmed
-// against the actual source, and against a real profile where three failed
-// sends in a row never fired onAfterSend once. This hooks lower instead, at
-// the same layer Thunderbird's own compose window code uses to observe its
-// own send outcome: nsIMsgComposeStateListener (nsIMsgCompose.idl),
-// registered via gMsgCompose.RegisterStateListener() -- the exact same
-// public, documented interface MsgComposeCommands.js registers its own
-// listener through. ComposeProcessDone(aResult) fires with the actual
-// nsresult of the compose/send process (NS_OK on success, the real failure
-// code otherwise -- including a finishCryptoEncapsulation failure), driven
-// by nsMsgCompose's own internal completion notification rather than the
+function isCommonDialogFrom(win, composeWindows) {
+  try {
+    return (
+      win.document.documentElement.id === "commonDialogWindow" &&
+      composeWindows.has(win.opener)
+    );
+  } catch (e) {
+    return false;
+  }
+}
+
+const hookedComposeWindows = new Set();
+
+// TRIGGER: send failure -- the only trigger in this build (plus shutdown,
+// see below). Detecting it at all needs to bypass browser.compose.onAfterSend:
+// that WebExtension event structurally cannot see this failure. comm-central's
+// MsgComposeCommands.js (CompleteGenericSendMessage) `return`s from its
+// catch block on a send failure *before* ever reaching the
+// `window.dispatchEvent(new CustomEvent("aftersend"))` call that onAfterSend
+// is built on -- confirmed against the actual source, and against a real
+// profile where three failed sends in a row never fired onAfterSend once.
+// This hooks lower instead, at the same layer Thunderbird's own compose
+// window code uses to observe its own send outcome:
+// nsIMsgComposeStateListener (nsIMsgCompose.idl), registered via
+// gMsgCompose.RegisterStateListener() -- the exact same public, documented
+// interface MsgComposeCommands.js registers its own listener through.
+// ComposeProcessDone(aResult) fires with the actual nsresult of the
+// compose/send process (NS_OK on success, the real failure code otherwise
+// -- including a finishCryptoEncapsulation failure), driven by
+// nsMsgCompose's own internal completion notification rather than the
 // JS-level try/catch that swallows the exception in
 // CompleteGenericSendMessage.
 //
-// IMPORTANT: this does NOT auto-dismiss the failure dialog or auto-retry
-// the send, unlike earlier builds on this branch (v0.4.26 through 0.4.35).
-// Investigation of a real sent message (2026-09-01) found that retrying via
-// win.GenericSendMessage() a second time on the *same* compose window
-// reuses that window's nsIMsgComposeSecure instance (JS-visible as
-// gSMFields in MsgComposeCommands.js, created once at window-open time and
-// never recreated) -- and nsMsgComposeSecure.cpp's MimeCryptoHackCerts()
-// appends to its mCerts member (mCerts.AppendElement(cert)) without ever
-// clearing it between calls. A failed attempt followed by our own retry
-// therefore left the actual sent message encrypted with *duplicate*
-// RecipientInfo entries for every recipient (confirmed via ASN.1 inspection
-// of the resulting smime.p7m: 4 RecipientInfo instead of 2, two distinct
-// identities each appearing twice) -- and, worse, nobody could decrypt that
-// message at all, not even the sender's own Sent copy. nsIMsgComposeSecure
-// exposes no reset/clear method, and per its own IDL doc comment ("related
-// to exactly one email message while the user is composing it") a same-
-// window resend was arguably never a supported operation in the first
-// place -- this is very likely a real, previously-unnoticed Thunderbird bug
-// that a normal user manually clicking Send again on the same failed
-// window would also hit, not something specific to this add-on's retry.
-// Cleanup here only fixes cert9.db (and CertVerifier's cache) for whatever
-// the *next* send attempt turns out to be -- the current failure is left
-// for the user to see and act on normally (close/reopen the compose
-// window, or a new message).
+// After cleanup + reinit, the send is retried automatically, once, using a
+// freshly recreated nsIMsgComposeSecure (see recreateComposeSecure() above
+// -- this is what makes the retry actually safe). Confirmed via ASN.1
+// inspection of a real sent message (2026-09-01): reusing the *same*
+// nsIMsgComposeSecure instance (JS-visible as gSMFields in
+// MsgComposeCommands.js, created once at window-open time) across a
+// failed attempt and a retry left the message encrypted with *duplicate*
+// RecipientInfo entries for every recipient (nsMsgComposeSecure.cpp's
+// MimeCryptoHackCerts() appends to its mCerts member without ever clearing
+// it between BeginCryptoEncapsulation() calls) -- undecryptable by anyone,
+// not even the sender's own Sent copy. This is very likely a real,
+// previously-unnoticed Thunderbird bug (a manual resend on the same window
+// after any S/MIME send failure would hit it too, with or without this
+// add-on) -- recreateComposeSecure() sidesteps it entirely rather than
+// working around its symptoms.
+//
+// Two more pieces needed for a clean automatic retry:
+//   1. The failure also pops a modal "couldn't send" alert
+//      (MessageSend.sys.mjs's sendReport.displayReport(), a
+//      Services.prompt.alert() call) that blocks further interaction with
+//      the compose window until dismissed. Auto-closed via the same
+//      domwindowopened observer already used to find compose windows,
+//      matched by the dialog's stable id (commonDialogWindow) and its
+//      .opener being a compose window we're tracking (Services.ww.openWindow
+//      sets .opener to the parentWindow argument -- confirmed against
+//      toolkit/components/prompts/src/Prompter.sys.mjs).
+//   2. GenericSendMessage(msgType)'s msgType isn't included in
+//      ComposeProcessDone's own callback, so it's recorded separately by
+//      lightly wrapping GenericSendMessage (recording the argument only,
+//      not changing its behavior) whenever the user (or our own retry)
+//      calls it.
 function onComposeProcessDone(win, aResult) {
-  // Unconditional, regardless of trigger config -- added 2026-09-01 after a
-  // report of the same-window-resend warning appearing on what should have
-  // been a brand new window's first ever send attempt, even right after a
-  // Thunderbird restart. One live hypothesis: ComposeProcessDone might fire
-  // with some non-zero aResult for a reason unrelated to an actual user
-  // Send attempt (a spurious call during compose window setup, or some
-  // other internal compose-process step), which -- since
-  // win.__certCleanupSawFailure was being set on *any* non-zero aResult --
-  // would incorrectly flag a window as "already failed" before the user
-  // ever clicked Send. This line makes every call visible so that can be
-  // confirmed or ruled out from a real console-export log.
-  console.log(`certCleanup: ComposeProcessDone(0x${(aResult >>> 0).toString(16)})`);
   if (aResult === 0) {
     // NS_OK. Not using Cr.NS_OK to avoid depending on whether Cr
     // (Components.results) is available as a predefined global here the
     // same way Cc/Ci/Cu are -- NS_OK's value (0) is stable across all of
     // Gecko and won't change.
-    if (activeTriggers.sendSuccess) {
-      console.log("certCleanup: send succeeded, running cleanup");
-      cleanupAndReinit("on-send-success").catch((e) => {
-        Cu.reportError("certCleanup: cleanup on send-success failed: " + e);
-      });
-    }
+    win.__certCleanupHandling = false;
     return;
   }
-  // Marks this window as unsafe to resend from -- see
-  // wrapGenericSendMessage()'s warning below. This is set on *any* failure,
-  // independent of activeTriggers.sendError: the same-window-resend bug
-  // documented there is a real Thunderbird issue, not something specific to
-  // whether this add-on's own cleanup ran.
-  win.__certCleanupSawFailure = true;
-  if (!activeTriggers.sendError) {
+  if (win.__certCleanupHandling) {
+    // Either a duplicate notification of the failure already being
+    // handled, or the retry itself also failed -- can't tell which from
+    // here, but either way don't start an overlapping cleanup/retry cycle.
+    // Clearing the flag (rather than leaving it set) is what lets a later,
+    // genuinely new failure on this window still be handled.
+    console.error(
+      `certCleanup: ComposeProcessDone failed again while already handling a failure on this window (0x${(aResult >>> 0).toString(16)}), not retrying again`
+    );
+    win.__certCleanupHandling = false;
     return;
   }
-  // win.__certCleanupHandlingFailure guards against a second, overlapping
-  // cleanup pass for one failure: production testing found
-  // ComposeProcessDone firing *twice* for one real failure (root cause not
-  // fully pinned down -- possibly this Experiment's parent script
-  // re-evaluating and re-running its window-hooking loop, since MV3
-  // background contexts can be non-persistent and reload). Redundant
-  // cleanup isn't unsafe by itself (a second pass just finds nothing left
-  // to clean), but it's worth avoiding the noise and the extra
-  // enterprise-roots pref toggle. Reset once this pass finishes, not tied
-  // to any retry (there isn't one here) -- see registerStateListener's own,
-  // separate guard against a duplicate *registration* being the underlying
-  // cause.
-  if (win.__certCleanupHandlingFailure) {
-    console.log("certCleanup: duplicate ComposeProcessDone failure notification, ignoring");
-    return;
-  }
-  win.__certCleanupHandlingFailure = true;
+  win.__certCleanupHandling = true;
   console.log(
-    `certCleanup: send failed (0x${(aResult >>> 0).toString(16)}), running cleanup (no retry -- see comment above)`
+    `certCleanup: send failed (0x${(aResult >>> 0).toString(16)}), running cleanup`
   );
-  (async () => {
-    try {
-      await cleanupAndReinit("on-send-failure");
-    } catch (e) {
-      Cu.reportError("certCleanup: cleanup on send-failure failed: " + e);
-    } finally {
-      win.__certCleanupHandlingFailure = false;
-    }
-  })();
+  cleanupAndReinit("on-send-failure")
+    .then(() => recreateComposeSecure(win))
+    .then(() => {
+      console.log("certCleanup: retrying send with a fresh nsIMsgComposeSecure");
+      const msgType = win.__certCleanupLastMsgType ?? Ci.nsIMsgCompDeliverMode.Now;
+      return win.GenericSendMessage(msgType);
+    })
+    .catch((e) => {
+      win.__certCleanupHandling = false;
+      Cu.reportError("certCleanup: cleanup/retry after a failed send failed: " + e);
+    });
 }
 
 // win.gMsgCompose isn't necessarily ready by the window's "load" event --
@@ -450,106 +475,16 @@ function registerStateListener(win) {
   });
 }
 
-// TRIGGER: Send button/menu click, intercepted *before* the send actually
-// starts -- cleanup (and, if needed, CertVerifier reinit) run first, then
-// this replays the original action once cleanup finishes. Because this
-// runs before Thunderbird's own nsIMsgComposeSecure (gSMFields) for this
-// window has been touched by any attempt yet, it doesn't carry the same
-// same-window-retry risk documented on onComposeProcessDone above: there's
-// only ever one BeginCryptoEncapsulation() call on this window's
-// gSMFields for this send, not two.
-//
-// Historical note: an earlier trigger placed this close to the send itself
-// (v0.4.19/v0.4.24 on this branch, before reinitCertVerifier() existed)
-// was found to self-heal *worse* than other trigger placements -- the
-// reading glitch stopped self-healing on that same send and needed a full
-// restart, apparently because there was no normal Thunderbird activity
-// happening between the disruptive delete and the send to let Gecko
-// re-resolve things cleanly in between. reinitCertVerifier() may or may not
-// change that outcome -- this build makes the option available again to
-// test that specifically, it does not assume the answer.
-const SEND_COMMAND_IDS = new Set([
-  "button-send",
-  "cmd_sendButton",
-  "cmd_sendNow",
-  "cmd_sendLater",
-  "menu-item-send-now",
-]);
-
-function commandIdToDeliverMode(id) {
-  return id === "cmd_sendLater"
-    ? Ci.nsIMsgCompDeliverMode.Later
-    : Ci.nsIMsgCompDeliverMode.Now;
-}
-
-function hookSendButton(win) {
-  win.document.addEventListener(
-    "command",
-    (event) => {
-      if (!activeTriggers.sendButtonClick || win.__certCleanupInterceptingSend) {
-        return;
-      }
-      const id = event.target && event.target.id;
-      if (!SEND_COMMAND_IDS.has(id)) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      const msgType = commandIdToDeliverMode(id);
-      win.__certCleanupInterceptingSend = true;
-      console.log(`certCleanup: intercepted send-button click (${id}), running cleanup first`);
-      cleanupAndReinit("on-send-button")
-        .catch((e) => {
-          Cu.reportError("certCleanup: cleanup on send-button failed: " + e);
-        })
-        .then(() => {
-          win.__certCleanupInterceptingSend = false;
-          return win.GenericSendMessage(msgType);
-        });
-    },
-    true // capturing, so this sees the click before Thunderbird's own handler
-  );
-}
-
-// Warns (does not block) on any second GenericSendMessage() call on a
-// window that has already seen one failure -- see the long comment on
-// onComposeProcessDone above for the underlying bug this warns about
-// (confirmed 2026-09-01 via a real corrupted sent message: a same-window
-// resend, whether triggered by this add-on's own former auto-retry or by
-// the user manually clicking Send again, duplicates every recipient's
-// RecipientInfo and leaves the message undecryptable by anyone, including
-// the sender). Warning rather than blocking respects the user's own
-// judgment call (e.g. if they believe the failure was unrelated to this
-// bug) while making the risk visible instead of a silent trap.
 function wrapGenericSendMessage(win) {
   if (typeof win.GenericSendMessage !== "function") {
     console.error(
-      "certCleanup: GenericSendMessage not found on this compose window, can't warn about same-window resend"
+      "certCleanup: GenericSendMessage not found on this compose window, can't track/retry send mode"
     );
     return;
   }
   const original = win.GenericSendMessage;
   win.GenericSendMessage = function (msgType, ...rest) {
-    // Wrapped in try/catch deliberately: this warning must never be able to
-    // block the actual send underneath it. If Services.prompt.alert()
-    // throws in this context for any reason, the send has to proceed
-    // regardless -- a broken warning is a minor annoyance, a broken send is
-    // not.
-    if (win.__certCleanupSawFailure) {
-      try {
-        Services.prompt.alert(
-          win,
-          "cert-cleanup",
-          "Это окно письма уже пыталось отправиться и получило ошибку. Thunderbird не " +
-            "сбрасывает список получателей шифрования между попытками на одном и том же " +
-            "окне (известный баг) -- повторная отправка отсюда, скорее всего, отправит " +
-            "письмо, которое никто не сможет расшифровать, включая вас самих.\n\n" +
-            "Закройте это окно (черновик можно сохранить) и отправьте из нового."
-        );
-      } catch (e) {
-        Cu.reportError("certCleanup: same-window-resend warning failed to display: " + e);
-      }
-    }
+    win.__certCleanupLastMsgType = msgType;
     return original.call(this, msgType, ...rest);
   };
 }
@@ -559,9 +494,9 @@ function hookComposeWindow(win) {
     return;
   }
   win.__certCleanupHooked = true;
-  console.log(`certCleanup: hookComposeWindow, activeTriggers.windowOpen=${activeTriggers.windowOpen}`);
+  hookedComposeWindows.add(win);
+  win.addEventListener("unload", () => hookedComposeWindows.delete(win), { once: true });
   wrapGenericSendMessage(win);
-  hookSendButton(win);
   let attemptsLeft = GMSGCOMPOSE_POLL_MAX_ATTEMPTS;
   const tryRegister = () => {
     if (win.gMsgCompose && typeof win.gMsgCompose.RegisterStateListener === "function") {
@@ -578,17 +513,6 @@ function hookComposeWindow(win) {
     win.setTimeout(tryRegister, GMSGCOMPOSE_POLL_INTERVAL_MS);
   };
   tryRegister();
-
-  // TRIGGER: compose window open, proactive -- runs before any send is
-  // attempted at all, so it never touches this window's
-  // nsIMsgComposeSecure/gSMFields instance and can't interact with the
-  // same-window-retry issue documented on onComposeProcessDone above.
-  if (activeTriggers.windowOpen) {
-    console.log("certCleanup: new compose window opened, running cleanup");
-    cleanupAndReinit("on-window-open").catch((e) => {
-      Cu.reportError("certCleanup: cleanup on window-open failed: " + e);
-    });
-  }
 }
 
 function onWindowOpened(win) {
@@ -598,6 +522,11 @@ function onWindowOpened(win) {
       win.removeEventListener("load", onLoad);
       if (isComposeWindow(win)) {
         hookComposeWindow(win);
+        return;
+      }
+      if (isCommonDialogFrom(win, hookedComposeWindows)) {
+        console.log("certCleanup: auto-dismissing the send-failure alert dialog");
+        win.close();
       }
     },
     { once: true }
@@ -613,8 +542,8 @@ const domWindowOpenedObserver = {
   },
 };
 
-// Registers hooks for every current and future compose window, and the
-// earliest well-known Gecko shutdown phase (ShutdownPhase::
+// Registers the send-failure hook for every current and future compose
+// window, and the earliest well-known Gecko shutdown phase (ShutdownPhase::
 // AppShutdownConfirmed, topic "quit-application"). Called once from
 // getAPI() below (see the comment there for why module-level top-level
 // code isn't the right place for this), guarded so a second getAPI() call
@@ -622,30 +551,19 @@ const domWindowOpenedObserver = {
 let initialized = false;
 function initialize() {
   if (initialized) {
-    console.log("certCleanup: initialize() called again, already initialized");
     return;
   }
   initialized = true;
   registerShutdownBlocker();
   Services.obs.addObserver(domWindowOpenedObserver, "domwindowopened");
-  let alreadyOpenCount = 0;
   for (const win of Services.wm.getEnumerator("msgcompose")) {
     hookComposeWindow(win);
-    alreadyOpenCount += 1;
   }
-  console.log(
-    `certCleanup: initialize() done -- shutdown blocker registered, ` +
-      `domwindowopened observer registered, ${alreadyOpenCount} already-open compose window(s) hooked`
-  );
 }
 
 const SHUTDOWN_BLOCKER_NAME =
   "certCleanup: remove stale cert9.db duplicates before quit";
 
-// TRIGGER: app shutdown. Always runs, independent of activeTriggers --
-// there's no send in flight to interact badly with, and the original
-// (0.4.0) rationale still applies: whatever might go stale in Gecko's
-// cache doesn't matter if the process exits shortly after.
 async function onQuitApplication() {
   try {
     await cleanupAndReinit("quit-application");
@@ -670,13 +588,13 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
   // Experiment to become available to a WebExtension context -- unlike bare
   // module-level top-level code, it's guaranteed to run as soon as the
   // add-on actually needs this API, which is the right place for one-time
-  // setup like the listeners above (module-level code is unreliable here:
-  // Experiment "parent" scripts can be loaded lazily on first real API
-  // access rather than eagerly with the add-on, so with no WebExtension-side
-  // code touching this API at all, nothing would trigger the script to load
-  // in the first place -- see background.js's activate() call).
+  // setup like the shutdown blocker (module-level code turned out to be
+  // unreliable here in an earlier build on this branch: Experiment "parent"
+  // scripts can be loaded lazily on first real API access rather than
+  // eagerly with the add-on, so with no WebExtension-side code touching
+  // this API at all, nothing ever triggered the script to load in the
+  // first place).
   getAPI(context) {
-    console.log("certCleanup: getAPI() called");
     initialize();
     return {
       certCleanup: {
@@ -685,16 +603,10 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
         // schema.json for why background.js needs to make this call at all
         // rather than relying on getAPI() running on its own.
         activate: async () => {},
-        // Sets which trigger events are active (see activeTriggers above).
-        // Called by background.js once at startup with whatever's saved in
-        // storage.local, and again whenever the options page changes it.
-        configure: async (triggers) => {
-          setTriggers(triggers);
-        },
         // Exposed for manual/on-demand use (e.g. from the Browser Console
         // while testing), but not called from background.js on any
-        // schedule -- see onComposeProcessDone, hookComposeWindow, and
-        // onQuitApplication above for where cleanup actually runs.
+        // schedule -- see onComposeProcessDone above and onQuitApplication
+        // below for the only two places cleanup actually runs.
         cleanup: doCleanup,
       },
     };

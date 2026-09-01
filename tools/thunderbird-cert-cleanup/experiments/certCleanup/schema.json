@@ -6,7 +6,7 @@
         "name": "activate",
         "type": "function",
         "async": true,
-        "description": "Ensures this Experiment's privileged parent script has loaded and its listeners (the compose-window-open hook, the shutdown blocker) are registered. Thunderbird can load an Experiment's parent script lazily, on first access to its API from a WebExtension context, rather than eagerly with the add-on -- since this Experiment's real job is registering listeners for side effects rather than answering calls, nothing would otherwise ever touch the API to trigger that load. background.js calls this once at startup for exactly that reason; it has no effect beyond guaranteeing getAPI() has run.",
+        "description": "Ensures this Experiment's privileged parent script has loaded and its listeners (the failed-send hook, the shutdown blocker) are registered. Thunderbird can load an Experiment's parent script lazily, on first access to its API from a WebExtension context, rather than eagerly with the add-on -- since this Experiment's real job is registering listeners for side effects rather than answering calls, nothing would otherwise ever touch the API to trigger that load. background.js calls this once at startup for exactly that reason; it has no effect beyond guaranteeing getAPI() has run.",
         "parameters": []
       },
       {
@@ -15,24 +15,6 @@
         "async": true,
         "description": "Finds certificates known to NSS under more than one issuer+serial-matching record where at least one of those records lives on the OS Client Certs token, and deletes the other (stale, keyless) records. Returns the list of records deleted.",
         "parameters": []
-      },
-      {
-        "name": "configure",
-        "type": "function",
-        "async": true,
-        "description": "Sets which trigger events run cleanup: windowOpen, sendButtonClick, sendError, sendSuccess (each a boolean). Keys not present in the object passed are left unchanged from their current value. App shutdown always runs cleanup regardless of this configuration. Called by background.js once at startup with whatever's saved in storage.local, and again whenever the options page changes it.",
-        "parameters": [
-          {
-            "name": "triggers",
-            "type": "object",
-            "properties": {
-              "windowOpen": { "type": "boolean", "optional": true },
-              "sendButtonClick": { "type": "boolean", "optional": true },
-              "sendError": { "type": "boolean", "optional": true },
-              "sendSuccess": { "type": "boolean", "optional": true }
-            }
-          }
-        ]
       }
     ]
   }
