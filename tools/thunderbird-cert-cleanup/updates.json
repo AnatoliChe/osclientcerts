@@ -3,6 +3,18 @@
     "cert-cleanup-experiment@osclientcerts.dev": {
       "updates": [
         {
+          "version": "0.4.32",
+          "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.32-detailed-logging/cert-cleanup.xpi"
+        },
+        {
+          "version": "0.4.31",
+          "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.31-certverifier-reinit/cert-cleanup.xpi"
+        },
+        {
+          "version": "0.4.30",
+          "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.30-reinit-experiment/cert-cleanup.xpi"
+        },
+        {
           "version": "0.4.29",
           "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-cert-cleanup-v0.4.29-dedup-fix/cert-cleanup.xpi"
         },
