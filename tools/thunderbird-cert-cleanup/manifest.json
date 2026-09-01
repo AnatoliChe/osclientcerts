@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.5.5",
-  "description": "FRESH-GSMFIELDS-RETRY BUILD (v6): the new detailed logging (0.5.4) immediately found a real bug -- a MOZ_LOG capture showed the delayed (5s) post-send reinitCertVerifier() never firing at all, correlated with the user closing the compose window right after a successful send (completely normal). It used win.setTimeout(), a window-scoped timer that Gecko silently cancels along with all of that window's other pending timers when the window closes. Switched to the module-level setTimeout (imported from Timer.sys.mjs), which isn't tied to any compose window's lifecycle -- the whole point of this reinit is fixing global NSS state for reading mail in other windows, so it needs to survive the compose window closing.",
+  "version": "0.6.0",
+  "description": "PROACTIVE-ONLY BUILD: replaces every reactive/retry design tried since 0.5.0 with three proactive triggers and no retry. (1) New compose window -> unconditional CertVerifier rebuild, well before any send is attempted. (2) Send button/menu, intercepted before the real send starts -> remove a stale cert9.db duplicate only (no reinit), then the original send proceeds exactly once. (3) App shutdown -> remove a stale duplicate. Removing cleanup before this window's only send attempt eliminates the same-window-retry corruption risk (and the need for a fresh nsIMsgComposeSecure/checkRecipientCerts() rewarm) that 0.5.x needed but which kept breaking reading anyway even when it ran and reported success.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
