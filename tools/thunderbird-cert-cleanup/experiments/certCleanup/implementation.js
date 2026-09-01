@@ -28,6 +28,14 @@ const { setTimeout, clearTimeout } = ChromeUtils.importESModule(
   "resource://gre/modules/Timer.sys.mjs"
 );
 
+// Proves this script parsed and evaluated at all -- diagnostic added
+// 2026-09-01 after a report that neither the compose-window-open trigger
+// nor the (unconditional) shutdown cleanup ran. If this line is missing
+// from the console, the problem is upstream of this script (e.g. the
+// experiment_apis schema failing validation) rather than in the trigger
+// logic below.
+console.log("certCleanup: implementation.js evaluated");
+
 // TRIGGER-SELECTOR BUILD, not for production.
 //
 // Which of the four possible trigger events actually run cleanup, settable
@@ -467,6 +475,7 @@ function hookComposeWindow(win) {
     return;
   }
   win.__certCleanupHooked = true;
+  console.log(`certCleanup: hookComposeWindow, activeTriggers.windowOpen=${activeTriggers.windowOpen}`);
   hookSendButton(win);
   let attemptsLeft = GMSGCOMPOSE_POLL_MAX_ATTEMPTS;
   const tryRegister = () => {
@@ -528,14 +537,21 @@ const domWindowOpenedObserver = {
 let initialized = false;
 function initialize() {
   if (initialized) {
+    console.log("certCleanup: initialize() called again, already initialized");
     return;
   }
   initialized = true;
   registerShutdownBlocker();
   Services.obs.addObserver(domWindowOpenedObserver, "domwindowopened");
+  let alreadyOpenCount = 0;
   for (const win of Services.wm.getEnumerator("msgcompose")) {
     hookComposeWindow(win);
+    alreadyOpenCount += 1;
   }
+  console.log(
+    `certCleanup: initialize() done -- shutdown blocker registered, ` +
+      `domwindowopened observer registered, ${alreadyOpenCount} already-open compose window(s) hooked`
+  );
 }
 
 const SHUTDOWN_BLOCKER_NAME =
@@ -575,6 +591,7 @@ var certCleanup = class extends ExtensionCommon.ExtensionAPI {
   // code touching this API at all, nothing would trigger the script to load
   // in the first place -- see background.js's activate() call).
   getAPI(context) {
+    console.log("certCleanup: getAPI() called");
     initialize();
     return {
       certCleanup: {

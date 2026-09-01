@@ -25,7 +25,12 @@
           {
             "name": "triggers",
             "type": "object",
-            "additionalProperties": true
+            "properties": {
+              "windowOpen": { "type": "boolean", "optional": true },
+              "sendButtonClick": { "type": "boolean", "optional": true },
+              "sendError": { "type": "boolean", "optional": true },
+              "sendSuccess": { "type": "boolean", "optional": true }
+            }
           }
         ]
       }

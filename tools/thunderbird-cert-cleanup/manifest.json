@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.4.36",
-  "description": "TRIGGER-SELECTOR BUILD, not for production: adds an options page letting you pick any combination of four trigger events (compose window open, Send button click, send failure, send success) that run cleanup + CertVerifier reinit, persisted via storage.local and reconfigurable live. Also drops the auto-retry-on-failure behavior from earlier builds: retrying a send via GenericSendMessage() a second time on the same compose window was found (2026-09-01) to duplicate RecipientInfo entries in the resulting S/MIME message via a Thunderbird bug in nsMsgComposeSecure's uncleared mCerts, breaking decryption for everyone including the sender. The send-error trigger now only cleans up in the background, leaving the normal failure dialog visible.",
+  "version": "0.4.37",
+  "description": "TRIGGER-SELECTOR BUILD (v2, fixes configure() schema + adds load diagnostics): 0.4.36's configure() parameter schema used an unusual 'type: object, additionalProperties: true' shape with no 'properties' key -- suspected of failing Thunderbird's experiment_apis schema validation at startup, which would explain a report that neither the compose-window-open trigger nor the (unconditional) shutdown cleanup ran at all. Switches to an explicit properties list (the well-established pattern for object parameters in WebExtension schemas), and adds console.log lines confirming the script evaluated, getAPI()/initialize() ran, and each compose window's activeTriggers.windowOpen value at hook time, to pin down the failure precisely if this wasn't the actual cause.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",
