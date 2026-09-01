@@ -52,7 +52,7 @@ const { setTimeout, clearTimeout } = ChromeUtils.importESModule(
 // script has no equivalent of background.js's browser.runtime.getManifest()
 // (that's a WebExtension-context API, not available here), so there's no
 // way to read it back automatically.
-const VERSION = "0.6.4.5";
+const VERSION = "0.6.4.6";
 
 // Every action this build takes is logged through these two: each line
 // carries the version, a Date.now() timestamp (so it lines up with
@@ -127,7 +127,10 @@ async function doCleanup(email) {
   // CKO_CERTIFICATE rows (hex(a0)='00000001'); the nearby CKO_NSS_SMIME row
   // sharing the same email (class 0xCE534352, email blob NUL-terminated)
   // is left alone, as are trust rows.
-  const emailBytes = new TextEncoder().encode(email);
+  const emailBytes = new Uint8Array(email.length);
+  for (let i = 0; i < email.length; i++) {
+    emailBytes[i] = email.charCodeAt(i) & 0xff;
+  }
   const { Sqlite } = ChromeUtils.importESModule(
     "resource://gre/modules/Sqlite.sys.mjs"
   );
