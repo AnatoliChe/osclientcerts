@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- cert9.db cleanup",
-  "version": "0.5.0",
-  "description": "FRESH-GSMFIELDS-RETRY BUILD, not for production: single reactive-on-send-failure trigger (no trigger selector, back to the v0.7.0/trunk shape) plus a shutdown cleanup, both followed by a CertVerifier rebuild when cleanup finds something. Fixes (not just fences off) the duplicate-RecipientInfo corruption bug found 2026-09-01: the automatic retry now uses a freshly recreated nsIMsgComposeSecure instance, with its recipient-cert cache rewarmed via Thunderbird's own getEncryptionCompatibleRecipients()/checkRecipientCerts(), instead of reusing the failed attempt's -- so BeginCryptoEncapsulation() only ever runs once per instance.",
+  "version": "0.5.1",
+  "description": "FRESH-GSMFIELDS-RETRY BUILD (v2): 0.5.0 was reported to still break reading after the auto-retry. Hypothesis: recreateComposeSecure()'s own checkRecipientCerts() call does a fresh certificate verification pass (asyncFindCertByEmailAddr, genuinely touching NSS) -- the same category of event (getCerts() alone, zero writes) that's been shown all session to disturb NSS's cert-resolution state for the rest of the session unless followed by a CertVerifier rebuild. cleanupAndReinit()'s reinit ran *before* this fresh disturbance, not after. Adds a second, unconditional reinitCertVerifier() call right after the cache rewarm, immediately before the retry send -- so the rebuild is always the last thing touching NSS before the send, regardless of what recreateComposeSecure() itself just did.",
   "browser_specific_settings": {
     "gecko": {
       "id": "cert-cleanup-experiment@osclientcerts.dev",

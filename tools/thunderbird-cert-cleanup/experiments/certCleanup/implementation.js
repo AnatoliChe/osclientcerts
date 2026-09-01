@@ -428,6 +428,22 @@ function onComposeProcessDone(win, aResult) {
   cleanupAndReinit("on-send-failure")
     .then(() => recreateComposeSecure(win))
     .then(() => {
+      // recreateComposeSecure()'s own checkRecipientCerts() call just did a
+      // fresh certificate verification pass (asyncFindCertByEmailAddr,
+      // genuinely touching NSS) -- reported 2026-09-01 to break reading the
+      // same way any other cert-lookup/verification event has all session
+      // (getCerts() alone, with zero writes, was enough back in the
+      // earliest tests). cleanupAndReinit() above already reinitialized
+      // CertVerifier once, but that was *before* this fresh disturbance --
+      // do it again now, right before the actual retry, so the last thing
+      // that touches NSS before the send is always the rebuild, not a
+      // lookup it doesn't know about. Unconditional (not gated on cleanup
+      // having found something this time): the disturbance here is from
+      // checkRecipientCerts, not from a cert9.db delete.
+      console.log("certCleanup: reinitializing CertVerifier again after cache rewarm");
+      return reinitCertVerifier();
+    })
+    .then(() => {
       console.log("certCleanup: retrying send with a fresh nsIMsgComposeSecure");
       const msgType = win.__certCleanupLastMsgType ?? Ci.nsIMsgCompDeliverMode.Now;
       return win.GenericSendMessage(msgType);
