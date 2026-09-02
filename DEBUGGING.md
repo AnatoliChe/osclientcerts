@@ -200,20 +200,25 @@ and signing then fails silently rather than falling through or producing a diagn
 lives entirely in NSS/Thunderbird's own certificate database handling -- this module never writes
 to `cert9.db` and has no way to prevent NSS from caching what it sees.
 
-Recommended fix: install
+Recommended fix, option 1 (plugin): install
 [`tools/thunderbird-cert-cleanup/`](../tools/thunderbird-cert-cleanup), a small internal
-Thunderbird add-on that finds and removes exactly this stale duplicate automatically (at
-Thunderbird shutdown, and again -- automatically retrying the send -- the moment a signing
-failure actually happens), so signing self-heals before anyone notices it broke for long. Since
-0.7.0 it also rebuilds Gecko's own certificate-verification cache after each cleanup, so this
-doesn't come at the cost of temporarily breaking S/MIME decryption of other messages the way earlier
-versions could. It does *not* go
+Thunderbird add-on that finds and removes exactly this stale duplicate automatically on three
+proactive triggers (compose-window open, before each send, and at shutdown) without touching NSS
+on the send path, so signing self-heals and reading incoming mail keeps working. It reads
+`cert9.db` directly and compares raw certificate bytes against what this module currently serves --
+see its README for the full mechanism and how it's confirmed safe.
+
+Recommended fix, option 2 (native, in the DLL itself since 0.8.0): set the environment variable
+`OSCLIENTCERTS=1` before starting Thunderbird. The DLL then runs its own in-process, out-of-band
+cleanup, opening `cert9.db` directly from Rust (via `rusqlite`) with no Gecko/XPCOM/JS involvement
+-- Gecko is never told anything happened, so decryption of other messages is not corrupted. It is
+off by default (`OSCLIENTCERTS` unset/0). See `src/cert9_cleanup.rs` and the README.
+
+Either way, this module does *not* go
 through the "Delete or Distrust" UI/API -- `nsIX509CertDB.getCerts()` (the only cert-listing API
 exposed to a Thunderbird add-on) silently deduplicates a cert9.db row with the live token object
 representing the same certificate, so it never even shows the duplicate as a separate entry while
-this module is loaded, i.e. exactly when you'd need to find and delete it. The add-on instead reads
-`cert9.db` directly and compares raw certificate bytes against what this module currently serves --
-see its README for the full mechanism and how it's confirmed safe.
+this module is loaded, i.e. exactly when you'd need to find and delete it.
 
 To fix a single occurrence by hand instead: open Certificate Manager, find the tab that lists
 certificates *without* an associated private key (labeled "Other People's Certificates" or similar

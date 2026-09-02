@@ -39,6 +39,8 @@ mod backend_macos;
 mod backend_other;
 #[cfg(target_os = "windows")]
 mod backend_windows;
+#[cfg(target_os = "windows")]
+mod cert9_cleanup;
 mod mechanism;
 
 use manager::ManagerProxy;
@@ -128,6 +130,13 @@ extern "C" fn C_Initialize(_pInitArgs: CK_C_INITIALIZE_ARGS_PTR) -> CK_RV {
         return CKR_CRYPTOKI_ALREADY_INITIALIZED;
     }
     *manager_guard = Some(ManagerProxy::new());
+    // Native cert9.db cleanup (see cert9_cleanup.rs). Gated behind the
+    // OSCLIENTCERTS=1 environment variable, so it's off by default; the
+    // background thread is only spawned when that variable is set. Safe to
+    // call unconditionally here: it is idempotent across repeated
+    // C_Initialize calls and no-ops when disabled.
+    #[cfg(target_os = "windows")]
+    cert9_cleanup::spawn_background_thread();
     debug!("C_Initialize: CKR_OK");
     CKR_OK
 }

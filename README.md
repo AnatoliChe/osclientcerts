@@ -181,6 +181,32 @@ the updated file at the same path.
 If decryption or signing fails, see [DEBUGGING.md](DEBUGGING.md) for collecting provider and
 Thunderbird logs.
 
+### Built-in cert9.db cleanup (stale signing-certificate duplicate)
+
+Over time NSS can cache a second, keyless copy of your own signing certificate into its
+`cert9.db`, which silently breaks outgoing S/MIME signing (see
+[tools/thunderbird-cert-cleanup](tools/thunderbird-cert-cleanup) and
+[DEBUGGING.md](DEBUGGING.md#smime-signing-failures) for the full background). Since 0.8.0 the DLL
+can remove that stale duplicate itself, in-process, out-of-band:
+
+- It opens `cert9.db` directly from this Rust code (via `rusqlite` with bundled SQLite, no
+  Gecko/XPCOM/JS involved at any point) and every 5 seconds deletes any persisted
+  `CKO_CERTIFICATE` row whose DER matches one of the provider's live certificates. Because Gecko
+  is never told anything happened, it does not corrupt S/MIME decryption of incoming mail the way
+  every earlier Gecko-side mechanism did.
+- The cleanup is **off by default**. To enable it, set the environment variable `OSCLIENTCERTS=1`
+  before starting Thunderbird (a user/system variable, or a launcher script — it must be present
+  before the DLL is loaded). If `OSCLIENTCERTS` is unset, `0`, or any other value, the cleanup
+  never runs.
+- The profile directory is located by parsing `%APPDATA%\Thunderbird\profiles.ini`, or you can
+  point it directly at a profile with `OSCLIENTCERTS_PROFILE_DIR=<path>`.
+
+Alternatively/additionally you can deploy the cleanup plugin
+([tools/thunderbird-cert-cleanup](tools/thunderbird-cert-cleanup)) — an Enterprise-Policy
+Thunderbird add-on (0.8.0, version-synced with the DLL) that removes the same duplicate on a
+proactive schedule without touching NSS on the send path. The DLL's native cleanup and the plugin
+are independent ways to solve the same underlying problem; choose whichever fits your deployment.
+
 ### Certificate trust: Windows vs. Thunderbird
 
 Windows and Thunderbird each keep their own, independent certificate trust store, and NSS's S/MIME

@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file. Pre-built DLLs 
 are published on the GitHub
 [releases page](https://github.com/AnatoliChe/osclientcerts/releases).
 
+## 0.8.0 - 2026-09-02
+
+- Native, in-process cert9.db cleanup (now version-synced with the cleanup plugin, which also
+  reached 0.8.0): the DLL itself removes the stale, keyless duplicate copy of your signing
+  certificate that NSS caches into `cert9.db` (see `tools/thunderbird-cert-cleanup/README.md` for
+  the full background). Unlike every Gecko-side cleanup mechanism tried before, it opens `cert9.db`
+  directly from Rust via `rusqlite` (bundled SQLite) with no Gecko/XPCOM/JS involvement, so Gecko
+  is never told anything happened and S/MIME decryption of incoming mail is not corrupted.
+- The cleanup is **off by default**: it only runs when the environment variable `OSCLIENTCERTS` is
+  set to exactly `1` before Thunderbird starts (a controlled per-machine rollout switch). If
+  `OSCLIENTCERTS` is unset, `0`, or anything else, the cleanup never runs. You can alternatively
+  use the cleanup plugin (`tools/thunderbird-cert-cleanup`) instead; the two are independent ways
+  to solve the same problem.
+- Background thread polls every 5 seconds, deleting any persisted `CKO_CERTIFICATE` row (`a0`)
+  whose DER (`a11`) matches one of the provider's live certificates. The profile directory is
+  located via `profiles.ini`, or overridden directly with `OSCLIENTCERTS_PROFILE_DIR`.
+
 ## 0.4.1 - 2026-08-26
 
 - Added an NSS regression harness (`tests/nss-regression/`, `scripts/nss-regression-test.sh`,

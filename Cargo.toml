@@ -1,6 +1,6 @@
 [package]
 name = "osclientcerts"
-version = "0.4.3"
+version = "0.8.0"
 authors = ["Dana Keeler <dkeeler@mozilla.com>", "AnatoliChe <AnatoliChe@gmail.com>"]
 edition = "2024"
 description = "PKCS#11 module exposing OS certificate stores as PKCS#11 tokens; standalone Windows x64 DLL fork of Mozilla's osclientcerts adapted for Thunderbird S/MIME with non-exportable CNG keys"
@@ -34,6 +34,14 @@ version = "0.5"
 [target."cfg(target_os = \"windows\")".dependencies.winapi]
 version = "0.3"
 features = ["wincrypt", "bcrypt", "errhandlingapi", "ncrypt"]
+
+[target."cfg(target_os = \"windows\")".dependencies.rusqlite]
+# "bundled" compiles SQLite from source as part of this crate instead of
+# linking a system library, so the Windows CI runner (and anyone building
+# this from source) doesn't need a separate SQLite dev package -- same
+# tradeoff the "bundled" feature is designed for.
+version = "0.31"
+features = ["bundled"]
 
 [build-dependencies]
 bindgen = "0.72"
