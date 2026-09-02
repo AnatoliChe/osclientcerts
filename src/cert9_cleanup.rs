@@ -29,6 +29,13 @@
 //! Gecko/XPCOM/JS involved at any point) might avoid whatever Gecko-side
 //! invalidation is actually responsible for the corruption, simply because
 //! Gecko is never told anything happened.
+//!
+//! This (0.8.0) build additionally gates the whole cleanup behind the
+//! `OSCLIENTCERTS` environment variable: the background thread is only
+//! spawned when that variable is set to exactly "1". This lets the same
+//! DLL ship with cleanup OFF by default (unset/0/any-other) and be switched
+//! on per-machine for a controlled rollout, so it can be A/B compared
+//! against the plugin-based (0.8.0) cleanup path without rebuilding.
 
 use log::{debug, error, info};
 use rusqlite::{Connection, OpenFlags};
@@ -51,6 +58,14 @@ const CKO_CERTIFICATE_BYTES: [u8; 4] = [0, 0, 0, 1];
 /// short, unconditional poll catches it quickly without needing to
 /// synchronize with any particular Thunderbird operation at all.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Master switch for the whole native cleanup: cleanup only runs when this
+/// environment variable is set to exactly "1". If it is unset, set to "0",
+/// or set to anything else, the background thread is never spawned at all.
+/// Set it via the same means as `OSCLIENTCERTS_PROFILE_DIR` (see below) --
+/// a user/system environment variable, or a launcher script, set *before*
+/// Thunderbird starts.
+const CLEANUP_ENABLE_ENV_VAR: &str = "OSCLIENTCERTS";
 
 /// Env var that, if set, names the profile directory directly and skips
 /// `profiles.ini` parsing entirely. Needed for setups `profiles.ini`
@@ -225,7 +240,22 @@ static SPAWN_ONCE: Once = Once::new();
 /// Idempotent: C_Initialize can legitimately be called more than once over
 /// this module's lifetime in the same process (e.g. after a C_Finalize),
 /// and this must not spawn a second thread each time.
+///
+/// Gated on `OSCLIENTCERTS`: the thread is only spawned when that variable
+/// is set to exactly "1"; otherwise (unset, "0", or any other value) the
+/// cleanup never runs, and a single informational log line records why.
 pub fn spawn_background_thread() {
+    let gate_ok = match std::env::var(CLEANUP_ENABLE_ENV_VAR) {
+        Ok(value) => value == "1",
+        Err(_) => false,
+    };
+    if !gate_ok {
+        info!(
+            "cert9_cleanup: {} not set to \"1\" (got unset/0/other), cleanup disabled",
+            CLEANUP_ENABLE_ENV_VAR
+        );
+        return;
+    }
     SPAWN_ONCE.call_once(|| {
         std::thread::spawn(|| {
             info!("cert9_cleanup: background thread started");
