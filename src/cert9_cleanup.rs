@@ -43,7 +43,7 @@ use std::path::PathBuf;
 use std::sync::Once;
 use std::time::Duration;
 
-use crate::backend_windows::{list_objects, Object};
+use crate::backend_windows::{Object, list_objects};
 
 /// CKO_CERTIFICATE, as stored in cert9.db's own `nssPublic` table (column
 /// `a0`, one row per PKCS #11 object -- confirmed against a real profile's
@@ -102,7 +102,10 @@ const PROFILE_DIR_OVERRIDE_ENV_VAR: &str = "OSCLIENTCERTS_PROFILE_DIR";
 /// `OSCLIENTCERTS_PROFILE_DIR` for those cases.
 fn find_profile_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var(PROFILE_DIR_OVERRIDE_ENV_VAR) {
-        debug!("cert9_cleanup: using {} = {}", PROFILE_DIR_OVERRIDE_ENV_VAR, dir);
+        debug!(
+            "cert9_cleanup: using {} = {}",
+            PROFILE_DIR_OVERRIDE_ENV_VAR, dir
+        );
         return Some(PathBuf::from(dir));
     }
 
@@ -161,8 +164,16 @@ fn find_profile_dir() -> Option<PathBuf> {
     let chosen = sections
         .iter()
         .find(|s| s.name.starts_with("Install") && s.path.is_some())
-        .or_else(|| sections.iter().find(|s| s.name.starts_with("Profile") && s.is_default))
-        .or_else(|| sections.iter().find(|s| s.name.starts_with("Profile") && s.path.is_some()))?;
+        .or_else(|| {
+            sections
+                .iter()
+                .find(|s| s.name.starts_with("Profile") && s.is_default)
+        })
+        .or_else(|| {
+            sections
+                .iter()
+                .find(|s| s.name.starts_with("Profile") && s.path.is_some())
+        })?;
 
     let path = chosen.path.as_ref()?;
     if chosen.is_relative {
