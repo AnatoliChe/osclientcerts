@@ -1,0 +1,11 @@
+{
+  "name": "thunderbird-forward-decrypt",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "jest --verbose"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  }
+}
