@@ -577,15 +577,30 @@ async function experimentalHandleEmbedded(tabId, messageId) {
       debug(`[experiment][deep] messages.listAttachments(${messageId}) =>`, (atts || []).map(a =>
         ({ name: a.name, size: a.size, partName: a.partName, contentType: a.contentType })));
       for (const a of (atts || [])) {
-        try {
-          const f = await browser.messages.getAttachmentFile(a.id);
-          debug(`[experiment][deep] getAttachmentFile("${a.name}") OK: size=${f && f.size} type=${f && f.type}`);
-        } catch (e2) {
-          warn(`[experiment][deep] getAttachmentFile("${a && a.name}") FAILED:`, e2.message || e2);
+        for (const pn of [a.partName].filter(Boolean)) {
+          try {
+            const f = await browser.messages.getAttachmentFile(messageId, pn);
+            debug(`[experiment][deep] getAttachmentFile(${messageId}, "${pn}") OK: size=${f && f.size} type=${f && f.type}`);
+          } catch (e2) {
+            warn(`[experiment][deep] getAttachmentFile(${messageId}, "${pn}") FAILED:`, e2.message || e2);
+          }
         }
       }
     } catch (e) {
       warn(`[experiment][deep] messages.listAttachments FAILED:`, e.message || e);
+    }
+
+    /* Try retrieving the decrypted inner parts directly by their partName.
+     * The inline image src / txt are at part 1.x inside the smime.p7m CMS;
+     * if getAttachmentFile can address them from the decrypted message, we
+     * can recover the images/attachments for the forward. */
+    for (const pn of ["1", "1.1", "1.1.1", "1.1.1.1", "1.1.1.1.2", "1.1.1.1.3", "1.1.2", "1.2"]) {
+      try {
+        const f = await browser.messages.getAttachmentFile(messageId, pn);
+        debug(`[experiment][deep] getAttachmentFile(${messageId}, "${pn}") OK: size=${f && f.size} type=${f && f.type}`);
+      } catch (e3) {
+        debug(`[experiment][deep] getAttachmentFile(${messageId}, "${pn}") ->`, (e3 && e3.message) || e3);
+      }
     }
   } finally {
     embeddedExperimentRunning = false;
