@@ -418,58 +418,92 @@ async function rebuildForwardCompose(tabId, messageId, composeDetails) {
 /* ======================================================================
  * handleEmbeddedForward
  * Final logic for a message/rfc822 container that is an S/MIME forward.
- * The decrypted body is NOT reachable through the messages API (getFull /
- * listInlineTextParts / listAttachments return only the smime envelope for
- * such nested containers), so we materialize it by opening a reply window on
- * the container, copying its decrypted body into the user's forward window,
- * and closing the reply window. (Real file attachments cannot be recovered
- * this way and are deferred.)
+ *
+ * The decrypted content (text body, inline images, and real file attachments)
+ * is NOT reachable through the messages API (getFull / listInlineTextParts /
+ * listAttachments return only the smime envelope for such nested containers),
+ * and there is no privileged Experiment in Manifest v3. However, when TB opens
+ * a *reply* compose window on the container it materializes the FULL decrypted
+ * content — including inline images and file attachments — because it decrypts
+ * on the fly for display.
+ *
+ * Therefore, for an embedded container we intercept the user's forward and
+ * instead:
+ *   1. open a reply window on the container,
+ *   2. wait for the decrypted body AND attachments to materialize,
+ *   3. clear the recipient fields (To/Cc/Bcc), turning the reply into a
+ *      de-facto "forward" that will NOT be sent back to the original sender,
+ *   4. close the original (empty) forward window,
+ *   5. leave the reply window open for the user to add new recipients + send.
+ *
+ * This preserves text, inline images, and attachments without any privileged
+ * API. The reply keeps its "Re:" subject, which is acceptable for a forward.
  * ====================================================================== */
 async function handleEmbeddedForward(tabId, messageId, composeDetails) {
-  log(`embedded forward: pulling decrypted body for tab ${tabId}, messageId ${messageId}`);
-  const isPlainText = composeDetails.isPlainText === true;
+  log(`embedded forward (messageId ${messageId}): rebuilding as reply with cleared recipients (fwd tab ${tabId})`);
 
-  let body = null;
   let replyTabId = null;
   try {
+    /* Open a reply on the container — this is the only way to materialize the
+     * full decrypted content (body + inline images + attachments). */
     const replyTab = await browser.compose.beginReply(messageId, "replyToSender");
-    if (replyTab && replyTab.id) {
-      replyTabId = replyTab.id;
-      selfOpenedTabIds.add(replyTabId);   /* never process our own window */
+    if (!replyTab || !replyTab.id) {
+      warn("[embedded] beginReply returned no reply tab — aborting");
+      return false;
     }
+    replyTabId = replyTab.id;
+    selfOpenedTabIds.add(replyTabId);   /* never re-process our own window */
+
+    /* Wait for compose details (body may load asynchronously). */
     const d = await waitForComposeDetails(replyTabId);
-    if (d) {
-      body = isPlainText ? (d.plainTextBody || d.body) : (d.body || d.plainTextBody);
-      debug(`[embedded] reply body extracted (${isPlainText ? "plain" : "html"}): len=${body ? body.length : 0}`);
-    } else {
-      debug(`[embedded] could not read reply compose details`);
+    if (!d) {
+      warn("[embedded] could not read reply compose details — aborting");
+      return;
     }
-  } catch (e) {
-    warn("[embedded] beginReply/getComposeDetails failed:", e);
-  } finally {
-    if (replyTabId) {
-      try { await browser.tabs.remove(replyTabId); } catch (_) { /* already closed */ }
-      debug(`[embedded] reply window ${replyTabId} closed`);
+    const bodyLen = (d.body ? d.body.length : 0) || (d.plainTextBody ? d.plainTextBody.length : 0);
+    debug(`[embedded] reply window ready: bodyLen=${bodyLen}`);
+
+    /* Give real file attachments / inline images time to materialize, exactly
+     * as the smime envelope can arrive late. Then clear every recipient field
+     * so the reply is not sent back to the original sender and effectively
+     * becomes a forward. */
+    await sleep(3000);
+    const replyDetails = await waitForComposeDetails(replyTabId);
+
+    const clear = {
+      toRecipients: [],
+      ccRecipients: [],
+      bccRecipients: [],
+    };
+    /* replyToRecipients not part of setComposeDetails in MV3 — omit it. */
+    try {
+      await browser.compose.setComposeDetails(replyTabId, clear);
+      log(`[embedded] recipients cleared on reply window ${replyTabId}`);
+    } catch (e2) {
+      warn("[embedded] clearing recipients FAILED:", e2);
     }
-  }
 
-  if (!body) {
-    warn("[embedded] no decrypted body obtained — leaving forward window untouched");
-    return;
-  }
+    /* Optionally surface the attachment list for the debug log. */
+    debug(`[embedded] reply attachments =>`,
+      (replyDetails && (replyDetails.attachments || []) || []).map(a =>
+        `${a.name}(${a.size},${(a.type || "")})`));
 
-  const details = {};
-  if (isPlainText) details.plainTextBody = body; else details.body = body;
-  details.selectedEncryptionTechnology = {
-    name: "S/MIME",
-    encryptBody: true,
-    signMessage: true,
-  };
-  try {
-    await browser.compose.setComposeDetails(tabId, details);
-    log(`[embedded] applied decrypted body (${isPlainText ? "plain" : "html"}, len=${body.length}) to forward tab ${tabId}`);
+    /* Close the original empty forward window — its content would be broken
+     * (only the smime envelope). The reply window now stands in for it. */
+    try {
+      await browser.tabs.remove(tabId);
+      log(`[embedded] closed original forward window ${tabId}; user operations now target reply window ${replyTabId}`);
+    } catch (e3) {
+      warn("[embedded] could not close original forward window:", e3);
+    }
+
+    log(`[embedded] DONE: reply-window-forward ${replyTabId} ready for new recipients`);
+    return true;
   } catch (e) {
-    warn("[embedded] setComposeDetails FAILED:", e);
+    warn("[embedded] handleEmbeddedForward FAILED:", e);
+    /* On failure, keep the reply window open so the user has something usable
+     * rather than the broken empty forward. */
+    return false;
   }
 }
 
@@ -670,24 +704,27 @@ async function processComposeTab(tabId) {
   const isEmbeddedContainer = (rootType || "").toLowerCase() === "message/rfc822";
 
   if (isEmbeddedContainer) {
-    /* message/rfc822 container: the decrypted body is not reachable through
-     * the messages API, so pull it from a reply window and copy it into the
-     * user's forward window (handleEmbeddedForward closes the reply window).
-     * If the diagnostic experiment flag is on, additionally open forward/reply
-     * windows and keep them for inspection. */
-    log(`processComposeTab(${tabId}): embedded message/rfc822 container — transferring decrypted body`);
+    /* message/rfc822 container: the full decrypted content (body, inline
+     * images, attachments) is only reachable through a reply window, which
+     * handleEmbeddedForward rebuilds and leaves for the user (original forward
+     * window is closed). The diagnostic experiment only runs if that fails. */
+    log(`processComposeTab(${tabId}): embedded message/rfc822 container — rebuilding as reply`);
+    let ok = false;
     try {
-      await handleEmbeddedForward(tabId, relatedMessageId, details);
+      ok = await handleEmbeddedForward(tabId, relatedMessageId, details);
     } catch (e) {
       warn("handleEmbeddedForward failed", e);
     }
-    if (experimentsEnabled) {
+    if (experimentsEnabled && !ok) {
       try {
         await experimentalHandleEmbedded(tabId, relatedMessageId);
       } catch (e) {
         warn("experimentalHandleEmbedded failed", e);
       }
     }
+    /* Successful reply-forward closes the original forward tab — no sweeps on
+     * it. On failure the tab may still be open; sweep it anyway. */
+    if (ok) return;
   } else {
     try {
       await rebuildForwardCompose(tabId, relatedMessageId, details);

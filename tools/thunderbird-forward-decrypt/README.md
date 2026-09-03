@@ -15,13 +15,15 @@ This add-on automatically:
    your compose format).
 4. **Re-adds** the real attachments from the original message (skipping inline images that
    rely on `cid:` references, which cannot be preserved).
-5. **Enables S/MIME encryption** on the forward, so the new recipients also receive the
-   message encrypted (and signed, if your identity supports it).
-6. For **embedded `message/rfc822` containers** (e.g. messages forwarded via another system
-   that wraps the S/MIME content inside an `rfc822` envelope): pulls the decrypted body
-   from a temporary reply window and applies it to the forward. Inline images and separate
-   file attachments from inside such containers are not recoverable via the WebExtension API
-   (only text).
+ 5. **Enables S/MIME encryption** on the forward, so the new recipients also receive the
+    message encrypted (and signed, if your identity supports it).
+ 6. For **embedded `message/rfc822` containers** (e.g. messages forwarded via another system
+    that wraps the S/MIME content inside an `rfc822` envelope): intercepts the forward and
+    instead opens a **reply** on the container, clears the recipient fields, and leaves that
+    reply as the compose window. A reply is the only way Thunderbird materializes the *full*
+    decrypted content of such a container (text + inline images + file attachments) that the
+    WebExtension `messages`/`compose` APIs cannot otherwise address. The original (empty)
+    forward window is closed automatically.
 
 You then add your new recipients and hit Send — the message goes out encrypted with your
 identity's certificate, just like composing from scratch.
@@ -80,17 +82,25 @@ inside a `message/rfc822` envelope before delivery. In that case the root Conten
 (`messages.getFull`, `listInlineTextParts`, `listAttachments`) do not surface the decrypted
 inner content at all.
 
-For this case the add-on opens a temporary **reply** window on the container (TB's reply
-path does materialize the decrypted body), copies its HTML/plain body into the user's
-forward window via `setComposeDetails`, and closes the reply window. Inline images from
-inside the container cannot be recovered this way — they remain as `imap://`-based `src`
-references that break for the recipient — but the **full decrypted text** is transferred.
+For this case the add-on intercepts the forward and instead:
+1. Opens a **reply** window on the container (`beginReply`). A reply is the one
+   path where Thunderbird materializes the *entire* decrypted content — text body,
+   inline images, and real file attachments — because it decrypts on the fly while
+   constructing the compose window.
+2. Waits (≈3 s) for the decrypted body and attachments to settle in.
+3. **Clears the recipient fields** (`toRecipients`, `ccRecipients`, `bccRecipients`)
+   so the reply is not sent back to the original sender — it effectively becomes a
+   forward.
+4. **Closes the original (empty) forward window** and leaves the reply window open
+   for the user to add new recipients and hit Send.
 
-The `experiments` checkbox in the add-on options (Off by default) additionally keeps the
-diagnostic reply/forward windows open for inspection. This is only for debugging and is
-safe — the add-on's own guard sets (`selfOpenedTabIds`, `handledEmbeddedMessageIds`,
-`embeddedExperimentRunning`) prevent the re-entrancy cascade that once caused thousands
-of compose windows to open.
+This keeps text, inline images, and attachments intact without any privileged API.
+
+The `experiments` checkbox in the add-on options (Off by default) additionally runs a
+diagnostic probe that opens and inspects forward/reply windows. This is only for debugging
+and is safe — the add-on's own guard sets (`selfOpenedTabIds`,
+`handledEmbeddedMessageIds`, `embeddedExperimentRunning`) prevent the re-entrancy cascade
+that once caused thousands of compose windows to open.
 
 Two delayed sweeps (3 s and 8 s) handle the case where TB adds the `smime.p7m` attachment
 asynchronously after the initial pass. The `smime.p7m` envelope attachment is also removed
@@ -110,15 +120,17 @@ JavaScript WebExtension code.
 
 ## Limitations
 
-- **Inline images** in the original message that are referenced via `cid:` in the HTML body
-  cannot be preserved when re-adding them as regular attachments. They are skipped to avoid
-  broken image references. This affects messages with embedded screenshots or logos.
-- For **embedded `message/rfc822` containers**: only the decrypted text body is transferred
-  (via the reply-to-forward technique). Inline images remain as `imap://`-based `src`
-  references that will break for the recipient. Separate file attachments inside such
-  containers (e.g. a `.txt` file) are also not recoverable — the WebExtension messages API
-  does not address the inner CMS parts. A full solution would require a privileged Experiment
-  that decrypts the CMS blob with the user's private key.
+- **Inline images** in a *top-level* S/MIME message (root `application/pkcs7-mime`) that are
+  referenced via `cid:` in the HTML body cannot be preserved when the standard forward is
+  rebuilt: they are skipped to avoid broken image references. This affects messages with
+  embedded screenshots or logos. (Embedded `message/rfc822` containers that go through the
+  reply rebuild do keep their inline images.)
+- For **embedded `message/rfc822` containers**, the forward becomes a **reply** with cleared
+  recipients rather than a plain "Fwd:" window. The subject shows as `Re: ...` and the reply
+  attribution header differs from a true forward. This is the only MV3-viable way to preserve
+  the full decrypted content (text + inline images + attachments) of such a container — the
+  WebExtension `messages`/`compose` APIs do not address the inner CMS parts, and privileged
+  Experiments are not available in Manifest v3.
 - **Forward as attachment** (`.eml` mode) is not handled — the add-on only operates on
   inline forwards (the default).
 - The forwarded message does not include the original's cryptographic signature envelope.
