@@ -1,0 +1,28 @@
+[
+  {
+    "namespace": "ForwardIntercept",
+    "description": "Privileged interception of the Forward compose flow for embedded message/rfc822 S/MIME containers. When a user forwards such a message, the compose-type is redirected to a Reply before the compose window is created, so only a single reply window opens (no Forward-window flash) carrying the full decrypted content.",
+    "functions": [
+      {
+        "name": "getEnabled",
+        "type": "function",
+        "description": "Whether the Forward->Reply interception is currently active.",
+        "async": true,
+        "parameters": []
+      },
+      {
+        "name": "setEnabled",
+        "type": "function",
+        "description": "Enable or disable the Forward->Reply interception.",
+        "async": true,
+        "parameters": [
+          {
+            "name": "enabled",
+            "type": "boolean",
+            "description": "True to intercept, false to pass through untouched."
+          }
+        ]
+      }
+    ]
+  }
+]

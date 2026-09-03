@@ -24,6 +24,7 @@ zip -r -X "${OUT}" \
     background.js \
     options.html \
     options.js \
+    api \
     -x '*.DS_Store'
 
 echo "Built: ${OUT}"

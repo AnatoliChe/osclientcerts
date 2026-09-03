@@ -82,7 +82,19 @@ inside a `message/rfc822` envelope before delivery. In that case the root Conten
 (`messages.getFull`, `listInlineTextParts`, `listAttachments`) do not surface the decrypted
 inner content at all.
 
-For this case the add-on intercepts the forward and instead:
+**v0.2.2 (TEST): privileged `ForwardIntercept` Experiment.** The add-on now ships an
+Experiment API (`experiment_apis`, supported in Manifest V3). When enabled via the
+`experiments` option, it wraps `nsIMsgComposeService` and, at the moment a *forward* of an
+embedded container is initiated, **redirects the compose type to a Reply before the compose
+window is created**. The result is a single reply window with the full decrypted content and
+**no empty Forward-window flash**. The reply window still gets its recipients cleared and its
+`Re:` → `Fwd:` subject retitled by the background script, exactly as below.
+
+This test build verifies whether the `nsIMsgComposeService.OpenComposeWindow(WithParams)`
+methods are reassignable from an Experiment in current Thunderbird — look for the
+`[ForwardIntercept] compose service wrapped; patch APPLIED=...` line in the Error Console.
+
+If the Experiment is unavailable or disabled, the classic unprivileged fallback is used:
 1. Opens a **reply** window on the container (`beginReply`). A reply is the one
    path where Thunderbird materializes the *entire* decrypted content — text body,
    inline images, and real file attachments — because it decrypts on the fly while
@@ -96,13 +108,11 @@ For this case the add-on intercepts the forward and instead:
 5. **Closes the original (empty) forward window** and leaves the reply window open
    for the user to add new recipients and hit Send.
 
-This keeps text, inline images, and attachments intact without any privileged API.
-
-The `experiments` checkbox in the add-on options (Off by default) additionally runs a
-diagnostic probe that opens and inspects forward/reply windows. This is only for debugging
-and is safe — the add-on's own guard sets (`selfOpenedTabIds`,
-`handledEmbeddedMessageIds`, `embeddedExperimentRunning`) prevent the re-entrancy cascade
-that once caused thousands of compose windows to open.
+This keeps text, inline images, and attachments intact. The `experiments` checkbox in the
+add-on options (Off by default) also runs a diagnostic probe that opens and inspects
+forward/reply windows. This is only for debugging and is safe — the add-on's own guard sets
+(`selfOpenedTabIds`, `handledEmbeddedMessageIds`, `embeddedExperimentRunning`) prevent the
+re-entrancy cascade that once caused thousands of compose windows to open.
 
 Two delayed sweeps (3 s and 8 s) handle the case where TB adds the `smime.p7m` attachment
 asynchronously after the initial pass. The `smime.p7m` envelope attachment is also removed
@@ -117,8 +127,10 @@ asynchronously after the initial pass. The `smime.p7m` envelope attachment is al
 | `tabs`          | Detect compose windows (`tab.type === "messageCompose"`).                   |
 | `storage`       | Store the debug and experiment toggles (options page).                      |
 
-No host permissions, no Experiment, no native messaging. The add-on is entirely
-JavaScript WebExtension code.
+**v0.2.2 adds an Experiment API** (`ForwardIntercept`, declared under `experiment_apis`).
+Including an Experiment replaces Thunderbird's per-permission prompt with a single
+"full, unrestricted access" install prompt, and it runs with access to the main process.
+The Experiment is inert unless the `experiments` option is enabled.
 
 ## Limitations
 
@@ -130,9 +142,12 @@ JavaScript WebExtension code.
 - For **embedded `message/rfc822` containers**, the forward becomes a **reply** with cleared
   recipients rather than a plain "Fwd:" window. The subject is retitled `Re:` → `Fwd:`, but
   the reply attribution header still differs slightly from a true forward. This is the only
-  MV3-viable way to preserve the full decrypted content (text + inline images + attachments)
-  of such a container — the WebExtension `messages`/`compose` APIs do not address the inner
-  CMS parts, and privileged Experiments are not available in Manifest v3.
+  way to preserve the full decrypted content (text + inline images + attachments) of such a
+  container — the WebExtension `messages`/`compose` APIs do not address the inner CMS parts.
+  v0.2.2 redirects the forward at compose-open time via the `ForwardIntercept` Experiment
+  (single window, no flash); otherwise the unprivileged two-window fallback is used.
+  **Note:** the Experiment path is a test — it depends on whether `nsIMsgComposeService`
+  methods are reassignable from an Experiment in your Thunderbird build.
 - **Forward as attachment** (`.eml` mode) is not handled — the add-on only operates on
   inline forwards (the default).
 - The forwarded message does not include the original's cryptographic signature envelope.

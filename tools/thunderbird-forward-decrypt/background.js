@@ -26,7 +26,7 @@ async function loadDebugFlag() {
 }
 
 // Listen for storage changes (real-time toggle without restart)
-browser.storage.onChanged.addListener((changes, area) => {
+browser.storage.onChanged.addListener(async (changes, area) => {
   if (area === "local") {
     if (changes.debug) {
       debugEnabled = !!changes.debug.newValue;
@@ -35,6 +35,15 @@ browser.storage.onChanged.addListener((changes, area) => {
     if (changes.experiments) {
       experimentsEnabled = !!changes.experiments.newValue;
       log(`embedded experiment ${experimentsEnabled ? "ENABLED" : "DISABLED"}`);
+      /* Reflect the toggle into the privileged ForwardIntercept experiment. */
+      try {
+        if (browser.ForwardIntercept) {
+          const ok = await browser.ForwardIntercept.setEnabled(experimentsEnabled);
+          log(`ForwardIntercept runtime ${experimentsEnabled ? "ENABLED" : "DISABLED"} (${ok})`);
+        }
+      } catch (e) {
+        warn("ForwardIntercept runtime toggle failed:", e);
+      }
     }
   }
 });
@@ -537,6 +546,56 @@ async function handleEmbeddedForward(tabId, messageId, composeDetails) {
 }
 
 /* ======================================================================
+ * handleExperimentReplyTab
+ * When the ForwardIntercept experiment redirects an embedded message/rfc822
+ * forward into a reply window, that window opens with type "reply". Unlike
+ * handleEmbeddedForward we do NOT open a new reply (one is already open);
+ * we just clear the recipient fields (To/Cc/Bcc) and retitle the "Re:" subject
+ * to "Fwd:", turning the reply into a de-facto forward. Runs after the reply
+ * body/attachments have materialized.
+ * ====================================================================== */
+async function handleExperimentReplyTab(tabId, messageId) {
+  log(`[experiment] reply window (tab ${tabId}) from redirected forward on messageId ${messageId}: clearing recipients + retitling`);
+
+  /* Give real file attachments / inline images time to materialize (mirrors
+   * handleEmbeddedForward). */
+  await sleep(3000);
+  const d = await waitForComposeDetails(tabId);
+  if (!d) {
+    warn(`[experiment] reply window ${tabId}: could not read compose details`);
+    return false;
+  }
+
+  try {
+    await browser.compose.setComposeDetails(tabId, {
+      toRecipients: [],
+      ccRecipients: [],
+      bccRecipients: [],
+    });
+    log(`[experiment] recipients cleared on reply window ${tabId}`);
+  } catch (e2) {
+    warn("[experiment] clearing recipients FAILED:", e2);
+  }
+
+  try {
+    const cur = await waitForComposeDetails(tabId);
+    const subject = (cur && cur.subject) || "";
+    const fwdSubject = retitleReplyToForward(subject);
+    if (fwdSubject) {
+      await browser.compose.setComposeDetails(tabId, { subject: fwdSubject });
+      log(`[experiment] subject retitled: "${subject}" -> "${fwdSubject}"`);
+    } else {
+      debug(`[experiment] subject unchanged (no "Re:" prefix): "${subject}"`);
+    }
+  } catch (e4) {
+    warn("[experiment] retitling subject FAILED:", e4);
+  }
+
+  log(`[experiment] DONE: reply-window-forward ${tabId} ready for new recipients`);
+  return true;
+}
+
+/* ======================================================================
  * EXPERIMENTAL (debug build): for a message/rfc822 container whose S/MIME
  * envelope cannot be reached via the messages API (getFull/listInlineTextParts
  * /listAttachments do not surface the decrypted inner content), open
@@ -694,15 +753,40 @@ async function processComposeTab(tabId) {
 
   debug(`processComposeTab(${tabId}): type="${details.type}", relatedMessageId=${details.relatedMessageId}, isPlainText=${details.isPlainText}`);
 
-  /* Only act on forwards */
-  if (details.type !== "forward") {
-    debug(`processComposeTab(${tabId}): type is "${details.type}" (not "forward"), skipping`);
-    return;
-  }
-
   const relatedMessageId = details.relatedMessageId;
   if (!relatedMessageId) {
     debug(`processComposeTab(${tabId}): no relatedMessageId, skipping (forward-from-file?)`);
+    return;
+  }
+
+  /* The ForwardIntercept experiment redirects an embedded forward into a
+   * *reply* tab. Type "reply" normally means a genuine reply (we pass it
+   * through), but when the experiment is enabled and the related message is an
+   * embedded smime container, that reply was produced by OUR redirect — clean
+   * it (clear recipients, retitle Re:->Fwd:) instead of skipping it. */
+  if (details.type === "reply" && experimentsEnabled) {
+    debug(`processComposeTab(${tabId}): type "reply" with experimentsEnabled — checking redirect case`);
+    if (processedTabIds.has(tabId)) return;
+    processedTabIds.add(tabId);
+    const rct = await getRootContentType(relatedMessageId);
+    const isEmbedded = (rct || "").toLowerCase() === "message/rfc822";
+    if (!isEmbedded || !(await isSmimeEncrypted(relatedMessageId)) || !(await canDecrypt(relatedMessageId))) {
+      processedTabIds.delete(tabId);
+      return;
+    }
+    let ok = false;
+    try {
+      ok = await handleExperimentReplyTab(tabId, relatedMessageId);
+    } catch (e) {
+      warn("handleExperimentReplyTab failed", e);
+    }
+    if (ok) return;
+    /* On failure fall through to normal forward-ish cleanup paths below. */
+  }
+
+  /* Only act on forwards (embedded reply-transform above returns early) */
+  if (details.type !== "forward") {
+    debug(`processComposeTab(${tabId}): type is "${details.type}" (not "forward"), skipping`);
     return;
   }
 
@@ -815,6 +899,22 @@ browser.compose.onAttachmentAdded.addListener((tab, attachment) => {
   await loadDebugFlag();
   log("background loaded, listening for compose windows");
   if (debugEnabled) log("DEBUG MODE ACTIVE — verbose logging enabled");
+
+  /* Enable the ForwardIntercept experiment if the experiments option is on.
+   * This requires the privileged experiment_apis (0.2.2); it redirects an
+   * embedded message/rfc822 forward into a reply at compose-open time. If the
+   * API is unavailable (e.g. plain build), this no-ops and the classic
+   * handleEmbeddedForward two-window fallback is used instead. */
+  if (experimentsEnabled) {
+    try {
+      const ok = await browser.ForwardIntercept.setEnabled(true);
+      log(`ForwardIntercept experiment ${ok ? "ENABLED" : "enable FAILED"}`);
+    } catch (e) {
+      warn("ForwardIntercept.setEnabled failed (experiment_apis unavailable?):", e);
+    }
+  } else {
+    log("ForwardIntercept experiment disabled (experiments option off)");
+  }
 
   /* Process any already-open compose windows (e.g. after reload) */
   try {
