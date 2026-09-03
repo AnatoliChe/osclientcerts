@@ -17,6 +17,11 @@ This add-on automatically:
    rely on `cid:` references, which cannot be preserved).
 5. **Enables S/MIME encryption** on the forward, so the new recipients also receive the
    message encrypted (and signed, if your identity supports it).
+6. For **embedded `message/rfc822` containers** (e.g. messages forwarded via another system
+   that wraps the S/MIME content inside an `rfc822` envelope): pulls the decrypted body
+   from a temporary reply window and applies it to the forward. Inline images and separate
+   file attachments from inside such containers are not recoverable via the WebExtension API
+   (only text).
 
 You then add your new recipients and hit Send — the message goes out encrypted with your
 identity's certificate, just like composing from scratch.
@@ -67,8 +72,29 @@ When a compose tab opens, the add-on:
    signMessage: true }`.
 10. Adds the decrypted file attachments.
 
+### Embedded `message/rfc822` containers
+
+Some setups (mail relays, conversion gateways, Outlook interop) wrap the S/MIME content
+inside a `message/rfc822` envelope before delivery. In that case the root Content-Type is
+`message/rfc822` rather than `application/pkcs7-mime`, and the standard decryption APIs
+(`messages.getFull`, `listInlineTextParts`, `listAttachments`) do not surface the decrypted
+inner content at all.
+
+For this case the add-on opens a temporary **reply** window on the container (TB's reply
+path does materialize the decrypted body), copies its HTML/plain body into the user's
+forward window via `setComposeDetails`, and closes the reply window. Inline images from
+inside the container cannot be recovered this way — they remain as `imap://`-based `src`
+references that break for the recipient — but the **full decrypted text** is transferred.
+
+The `experiments` checkbox in the add-on options (Off by default) additionally keeps the
+diagnostic reply/forward windows open for inspection. This is only for debugging and is
+safe — the add-on's own guard sets (`selfOpenedTabIds`, `handledEmbeddedMessageIds`,
+`embeddedExperimentRunning`) prevent the re-entrancy cascade that once caused thousands
+of compose windows to open.
+
 Two delayed sweeps (3 s and 8 s) handle the case where TB adds the `smime.p7m` attachment
-asynchronously after the initial pass.
+asynchronously after the initial pass. The `smime.p7m` envelope attachment is also removed
+**immediately** when caught by `onAttachmentAdded`, regardless of the tab's processing state.
 
 ## Permissions
 
@@ -77,6 +103,7 @@ asynchronously after the initial pass.
 | `compose`       | Read/write compose window content, attachments, and encryption settings.    |
 | `messagesRead`  | Read the original message's headers, decrypted body, and attachments.       |
 | `tabs`          | Detect compose windows (`tab.type === "messageCompose"`).                   |
+| `storage`       | Store the debug and experiment toggles (options page).                      |
 
 No host permissions, no Experiment, no native messaging. The add-on is entirely
 JavaScript WebExtension code.
@@ -86,6 +113,12 @@ JavaScript WebExtension code.
 - **Inline images** in the original message that are referenced via `cid:` in the HTML body
   cannot be preserved when re-adding them as regular attachments. They are skipped to avoid
   broken image references. This affects messages with embedded screenshots or logos.
+- For **embedded `message/rfc822` containers**: only the decrypted text body is transferred
+  (via the reply-to-forward technique). Inline images remain as `imap://`-based `src`
+  references that will break for the recipient. Separate file attachments inside such
+  containers (e.g. a `.txt` file) are also not recoverable — the WebExtension messages API
+  does not address the inner CMS parts. A full solution would require a privileged Experiment
+  that decrypts the CMS blob with the user's private key.
 - **Forward as attachment** (`.eml` mode) is not handled — the add-on only operates on
   inline forwards (the default).
 - The forwarded message does not include the original's cryptographic signature envelope.

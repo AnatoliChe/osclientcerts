@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- decrypt & re-encrypt S/MIME forward",
-  "version": "0.1.10",
+  "version": "0.2.0",
   "description": "When forwarding an S/MIME encrypted message, automatically decrypt the original, replace the raw smime.p7m blob with the decrypted content and attachments, and re-enable S/MIME encryption for the new recipients. Requires identity with S/MIME signing/encryption certificates. v0.1.0: initial release for testing.",
   "browser_specific_settings": {
     "gecko": {
       "id": "forward-decrypt@osclientcerts.dev",
       "strict_min_version": "128.0",
-      "update_url": "https://raw.githubusercontent.com/AnatoliChe/osclientcerts/tools-forward-decrypt-debug/tools/thunderbird-forward-decrypt/updates.json"
+      "update_url": "https://raw.githubusercontent.com/AnatoliChe/osclientcerts/trunk/tools/thunderbird-forward-decrypt/updates.json"
     }
   },
   "permissions": [
