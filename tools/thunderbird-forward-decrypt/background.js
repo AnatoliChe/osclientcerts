@@ -415,6 +415,65 @@ async function rebuildForwardCompose(tabId, messageId, composeDetails) {
 
 /* ======================================================================
  * experimentalHandleEmbedded
+/* ======================================================================
+ * handleEmbeddedForward
+ * Final logic for a message/rfc822 container that is an S/MIME forward.
+ * The decrypted body is NOT reachable through the messages API (getFull /
+ * listInlineTextParts / listAttachments return only the smime envelope for
+ * such nested containers), so we materialize it by opening a reply window on
+ * the container, copying its decrypted body into the user's forward window,
+ * and closing the reply window. (Real file attachments cannot be recovered
+ * this way and are deferred.)
+ * ====================================================================== */
+async function handleEmbeddedForward(tabId, messageId, composeDetails) {
+  log(`embedded forward: pulling decrypted body for tab ${tabId}, messageId ${messageId}`);
+  const isPlainText = composeDetails.isPlainText === true;
+
+  let body = null;
+  let replyTabId = null;
+  try {
+    const replyTab = await browser.compose.beginReply(messageId, "replyToSender");
+    if (replyTab && replyTab.id) {
+      replyTabId = replyTab.id;
+      selfOpenedTabIds.add(replyTabId);   /* never process our own window */
+    }
+    const d = await waitForComposeDetails(replyTabId);
+    if (d) {
+      body = isPlainText ? (d.plainTextBody || d.body) : (d.body || d.plainTextBody);
+      debug(`[embedded] reply body extracted (${isPlainText ? "plain" : "html"}): len=${body ? body.length : 0}`);
+    } else {
+      debug(`[embedded] could not read reply compose details`);
+    }
+  } catch (e) {
+    warn("[embedded] beginReply/getComposeDetails failed:", e);
+  } finally {
+    if (replyTabId) {
+      try { await browser.tabs.remove(replyTabId); } catch (_) { /* already closed */ }
+      debug(`[embedded] reply window ${replyTabId} closed`);
+    }
+  }
+
+  if (!body) {
+    warn("[embedded] no decrypted body obtained — leaving forward window untouched");
+    return;
+  }
+
+  const details = {};
+  if (isPlainText) details.plainTextBody = body; else details.body = body;
+  details.selectedEncryptionTechnology = {
+    name: "S/MIME",
+    encryptBody: true,
+    signMessage: true,
+  };
+  try {
+    await browser.compose.setComposeDetails(tabId, details);
+    log(`[embedded] applied decrypted body (${isPlainText ? "plain" : "html"}, len=${body.length}) to forward tab ${tabId}`);
+  } catch (e) {
+    warn("[embedded] setComposeDetails FAILED:", e);
+  }
+}
+
+/* ======================================================================
  * EXPERIMENTAL (debug build): for a message/rfc822 container whose S/MIME
  * envelope cannot be reached via the messages API (getFull/listInlineTextParts
  * /listAttachments do not surface the decrypted inner content), open
@@ -564,14 +623,16 @@ async function processComposeTab(tabId) {
   const isEmbeddedContainer = (rootType || "").toLowerCase() === "message/rfc822";
 
   if (isEmbeddedContainer) {
-    /* SAFETY: the embedded experiment opens forward/reply windows. It is
-     * OFF by default (experimentsEnabled must be set in storage) because
-     * auto-running it caused an unbounded cascade of compose windows. When
-     * disabled we leave the window untouched. */
-    if (!experimentsEnabled) {
-      log(`processComposeTab(${tabId}): embedded message/rfc822 container; experiment DISABLED, leaving window untouched`);
-    } else {
-      log(`processComposeTab(${tabId}): embedded message/rfc822 container — using experimental handler`);
+    /* message/rfc822 container: the decrypted body is not reachable through
+     * the messages API, so pull it from a reply window and copy it into the
+     * user's forward window (handleEmbeddedForward closes the reply window).
+     * If the diagnostic experiment flag is on, additionally open forward/reply
+     * windows and keep them for inspection. */
+    log(`processComposeTab(${tabId}): embedded message/rfc822 container — transferring decrypted body`);
+    try {
+      await handleEmbeddedForward(tabId, relatedMessageId, details);
+    } catch (e) {
+      warn("handleEmbeddedForward failed", e);
     }
     if (experimentsEnabled) {
       try {
