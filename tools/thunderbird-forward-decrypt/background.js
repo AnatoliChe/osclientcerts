@@ -12,19 +12,30 @@ const VERSION = (() => {
 
 /* ---- Debug logging ---- */
 let debugEnabled = false;
+/* Embedded-container experiment (opens forward/reply windows) is OFF by
+ * default. It must be explicitly enabled in storage to run — it is unsafe
+ * to auto-run (caused an unbounded window cascade). */
+let experimentsEnabled = false;
 
 async function loadDebugFlag() {
   try {
-    const { debug } = await browser.storage.local.get("debug");
+    const { debug, experiments } = await browser.storage.local.get(["debug", "experiments"]);
     debugEnabled = !!debug;
-  } catch (_) { debugEnabled = false; }
+    experimentsEnabled = !!experiments;
+  } catch (_) { debugEnabled = false; experimentsEnabled = false; }
 }
 
 // Listen for storage changes (real-time toggle without restart)
 browser.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && changes.debug) {
-    debugEnabled = !!changes.debug.newValue;
-    log(`debug mode ${debugEnabled ? "ENABLED" : "DISABLED"}`);
+  if (area === "local") {
+    if (changes.debug) {
+      debugEnabled = !!changes.debug.newValue;
+      log(`debug mode ${debugEnabled ? "ENABLED" : "DISABLED"}`);
+    }
+    if (changes.experiments) {
+      experimentsEnabled = !!changes.experiments.newValue;
+      log(`embedded experiment ${experimentsEnabled ? "ENABLED" : "DISABLED"}`);
+    }
   }
 });
 
@@ -37,12 +48,22 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 /* ---- Tab bookkeeping ---- */
 const processedTabIds   = new Set();
 const pendingTabPollers = new Set();
+/* Tabs opened by THIS plugin (e.g. beginForward / beginReply) — these must
+ * NEVER be re-processed, otherwise the experimental embedded-handler would
+ * cascade and spawn unbounded compose windows. */
+const selfOpenedTabIds  = new Set();
+/* messageIds for which the embedded experiment has already run — prevent
+ * re-running it for the same container (even from user-opened windows). */
+const handledEmbeddedMessageIds = new Set();
+/* Global re-entrancy lock for the embedded experiment. */
+let embeddedExperimentRunning = false;
 
 /* Clean up on tab close */
 browser.tabs.onRemoved.addListener(tabId => {
   debug(`tab ${tabId} closed, cleaning up`);
   processedTabIds.delete(tabId);
   pendingTabPollers.delete(tabId);
+  selfOpenedTabIds.delete(tabId);
 });
 
 /* ======================================================================
@@ -405,10 +426,28 @@ async function rebuildForwardCompose(tabId, messageId, composeDetails) {
 async function experimentalHandleEmbedded(tabId, messageId) {
   debug(`[experiment] rootType=message/rfc822 for messageId ${messageId}, tab ${tabId} — entering embedded experiment`);
 
+  /* Re-entrancy guard: never run the experiment twice at once and never
+   * re-run it for the same container. Prevents the infinite cascade of
+   * compose windows caused by the plugin opening windows that itself then
+   * processes. */
+  if (embeddedExperimentRunning) {
+    debug(`[experiment] already running, aborting re-entrant call for messageId ${messageId}`);
+    return;
+  }
+  if (handledEmbeddedMessageIds.has(messageId)) {
+    debug(`[experiment] messageId ${messageId} already handled, skipping`);
+    return;
+  }
+  handledEmbeddedMessageIds.add(messageId);
+  embeddedExperimentRunning = true;
+
   async function inspectTab(name, openFn) {
     try {
       const winTab = await openFn();
       debug(`[experiment] ${name}: compose window opened, tabId=${winTab?.id}`);
+      /* Mark the window we opened so processComposeTab skips it — this is the
+       * key guard against the infinite window cascade. */
+      if (winTab && winTab.id) selfOpenedTabIds.add(winTab.id);
       const d = await waitForComposeDetails(winTab.id);
       if (!d) {
         debug(`[experiment] ${name}: could not read compose details`);
@@ -431,18 +470,22 @@ async function experimentalHandleEmbedded(tabId, messageId) {
     }
   }
 
-  const fwd = await inspectTab("beginForward(container)", () =>
-    browser.compose.beginForward(messageId, "forwardInline"));
+  try {
+    const fwd = await inspectTab("beginForward(container)", () =>
+      browser.compose.beginForward(messageId, "forwardInline"));
 
-  const rep = await inspectTab("beginReply(container)", () =>
-    browser.compose.beginReply(messageId, "replyToSender"));
+    const rep = await inspectTab("beginReply(container)", () =>
+      browser.compose.beginReply(messageId, "replyToSender"));
 
-  const fwdBody = fwd && (fwd.body || fwd.plainTextBody) ? fwd.body && fwd.body.length || (fwd.plainTextBody && fwd.plainTextBody.length) : 0;
-  const repBody = rep && (rep.body || rep.plainTextBody) ? rep.body && rep.body.length || (rep.plainTextBody && rep.plainTextBody.length) : 0;
-  const fwdAtts = fwd ? (fwd.attachments || []).filter(a => !/\.p7[ms]$/i.test(a.name || "")).length : 0;
-  const repAtts = rep ? (rep.attachments || []).filter(a => !/\.p7[ms]$/i.test(a.name || "")).length : 0;
+    const fwdBody = fwd && (fwd.body || fwd.plainTextBody) ? fwd.body && fwd.body.length || (fwd.plainTextBody && fwd.plainTextBody.length) : 0;
+    const repBody = rep && (rep.body || rep.plainTextBody) ? rep.body && rep.body.length || (rep.plainTextBody && rep.plainTextBody.length) : 0;
+    const fwdAtts = fwd ? (fwd.attachments || []).filter(a => !/\.p7[ms]$/i.test(a.name || "")).length : 0;
+    const repAtts = rep ? (rep.attachments || []).filter(a => !/\.p7[ms]$/i.test(a.name || "")).length : 0;
 
-  debug(`[experiment] CONCLUSION: forward => bodyLen=${fwdBody}, realAttachments=${fwdAtts}; reply => bodyLen=${repBody}, realAttachments=${repAtts}. Windows left open for inspection.`);
+    debug(`[experiment] CONCLUSION: forward => bodyLen=${fwdBody}, realAttachments=${fwdAtts}; reply => bodyLen=${repBody}, realAttachments=${repAtts}. Windows left open for inspection.`);
+  } finally {
+    embeddedExperimentRunning = false;
+  }
 }
 
 /* ======================================================================
@@ -451,6 +494,14 @@ async function experimentalHandleEmbedded(tabId, messageId) {
 async function processComposeTab(tabId) {
   debug(`processComposeTab(${tabId}): checking processedTabIds.has(${tabId}) = ${processedTabIds.has(tabId)}`);
   if (processedTabIds.has(tabId)) return;
+
+  /* NEVER process compose windows that THIS plugin opened (e.g. from the
+   * embedded experiment's beginForward/beginReply). Processing them is what
+   * caused the runaway cascade of windows. */
+  if (selfOpenedTabIds.has(tabId)) {
+    debug(`processComposeTab(${tabId}): self-opened tab, skipping`);
+    return;
+  }
 
   debug(`processComposeTab(${tabId}): waiting for compose details...`);
   const details = await waitForComposeDetails(tabId);
@@ -500,11 +551,21 @@ async function processComposeTab(tabId) {
   const isEmbeddedContainer = (rootType || "").toLowerCase() === "message/rfc822";
 
   if (isEmbeddedContainer) {
-    log(`processComposeTab(${tabId}): embedded message/rfc822 container — using experimental handler`);
-    try {
-      await experimentalHandleEmbedded(tabId, relatedMessageId);
-    } catch (e) {
-      warn("experimentalHandleEmbedded failed", e);
+    /* SAFETY: the embedded experiment opens forward/reply windows. It is
+     * OFF by default (experimentsEnabled must be set in storage) because
+     * auto-running it caused an unbounded cascade of compose windows. When
+     * disabled we leave the window untouched. */
+    if (!experimentsEnabled) {
+      log(`processComposeTab(${tabId}): embedded message/rfc822 container; experiment DISABLED, leaving window untouched`);
+    } else {
+      log(`processComposeTab(${tabId}): embedded message/rfc822 container — using experimental handler`);
+    }
+    if (experimentsEnabled) {
+      try {
+        await experimentalHandleEmbedded(tabId, relatedMessageId);
+      } catch (e) {
+        warn("experimentalHandleEmbedded failed", e);
+      }
     }
   } else {
     try {
