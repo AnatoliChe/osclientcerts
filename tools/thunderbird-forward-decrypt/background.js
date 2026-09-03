@@ -2,7 +2,7 @@
  *  License, v. 2.0. If a copy of the MPL was not distributed with this
  *  file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
- *  forward-decrypt v0.1.0-debug — auto-rebuild forwarded S/MIME-encrypted messages
+ *  forward-decrypt v0.1.2-debug — auto-rebuild forwarded S/MIME-encrypted messages
  *  DEBUG BUILD: extensive logging for diagnostics
  */
 
@@ -251,31 +251,27 @@ async function rebuildForwardCompose(tabId, messageId, composeDetails) {
   const { plain: headerPlain, html: headerHtml } = buildForwardHeader(msgHeader);
   debug(`[step 1] headerPlain length=${headerPlain.length}, headerHtml length=${headerHtml.length}`);
 
-  /* 2. Fetch the decrypted message tree and collect inline text parts +
-   *    attachment parts. We walk the full MessagePart tree from
-   *    messages.getFull (decrypt defaults to true) so that embedded
-   *    message/rfc822 containers with nested S/MIME content are handled
-   *    as well as plain top-level S/MIME messages. */
-  debug(`[step 2] Fetching decrypted message tree for messageId ${messageId}...`);
+  /* 2. Get the decrypted inline text parts.
+   *    We use messages.listInlineTextParts (and listAttachments in step 6)
+   *    rather than walking the raw getFull() tree because these APIs are
+   *    decryption-aware: "If the message is encrypted, the inline text parts
+   *    of the decrypted message are listed." This also handles the case where
+   *    the S/MIME envelope is nested one level inside a message/rfc822
+   *    embedded container, which getFull() does not surface. */
+  debug(`[step 2] Fetching decrypted inline text parts for messageId ${messageId}...`);
   let plainPart = null, htmlPart = null;
-  const attachmentParts = [];
+  let decryptedTree = null;
   try {
-    const full = await browser.messages.getFull(messageId);
-    dumpPartTree("decrypted", full, messageId);
-    walkParts(full, (p) => {
-      const t = (p.contentType || "").toLowerCase();
-      if ((t === "text/plain" || t === "text/html") && p.body != null) {
-        const entry = { content: p.body, partName: p.partName };
-        if (t === "text/plain" && !plainPart) plainPart = entry;
-        else if (t === "text/html"  && !htmlPart)  htmlPart  = entry;
-      } else if (p.partName) {
-        attachmentParts.push(p);
-      }
-    });
+    const parts = await browser.messages.listInlineTextParts(messageId);
+    debug(`[step 2] listInlineTextParts returned ${parts.length} parts:`, parts.map(p => ({ contentType: p.contentType, contentLength: p.content?.length })));
+    for (const p of parts) {
+      if (p.contentType === "text/plain" && !plainPart) plainPart = p;
+      if (p.contentType === "text/html"  && !htmlPart)  htmlPart  = p;
+    }
   } catch (e) {
-    warn(`[step 2] getFull(${messageId}) FAILED:`, e);
+    warn(`[step 2] listInlineTextParts(${messageId}) FAILED:`, e);
   }
-  debug(`[step 2] plainPart=${plainPart ? "yes (len=" + plainPart.content?.length + ")" : "no"}, htmlPart=${htmlPart ? "yes (len=" + htmlPart.content?.length + ")" : "no"}, attachmentParts=${attachmentParts.length}`);
+  debug(`[step 2] plainPart=${plainPart ? "yes (len=" + plainPart.content?.length + ")" : "no"}, htmlPart=${htmlPart ? "yes (len=" + htmlPart.content?.length + ")" : "no"}`);
 
   /* 3. Build body to match the compose's format */
   const isPlainText = composeDetails.isPlainText === true;
@@ -342,24 +338,38 @@ async function rebuildForwardCompose(tabId, messageId, composeDetails) {
     warn(`[step 5] setComposeDetails FAILED:`, e);
   }
 
-  /* 6. Add decrypted attachments (collected from the tree in step 2) */
-  debug(`[step 6] Adding ${attachmentParts.length} decrypted attachments...`);
+  /* 6. Add the decrypted attachments via listAttachments (decryption-aware).
+   *    We explicitly skip any .p7m/.p7s entries: the S/MIME envelope blob
+   *    must never be re-attached (it is a wrapper, not a real attachment,
+   *    and the onAttachmentAdded guard removes it anyway). */
+  debug(`[step 6] Fetching decrypted attachments for messageId ${messageId}...`);
   let addedCount = 0;
-  for (const att of attachmentParts) {
-    const isInlineImage = att.contentDisposition === "inline" && att.contentType
-        && att.contentType.startsWith("image/");
-    if (isInlineImage) {
-      debug(`[step 6] Skipping inline image "${att.name}" (part ${att.partName})`);
-      continue;
+  try {
+    const attachments = await browser.messages.listAttachments(messageId);
+    debug(`[step 6] listAttachments returned ${attachments.length} attachment(s):`, attachments.map(a => ({ name: a.name, disposition: a.contentDisposition, contentType: a.contentType })));
+    for (const att of attachments) {
+      const n = (att.name || "").toLowerCase();
+      if (n === "smime.p7m" || n === "smime.p7s" || n.endsWith(".p7m") || n.endsWith(".p7s")) {
+        debug(`[step 6] Skipping S/MIME envelope attachment "${att.name}"`);
+        continue;
+      }
+      const isInlineImage = att.contentDisposition === "inline" && att.contentType
+          && att.contentType.startsWith("image/");
+      if (isInlineImage) {
+        debug(`[step 6] Skipping inline image "${att.name}"`);
+        continue;
+      }
+      try {
+        const file = await browser.messages.getAttachmentFile(messageId, att.partName);
+        await browser.compose.addAttachment(tabId, { file, name: att.name || file.name });
+        addedCount++;
+        debug(`[step 6] Added attachment "${att.name}" (${file.name}) part=${att.partName}`);
+      } catch (e) {
+        warn(`[step 6] addAttachment FAILED for "${att.name}" (part ${att.partName}):`, e);
+      }
     }
-    try {
-      const file = await browser.messages.getAttachmentFile(messageId, att.partName);
-      await browser.compose.addAttachment(tabId, { file, name: att.name || file.name });
-      addedCount++;
-      debug(`[step 6] Added attachment "${att.name}" (${file.name}) part=${att.partName}`);
-    } catch (e) {
-      warn(`[step 6] addAttachment FAILED for "${att.name}" (part ${att.partName}):`, e);
-    }
+  } catch (e) {
+    warn(`[step 6] listAttachments(decrypted) FAILED:`, e);
   }
   debug(`[step 6] Added ${addedCount} attachment(s)`);
 
