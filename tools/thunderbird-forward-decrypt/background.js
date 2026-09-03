@@ -68,18 +68,70 @@ async function waitForComposeDetails(tabId, { timeoutMs = 15000, pollMs = 200 } 
 }
 
 /* ======================================================================
+ * walkParts
+ * Recursively walk a MessagePart tree, invoking cb(part, path) for every
+ * part (root + all sub-parts). `path` is a MIME part-path like "1" or "1.2"
+ * (empty for the root). Handles embedded message/rfc822 containers.
+ * ====================================================================== */
+function walkParts(part, cb, path = "") {
+  if (!part) return;
+  cb(part, path);
+  const subs = part.parts || [];
+  for (let i = 0; i < subs.length; i++) {
+    walkParts(subs[i], cb, path ? `${path}.${i + 1}` : `${i + 1}`);
+  }
+}
+
+/* ======================================================================
+ * partLooksSmimeEncrypted
+ * Return true if a single part advertises S/MIME encapsulation
+ * (pkcs7-mime + enveloped-data), checked on both contentType and headers.
+ * ====================================================================== */
+function partLooksSmimeEncrypted(part) {
+  if (!part) return false;
+  const ct  = ((part.contentType) || "").toLowerCase();
+  const hdr = ((part.headers && part.headers["content-type"]) || []).join(" ").toLowerCase();
+  const blob = ct + " " + hdr;
+  return blob.includes("pkcs7-mime") && blob.includes("enveloped-data");
+}
+
+/* ======================================================================
+ * dumpPartTree
+ * When debug is enabled, print the full structure of a MessagePart tree
+ * (partName, contentType, decryptionStatus, name, disposition, body length,
+ * child count) so diagnostics show exactly where S/MIME / decrypted
+ * content lives, including inside embedded message/rfc822 containers.
+ * ====================================================================== */
+function dumpPartTree(label, part, messageId) {
+  walkParts(part, (p, pathName) => {
+    debug(`[tree:${label}] ${messageId} part ${pathName || "(root)"}:`,
+      { contentType: p.contentType,
+        decryptionStatus: p.decryptionStatus,
+        name: p.name,
+        disposition: p.contentDisposition,
+        partName: p.partName,
+        bodyLen: (p.body != null) ? p.body.length : undefined,
+        subParts: (p.parts || []).length });
+  });
+}
+
+/* ======================================================================
  * isSmimeEncrypted
+ * Recursively determine whether a message (or any embedded sub-message /
+ * message/rfc822 container) contains a S/MIME encrypted (enveloped-data)
+ * part. Checks every part in the tree, not just the root.
  * ====================================================================== */
 async function isSmimeEncrypted(messageId) {
   debug(`isSmimeEncrypted(${messageId}): fetching raw...`);
   try {
     const raw = await browser.messages.getFull(messageId, { decrypt: false });
-    const ct  = ((raw && raw.contentType) || "").toLowerCase();
-    const hdr = ((raw && raw.headers && raw.headers["content-type"]) || []).join(" ").toLowerCase();
-    const blob = ct + " " + hdr;
-    const result = blob.includes("pkcs7-mime") && blob.includes("enveloped-data");
-    debug(`isSmimeEncrypted(${messageId}):`, { contentType: raw?.contentType, result });
-    return result;
+    dumpPartTree("raw(decrypt:false)", raw, messageId);
+    let found = false;
+    walkParts(raw, (p) => {
+      if (partLooksSmimeEncrypted(p)) found = true;
+    });
+    debug(`isSmimeEncrypted(${messageId}): recursive result=${found}`);
+    return found;
   } catch (e) {
     warn(`isSmimeEncrypted(${messageId}) FAILED:`, e);
     return false;
@@ -199,20 +251,31 @@ async function rebuildForwardCompose(tabId, messageId, composeDetails) {
   const { plain: headerPlain, html: headerHtml } = buildForwardHeader(msgHeader);
   debug(`[step 1] headerPlain length=${headerPlain.length}, headerHtml length=${headerHtml.length}`);
 
-  /* 2. Get decrypted inline text parts */
-  debug(`[step 2] Fetching inline text parts for messageId ${messageId}...`);
+  /* 2. Fetch the decrypted message tree and collect inline text parts +
+   *    attachment parts. We walk the full MessagePart tree from
+   *    messages.getFull (decrypt defaults to true) so that embedded
+   *    message/rfc822 containers with nested S/MIME content are handled
+   *    as well as plain top-level S/MIME messages. */
+  debug(`[step 2] Fetching decrypted message tree for messageId ${messageId}...`);
   let plainPart = null, htmlPart = null;
+  const attachmentParts = [];
   try {
-    const parts = await browser.messages.listInlineTextParts(messageId);
-    debug(`[step 2] listInlineTextParts returned ${parts.length} parts:`, parts.map(p => ({ contentType: p.contentType, contentLength: p.content?.length })));
-    for (const p of parts) {
-      if (p.contentType === "text/plain" && !plainPart) plainPart = p;
-      if (p.contentType === "text/html"  && !htmlPart)  htmlPart  = p;
-    }
+    const full = await browser.messages.getFull(messageId);
+    dumpPartTree("decrypted", full, messageId);
+    walkParts(full, (p) => {
+      const t = (p.contentType || "").toLowerCase();
+      if ((t === "text/plain" || t === "text/html") && p.body != null) {
+        const entry = { content: p.body, partName: p.partName };
+        if (t === "text/plain" && !plainPart) plainPart = entry;
+        else if (t === "text/html"  && !htmlPart)  htmlPart  = entry;
+      } else if (p.partName) {
+        attachmentParts.push(p);
+      }
+    });
   } catch (e) {
-    warn(`[step 2] listInlineTextParts(${messageId}) FAILED:`, e);
+    warn(`[step 2] getFull(${messageId}) FAILED:`, e);
   }
-  debug(`[step 2] plainPart=${plainPart ? "yes (len=" + plainPart.content?.length + ")" : "no"}, htmlPart=${htmlPart ? "yes (len=" + htmlPart.content?.length + ")" : "no"}`);
+  debug(`[step 2] plainPart=${plainPart ? "yes (len=" + plainPart.content?.length + ")" : "no"}, htmlPart=${htmlPart ? "yes (len=" + htmlPart.content?.length + ")" : "no"}, attachmentParts=${attachmentParts.length}`);
 
   /* 3. Build body to match the compose's format */
   const isPlainText = composeDetails.isPlainText === true;
@@ -279,31 +342,26 @@ async function rebuildForwardCompose(tabId, messageId, composeDetails) {
     warn(`[step 5] setComposeDetails FAILED:`, e);
   }
 
-  /* 6. Add decrypted attachments */
-  debug(`[step 6] Adding decrypted attachments...`);
-  try {
-    const attachments = await browser.messages.listAttachments(messageId);
-    debug(`[step 6] Found ${attachments.length} decrypted attachments:`, attachments.map(a => ({ name: a.name, disposition: a.contentDisposition, contentType: a.contentType })));
-    let addedCount = 0;
-    for (const att of attachments) {
-      if (att.contentDisposition === "inline" && att.contentType
-          && att.contentType.startsWith("image/")) {
-        debug(`[step 6] Skipping inline image "${att.name}"`);
-        continue;
-      }
-      try {
-        const file = await browser.messages.getAttachmentFile(messageId, att.partName);
-        await browser.compose.addAttachment(tabId, { file, name: att.name || file.name });
-        addedCount++;
-        debug(`[step 6] Added attachment "${att.name}" (${file.name})`);
-      } catch (e) {
-        warn(`[step 6] addAttachment FAILED for "${att.name}":`, e);
-      }
+  /* 6. Add decrypted attachments (collected from the tree in step 2) */
+  debug(`[step 6] Adding ${attachmentParts.length} decrypted attachments...`);
+  let addedCount = 0;
+  for (const att of attachmentParts) {
+    const isInlineImage = att.contentDisposition === "inline" && att.contentType
+        && att.contentType.startsWith("image/");
+    if (isInlineImage) {
+      debug(`[step 6] Skipping inline image "${att.name}" (part ${att.partName})`);
+      continue;
     }
-    debug(`[step 6] Added ${addedCount} attachment(s)`);
-  } catch (e) {
-    warn(`[step 6] listAttachments(decrypted) FAILED:`, e);
+    try {
+      const file = await browser.messages.getAttachmentFile(messageId, att.partName);
+      await browser.compose.addAttachment(tabId, { file, name: att.name || file.name });
+      addedCount++;
+      debug(`[step 6] Added attachment "${att.name}" (${file.name}) part=${att.partName}`);
+    } catch (e) {
+      warn(`[step 6] addAttachment FAILED for "${att.name}" (part ${att.partName}):`, e);
+    }
   }
+  debug(`[step 6] Added ${addedCount} attachment(s)`);
 
   log(`rebuild complete for tab ${tabId}`);
 }
