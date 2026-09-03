@@ -603,15 +603,19 @@ browser.tabs.onCreated.addListener(tab => {
   }
 });
 
-/* Catch smime.p7m arriving late (after our initial pass) */
+/* Catch smime.p7m arriving late (after our initial pass) or before the tab
+ * has been fully processed. We remove the S/MIME envelope attachment on ANY
+ * compose tab as soon as it appears: an smime.p7m/.p7s is the crypto envelope,
+ * never something the user wants to send along. Relying on processedTabIds here
+ * was a bug — the attachment can be added before processComposeTab marks the
+ * tab processed, so it slipped through and got forwarded. */
 browser.compose.onAttachmentAdded.addListener((tab, attachment) => {
   debug(`onAttachmentAdded: tab=${tab?.id}, attachment.name=${attachment?.name}, attachment.id=${attachment?.id}`);
   if (!tab || !tab.id) return;
   const tabId = tab.id;
-  if (!processedTabIds.has(tabId)) return;
   const n = (attachment && attachment.name || "").toLowerCase();
   if (n === "smime.p7m" || n === "smime.p7s" || n.endsWith(".p7m") || n.endsWith(".p7s")) {
-    log(`caught late smime attachment "${attachment.name}" on tab ${tabId}, removing`);
+    log(`removing smime envelope attachment "${attachment.name}" on tab ${tabId}`);
     browser.compose.removeAttachment(tabId, attachment.id).catch(e => warn("late remove failed", e));
   }
 });
