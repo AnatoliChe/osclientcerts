@@ -139,6 +139,22 @@ async function isSmimeEncrypted(messageId) {
 }
 
 /* ======================================================================
+ * getRootContentType
+ * Return the top-level Content-Type of a message (raw, undecrypted), or
+ * null on error. Used to distinguish an embedded message/rfc822 container
+ * from a normal top-level S/MIME message.
+ * ====================================================================== */
+async function getRootContentType(messageId) {
+  try {
+    const raw = await browser.messages.getFull(messageId, { decrypt: false });
+    return (raw && raw.contentType) || null;
+  } catch (e) {
+    warn(`getRootContentType(${messageId}) FAILED:`, e);
+    return null;
+  }
+}
+
+/* ======================================================================
  * canDecrypt
  * ====================================================================== */
 async function canDecrypt(messageId) {
@@ -377,6 +393,59 @@ async function rebuildForwardCompose(tabId, messageId, composeDetails) {
 }
 
 /* ======================================================================
+ * experimentalHandleEmbedded
+ * EXPERIMENTAL (debug build): for a message/rfc822 container whose S/MIME
+ * envelope cannot be reached via the messages API (getFull/listInlineTextParts
+ * /listAttachments do not surface the decrypted inner content), open
+ * compose.beginForward(...) and compose.beginReply(...) on the container and
+ * log what getComposeDetails returns (body, plainTextBody, attachments).
+ * The opened windows are intentionally LEFT OPEN for visual inspection.
+ * This collects facts so we can decide the final implementation.
+ * ====================================================================== */
+async function experimentalHandleEmbedded(tabId, messageId) {
+  debug(`[experiment] rootType=message/rfc822 for messageId ${messageId}, tab ${tabId} — entering embedded experiment`);
+
+  async function inspectTab(name, openFn) {
+    try {
+      const winTab = await openFn();
+      debug(`[experiment] ${name}: compose window opened, tabId=${winTab?.id}`);
+      const d = await waitForComposeDetails(winTab.id);
+      if (!d) {
+        debug(`[experiment] ${name}: could not read compose details`);
+        return;
+      }
+      const atts = (d.attachments || []).map(a => ({ name: a.name, size: a.size, type: a.type }));
+      debug(`[experiment] ${name}: getComposeDetails =>`,
+        { type: d.type,
+          subject: d.subject,
+          bodyLen: d.body ? d.body.length : undefined,
+          plainTextBodyLen: d.plainTextBody ? d.plainTextBody.length : undefined,
+          to: (d.toRecipients || []),
+          cc: (d.ccRecipients || []),
+          attachments: atts,
+          encryption: d.encryption });
+      return d;
+    } catch (e) {
+      warn(`[experiment] ${name} FAILED:`, e);
+      return null;
+    }
+  }
+
+  const fwd = await inspectTab("beginForward(container)", () =>
+    browser.compose.beginForward(messageId, "forwardInline"));
+
+  const rep = await inspectTab("beginReply(container)", () =>
+    browser.compose.beginReply(messageId, "replyToSender"));
+
+  const fwdBody = fwd && (fwd.body || fwd.plainTextBody) ? fwd.body && fwd.body.length || (fwd.plainTextBody && fwd.plainTextBody.length) : 0;
+  const repBody = rep && (rep.body || rep.plainTextBody) ? rep.body && rep.body.length || (rep.plainTextBody && rep.plainTextBody.length) : 0;
+  const fwdAtts = fwd ? (fwd.attachments || []).filter(a => !/\.p7[ms]$/i.test(a.name || "")).length : 0;
+  const repAtts = rep ? (rep.attachments || []).filter(a => !/\.p7[ms]$/i.test(a.name || "")).length : 0;
+
+  debug(`[experiment] CONCLUSION: forward => bodyLen=${fwdBody}, realAttachments=${fwdAtts}; reply => bodyLen=${repBody}, realAttachments=${repAtts}. Windows left open for inspection.`);
+}
+
+/* ======================================================================
  * processComposeTab
  * ====================================================================== */
 async function processComposeTab(tabId) {
@@ -421,10 +490,28 @@ async function processComposeTab(tabId) {
   processedTabIds.add(tabId);
   log(`processing forward compose tab ${tabId} for messageId ${relatedMessageId}`);
 
-  try {
-    await rebuildForwardCompose(tabId, relatedMessageId, details);
-  } catch (e) {
-    warn("rebuildForwardCompose failed", e);
+  /* Branch on the root content type. A message/rfc822 root means the S/MIME
+   * envelope is nested inside an embedded container, which the messages API
+   * cannot decrypt — route to the experimental handler (debug build).
+   * A normal top-level S/MIME message (application/pkcs7-mime) uses the
+   * standard rebuild path. */
+  const rootType = await getRootContentType(relatedMessageId);
+  debug(`processComposeTab(${tabId}): root content-type = "${rootType}"`);
+  const isEmbeddedContainer = (rootType || "").toLowerCase() === "message/rfc822";
+
+  if (isEmbeddedContainer) {
+    log(`processComposeTab(${tabId}): embedded message/rfc822 container — using experimental handler`);
+    try {
+      await experimentalHandleEmbedded(tabId, relatedMessageId);
+    } catch (e) {
+      warn("experimentalHandleEmbedded failed", e);
+    }
+  } else {
+    try {
+      await rebuildForwardCompose(tabId, relatedMessageId, details);
+    } catch (e) {
+      warn("rebuildForwardCompose failed", e);
+    }
   }
 
   /* Delayed sweep — smime.p7m may arrive asynchronously */

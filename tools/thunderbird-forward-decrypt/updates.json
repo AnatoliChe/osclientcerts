@@ -3,7 +3,7 @@
     "forward-decrypt@osclientcerts.dev": {
       "updates": [
         {
-          "version": "0.1.2",
+          "version": "0.1.3",
           "update_link": "https://raw.githubusercontent.com/AnatoliChe/osclientcerts/tools-forward-decrypt-debug/tools/thunderbird-forward-decrypt/dist/forward-decrypt.xpi"
         }
       ]

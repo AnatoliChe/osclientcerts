@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- decrypt & re-encrypt S/MIME forward",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "When forwarding an S/MIME encrypted message, automatically decrypt the original, replace the raw smime.p7m blob with the decrypted content and attachments, and re-enable S/MIME encryption for the new recipients. Requires identity with S/MIME signing/encryption certificates. v0.1.0: initial release for testing.",
   "browser_specific_settings": {
     "gecko": {
