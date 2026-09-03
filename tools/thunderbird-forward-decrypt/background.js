@@ -441,41 +441,54 @@ async function experimentalHandleEmbedded(tabId, messageId) {
   handledEmbeddedMessageIds.add(messageId);
   embeddedExperimentRunning = true;
 
-  async function inspectTab(name, openFn) {
+  async function listAtts(tabId) {
     try {
-      const winTab = await openFn();
-      debug(`[experiment] ${name}: compose window opened, tabId=${winTab?.id}`);
-      /* Mark the window we opened so processComposeTab skips it — this is the
-       * key guard against the infinite window cascade. */
-      if (winTab && winTab.id) selfOpenedTabIds.add(winTab.id);
-      const d = await waitForComposeDetails(winTab.id);
-      if (!d) {
-        debug(`[experiment] ${name}: could not read compose details`);
-        return;
-      }
-      const atts = (d.attachments || []).map(a => ({ name: a.name, size: a.size, type: a.type }));
-      debug(`[experiment] ${name}: getComposeDetails =>`,
-        { type: d.type,
-          subject: d.subject,
-          bodyLen: d.body ? d.body.length : undefined,
-          plainTextBodyLen: d.plainTextBody ? d.plainTextBody.length : undefined,
-          to: (d.toRecipients || []),
-          cc: (d.ccRecipients || []),
-          attachments: atts,
-          encryption: d.encryption });
-      return d;
+      const list = await browser.compose.listAttachments(tabId);
+      return (list || []).map(a => ({ id: a.id, name: a.name, size: a.size, type: a.type }));
     } catch (e) {
-      warn(`[experiment] ${name} FAILED:`, e);
+      warn(`[experiment] ${name}: listAttachments failed:`, e.message || e);
       return null;
     }
   }
 
+  async function inspectTab(name, openFn, delayMs) {
+    const winTab = await openFn();
+    debug(`[experiment] ${name}: compose window opened, tabId=${winTab?.id}`);
+    /* Mark the window we opened so processComposeTab skips it — this is the
+     * key guard against the infinite window cascade. */
+    if (winTab && winTab.id) selfOpenedTabIds.add(winTab.id);
+    const tabId = winTab && winTab.id;
+    const d = await waitForComposeDetails(tabId);
+    if (!d) {
+      debug(`[experiment] ${name}: could not read compose details`);
+      return null;
+    }
+    const atts = (d.attachments || []).map(a => ({ name: a.name, size: a.size, type: a.type }));
+    debug(`[experiment] ${name}: getComposeDetails (t0) =>`,
+      { type: d.type,
+        subject: d.subject,
+        bodyLen: d.body ? d.body.length : undefined,
+        plainTextBodyLen: d.plainTextBody ? d.plainTextBody.length : undefined,
+        to: (d.toRecipients || []), cc: (d.ccRecipients || []),
+        attachments: atts, encryption: d.encryption });
+
+    /* Real file attachments may arrive LATER than the visible body (like the
+     * smime envelope does). Re-read the attachment list after a delay to see
+     * whether e.g. the forwarded txt file is materialized. */
+    if (delayMs) {
+      await sleep(delayMs);
+      const later = await listAtts(tabId);
+      debug(`[experiment] ${name}: attachments after +${delayMs}ms =>`, later);
+    }
+    return d;
+  }
+
   try {
     const fwd = await inspectTab("beginForward(container)", () =>
-      browser.compose.beginForward(messageId, "forwardInline"));
+      browser.compose.beginForward(messageId, "forwardInline"), 4000);
 
     const rep = await inspectTab("beginReply(container)", () =>
-      browser.compose.beginReply(messageId, "replyToSender"));
+      browser.compose.beginReply(messageId, "replyToSender"), 4000);
 
     const fwdBody = fwd && (fwd.body || fwd.plainTextBody) ? fwd.body && fwd.body.length || (fwd.plainTextBody && fwd.plainTextBody.length) : 0;
     const repBody = rep && (rep.body || rep.plainTextBody) ? rep.body && rep.body.length || (rep.plainTextBody && rep.plainTextBody.length) : 0;
