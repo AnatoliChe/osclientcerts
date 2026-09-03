@@ -4,7 +4,15 @@
       "updates": [
         {
           "version": "0.2.1",
-          "update_link": "https://raw.githubusercontent.com/AnatoliChe/osclientcerts/trunk/tools/thunderbird-forward-decrypt/dist/forward-decrypt.xpi"
+          "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-forward-decrypt-v0.2.1/forward-decrypt.xpi"
+        },
+        {
+          "version": "0.2.0",
+          "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-forward-decrypt-v0.2.0/forward-decrypt.xpi"
+        },
+        {
+          "version": "0.1.10",
+          "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-forward-decrypt-v0.1.10/forward-decrypt.xpi"
         }
       ]
     }
