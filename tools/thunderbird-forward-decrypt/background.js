@@ -547,7 +547,7 @@ async function experimentalHandleEmbedded(tabId, messageId) {
       browser.compose.beginForward(messageId, "forwardInline"), 4000);
 
     const rep = await inspectTab("beginReply(container)", () =>
-      browser.compose.beginReply(messageId, "replyToSender"), 4000);
+      browser.compose.beginReply(messageId, "replyToSender"), 8000);
 
     const fwdBody = fwd && (fwd.body || fwd.plainTextBody) ? fwd.body && fwd.body.length || (fwd.plainTextBody && fwd.plainTextBody.length) : 0;
     const repBody = rep && (rep.body || rep.plainTextBody) ? rep.body && rep.body.length || (rep.plainTextBody && rep.plainTextBody.length) : 0;
@@ -555,6 +555,38 @@ async function experimentalHandleEmbedded(tabId, messageId) {
     const repAtts = rep ? (rep.attachments || []).filter(a => !/\.p7[ms]$/i.test(a.name || "")).length : 0;
 
     debug(`[experiment] CONCLUSION: forward => bodyLen=${fwdBody}, realAttachments=${fwdAtts}; reply => bodyLen=${repBody}, realAttachments=${repAtts}. Windows left open for inspection.`);
+
+    /* ---- DEEP PROBE: can we see the decrypted inner parts at all? ---- */
+    try {
+      const full = await browser.messages.getFull(messageId, { decrypt: true });
+      debug(`[experiment][deep] getFull(decrypt:true) root:`,
+        { contentType: full?.contentType, decryptionStatus: full?.decryptionStatus, partCount: (full?.parts || []).length });
+      walkParts(full, (p, pathName) => {
+        debug(`[experiment][deep:decrypt] part ${pathName || "(root)"}:`,
+          { contentType: p.contentType, disposition: p.contentDisposition, name: p.name, partName: p.partName,
+            size: p.size, bodyLen: (p.body != null) ? p.body.length : undefined,
+            subParts: (p.parts || []).length });
+      });
+    } catch (e) {
+      warn(`[experiment][deep] getFull(decrypt:true) FAILED:`, e.message || e);
+    }
+
+    /* Try messages.listAttachments (decryption-aware) and pull each file. */
+    try {
+      const atts = await browser.messages.listAttachments(messageId);
+      debug(`[experiment][deep] messages.listAttachments(${messageId}) =>`, (atts || []).map(a =>
+        ({ name: a.name, size: a.size, partName: a.partName, contentType: a.contentType })));
+      for (const a of (atts || [])) {
+        try {
+          const f = await browser.messages.getAttachmentFile(a.id);
+          debug(`[experiment][deep] getAttachmentFile("${a.name}") OK: size=${f && f.size} type=${f && f.type}`);
+        } catch (e2) {
+          warn(`[experiment][deep] getAttachmentFile("${a && a.name}") FAILED:`, e2.message || e2);
+        }
+      }
+    } catch (e) {
+      warn(`[experiment][deep] messages.listAttachments FAILED:`, e.message || e);
+    }
   } finally {
     embeddedExperimentRunning = false;
   }
