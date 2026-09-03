@@ -87,6 +87,18 @@ function htmlToPlain(html) {
     .trim();
 }
 
+/* Replace a leading "Re:" with "Fwd:" so a reply rebuilt from an embedded
+ * message/rfc822 container reads as a forward. Only the first prefix is
+ * retitled, so nested "Re: Re: X" becomes "Fwd: Re: X". Returns "" when the
+ * input has no leading "Re:" (so callers can skip the write). */
+function retitleReplyToForward(subject) {
+  const s = (subject || "").trim();
+  const m = /^([\s]*)(re:\s*)(.*)$/i.exec(s);
+  if (!m) return "";
+  const rest = m[3] ? m[3].trim() : "";
+  return `${m[1]}Fwd:${rest ? " " + rest : ""}`.trim();
+}
+
 module.exports = {
   buildForwardHeader,
   plainToHtml,
@@ -94,4 +106,5 @@ module.exports = {
   canDecrypt,
   isP7mAttachment,
   htmlToPlain,
+  retitleReplyToForward,
 };

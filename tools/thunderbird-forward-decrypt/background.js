@@ -270,6 +270,18 @@ function plainToHtml(text) {
     .replace(/\r?\n/g, "<br>\n");
 }
 
+/* Replace a leading "Re:" with "Fwd:" so a reply rebuilt from an embedded
+ * message/rfc822 container reads as a forward. Only the first prefix is
+ * retitled, so nested "Re: Re: X" becomes "Fwd: Re: X". Returns "" when the
+ * input has no leading "Re:" (so callers can skip the write). */
+function retitleReplyToForward(subject) {
+  const s = (subject || "").trim();
+  const m = /^([\s]*)(re:\s*)(.*)$/i.exec(s);
+  if (!m) return "";
+  const rest = m[3] ? m[3].trim() : "";
+  return `${m[1]}Fwd:${rest ? " " + rest : ""}`.trim();
+}
+
 /* ======================================================================
  * rebuildForwardCompose
  * ====================================================================== */
@@ -481,6 +493,23 @@ async function handleEmbeddedForward(tabId, messageId, composeDetails) {
       log(`[embedded] recipients cleared on reply window ${replyTabId}`);
     } catch (e2) {
       warn("[embedded] clearing recipients FAILED:", e2);
+    }
+
+    /* The reply rebuilt a forward, so retitle the subject: replace the leading
+     * "Re:" with "Fwd:" so it reads as a forward, not a reply. Handles nested
+     * "Re: Re: ..." by only touching the first prefix (=> "Fwd: Re: ..."). */
+    try {
+      const cur = await waitForComposeDetails(replyTabId);
+      const subject = (cur && cur.subject) || "";
+      const fwdSubject = retitleReplyToForward(subject);
+      if (fwdSubject) {
+        await browser.compose.setComposeDetails(replyTabId, { subject: fwdSubject });
+        log(`[embedded] subject retitled: "${subject}" -> "${fwdSubject}"`);
+      } else {
+        debug(`[embedded] subject unchanged (no "Re:" prefix): "${subject}"`);
+      }
+    } catch (e4) {
+      warn("[embedded] retitling subject FAILED:", e4);
     }
 
     /* Optionally surface the attachment list for the debug log. */

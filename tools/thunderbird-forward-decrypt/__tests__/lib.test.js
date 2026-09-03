@@ -5,6 +5,7 @@ const {
   canDecrypt,
   isP7mAttachment,
   htmlToPlain,
+  retitleReplyToForward,
 } = require("../lib");
 
 describe("buildForwardHeader", () => {
@@ -211,5 +212,41 @@ describe("htmlToPlain", () => {
 
   test("collapses multiple newlines", () => {
     expect(htmlToPlain("<p>a</p>\n<p>b</p>")).toBe("a\n\nb");
+  });
+});
+
+describe("retitleReplyToForward", () => {
+  test("retitles a simple Re: to Fwd:", () => {
+    expect(retitleReplyToForward("Re: Hello")).toBe("Fwd: Hello");
+  });
+
+  test("only retitles the first Re: (nested becomes Fwd: Re: ...)", () => {
+    expect(retitleReplyToForward("Re: Re: Hello")).toBe("Fwd: Re: Hello");
+    expect(retitleReplyToForward("Re: Re: Re: Hello")).toBe("Fwd: Re: Re: Hello");
+  });
+
+  test("retitles with leading whitespace", () => {
+    expect(retitleReplyToForward("  Re: Hello")).toBe("Fwd: Hello");
+  });
+
+  test("is case insensitive for the prefix", () => {
+    expect(retitleReplyToForward("re: lowercase")).toBe("Fwd: lowercase");
+    expect(retitleReplyToForward("RE: upper")).toBe("Fwd: upper");
+  });
+
+  test("does not touch a subject without a leading Re:", () => {
+    expect(retitleReplyToForward("Hello")).toBe("");
+    expect(retitleReplyToForward("Forwarded: Hello")).toBe("");
+  });
+
+  test("does not touch a bare \"Re:\" with empty rest", () => {
+    // "Re:" alone retitles to "Fwd:"
+    expect(retitleReplyToForward("Re:")).toBe("Fwd:");
+  });
+
+  test("handles null/undefined/empty", () => {
+    expect(retitleReplyToForward(null)).toBe("");
+    expect(retitleReplyToForward(undefined)).toBe("");
+    expect(retitleReplyToForward("")).toBe("");
   });
 });

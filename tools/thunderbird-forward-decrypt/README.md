@@ -91,7 +91,9 @@ For this case the add-on intercepts the forward and instead:
 3. **Clears the recipient fields** (`toRecipients`, `ccRecipients`, `bccRecipients`)
    so the reply is not sent back to the original sender — it effectively becomes a
    forward.
-4. **Closes the original (empty) forward window** and leaves the reply window open
+4. **Retitles the subject**: a leading `Re:` is rewritten to `Fwd:` (nested
+   `Re: Re: ...` becomes `Fwd: Re: ...`), so the window reads like a forward.
+5. **Closes the original (empty) forward window** and leaves the reply window open
    for the user to add new recipients and hit Send.
 
 This keeps text, inline images, and attachments intact without any privileged API.
@@ -126,11 +128,11 @@ JavaScript WebExtension code.
   embedded screenshots or logos. (Embedded `message/rfc822` containers that go through the
   reply rebuild do keep their inline images.)
 - For **embedded `message/rfc822` containers**, the forward becomes a **reply** with cleared
-  recipients rather than a plain "Fwd:" window. The subject shows as `Re: ...` and the reply
-  attribution header differs from a true forward. This is the only MV3-viable way to preserve
-  the full decrypted content (text + inline images + attachments) of such a container — the
-  WebExtension `messages`/`compose` APIs do not address the inner CMS parts, and privileged
-  Experiments are not available in Manifest v3.
+  recipients rather than a plain "Fwd:" window. The subject is retitled `Re:` → `Fwd:`, but
+  the reply attribution header still differs slightly from a true forward. This is the only
+  MV3-viable way to preserve the full decrypted content (text + inline images + attachments)
+  of such a container — the WebExtension `messages`/`compose` APIs do not address the inner
+  CMS parts, and privileged Experiments are not available in Manifest v3.
 - **Forward as attachment** (`.eml` mode) is not handled — the add-on only operates on
   inline forwards (the default).
 - The forwarded message does not include the original's cryptographic signature envelope.
