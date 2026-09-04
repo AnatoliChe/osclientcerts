@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- decrypt & re-encrypt S/MIME forward",
-  "version": "0.3.4",
-  "description": "When forwarding an S/MIME encrypted message, automatically decrypt the original, replace the raw smime.p7m blob with the decrypted content and attachments, and re-enable S/MIME encryption for the new recipients. Requires identity with S/MIME signing/encryption certificates. v0.3.4 (TEST): for an embedded message/rfc822 S/MIME container the forward is redirected into a reply (recipients cleared, Re: -> Fwd:); standalone files are extracted in the parent scope with Thunderbird's own gloda MsgHdrToMimeMessage (which, unlike the messages API, descends into embedded rfc822 S/MIME) and their part URLs are fetched with NetUtil.asyncFetch (loadUsingSystemPrincipal) to bypass the nullprincipal block, then re-attached to the compose window.",
+  "version": "0.3.5",
+  "description": "When forwarding an S/MIME encrypted message, automatically decrypt the original, replace the raw smime.p7m blob with the decrypted content and attachments, and re-enable S/MIME encryption for the new recipients. Requires identity with S/MIME signing/encryption certificates. v0.3.5 (TEST): for an embedded message/rfc822 S/MIME container the forward is redirected into a reply (recipients cleared, Re: -> Fwd:); standalone files are extracted in the parent scope by streaming the RAW message and running Thunderbird's own MimeTreeDecrypter (which, unlike the messages API with decodeSubMessages:false, descends into the embedded S/MIME) then re-parsing the decrypted MIME and reading each attachment body, and re-attached to the compose window.",
   "browser_specific_settings": {
     "gecko": {
       "id": "forward-decrypt@osclientcerts.dev",
