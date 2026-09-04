@@ -104,14 +104,17 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
         return;
       }
 
-      const wrapped = async function (
-        type,
-        format,
-        folder,
-        messageArray,
-        selection = null,
-        autodetectCharset = false
-      ) {
+      Services.console.logStringMessage(
+        `[ForwardIntercept] patch target: href=${win.location?.href}, ` +
+          `typeof ComposeMessage=${typeof win.ComposeMessage}`
+      );
+
+      const wrapped = async function (...args) {
+        Services.console.logStringMessage(
+          `[ForwardIntercept] ComposeMessage CALLED type=${args[0]}`
+        );
+        const [type, format, folder, messageArray, selection, autodetectCharset] =
+          args;
         try {
           if (
             enabled &&
@@ -139,15 +142,7 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
           );
         }
 
-        return original.call(
-          this,
-          type,
-          format,
-          folder,
-          messageArray,
-          selection,
-          autodetectCharset
-        );
+        return original.call(this, ...args);
       };
 
       win.ComposeMessage = wrapped;
@@ -183,7 +178,12 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
 
       while (enumerator.hasMoreElements()) {
         try {
-          patchWindow(enumerator.getNext());
+          const xulWindow = enumerator.getNext();
+          const win = xulWindow.docShell?.domWindow;
+
+          if (win) {
+            patchWindow(win);
+          }
         } catch (e) {
           Services.console.logStringMessage(
             `[ForwardIntercept] patchWindow failed: ${e}`

@@ -3,6 +3,10 @@
     "forward-decrypt@osclientcerts.dev": {
       "updates": [
         {
+          "version": "0.2.4",
+          "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-forward-decrypt-v0.2.4/forward-decrypt.xpi"
+        },
+        {
           "version": "0.2.3",
           "update_link": "https://github.com/AnatoliChe/osclientcerts/releases/download/tools-forward-decrypt-v0.2.3/forward-decrypt.xpi"
         },
