@@ -57,6 +57,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 /* ---- Tab bookkeeping ---- */
 const processedTabIds   = new Set();
 const pendingTabPollers = new Set();
+const closedTabIds      = new Set();
 /* Tabs opened by THIS plugin (e.g. the reply window rebuilt for an embedded
  * container) — these must NEVER be re-processed, otherwise the plugin would
  * cascade and spawn unbounded compose windows. */
@@ -68,6 +69,7 @@ browser.tabs.onRemoved.addListener(tabId => {
   processedTabIds.delete(tabId);
   pendingTabPollers.delete(tabId);
   selfOpenedTabIds.delete(tabId);
+  closedTabIds.add(tabId);
 });
 
 /* ======================================================================
@@ -694,10 +696,24 @@ async function handleExperimentReplyTab(tabId, messageId) {
 
   await Promise.all([clearRecipients(), retitleSubject()]);
 
-  /* A redirected reply can become writable before Thunderbird finishes
-   * replacing its compose model. Adding a file during that window may emit
-   * onAttachmentAdded and still be discarded by the later refresh. */
-  await sleep(3000);
+  /* Wait for Thunderbird's actual ComposeBodyReady notification instead of a
+   * fixed delay. Fast machines continue immediately; slow machines wait for
+   * quote construction to finish. A closed window cancels the operation. */
+  let composeReady = "unavailable";
+  try {
+    composeReady = await browser.ForwardIntercept.waitForRedirectedComposeReady(30000);
+  } catch (e) {
+    warn(`[experiment] compose readiness wait failed: ${e.message || e}`);
+  }
+  log(`[experiment] redirected compose readiness: ${composeReady}`);
+  if (composeReady === "closed") {
+    log(`[experiment] reply window ${tabId} closed before body was ready; stopping`);
+    return false;
+  }
+  if (closedTabIds.has(tabId)) return false;
+  if (composeReady !== "ready") {
+    warn(`[experiment] no ComposeBodyReady signal (${composeReady}); continuing with persistence retries`);
+  }
 
   /* 0.3.x diagnostic: where do the decrypted attachments live? Debug-only. */
   if (debugEnabled) {
@@ -726,6 +742,10 @@ async function handleExperimentReplyTab(tabId, messageId) {
     if (fwdUri) {
       const { rows, log: notes } =
         await browser.ForwardIntercept.extractDecryptedAttachments(fwdUri);
+      if (closedTabIds.has(tabId)) {
+        log(`[experiment] reply window ${tabId} closed during attachment extraction; stopping`);
+        return false;
+      }
       debug(`[experiment] extractDecryptedAttachments ${fwdUri} =>`, notes, rows);
       let added = 0;
       for (const att of rows) {
@@ -741,7 +761,7 @@ async function handleExperimentReplyTab(tabId, messageId) {
             const found = current.some(item => item.name === name);
             debug(`[experiment] attachment persistence check ${attempt} for "${name}": found=${found}; current=${current.map(item => item.name).join(",")}`);
             if (found) {
-              await sleep(2000);
+              await sleep(500);
               const stable = await browser.compose.listAttachments(tabId);
               if (stable.some(item => item.name === name)) {
                 persistent = true;
@@ -754,7 +774,7 @@ async function handleExperimentReplyTab(tabId, messageId) {
             });
             await browser.compose.addAttachment(tabId, { file, name });
             log(`[experiment] add attempt ${attempt} for "${name}" (${bytes.length} bytes) on window ${tabId}`);
-            await sleep(1000);
+            await sleep(250);
           }
           if (persistent) {
             added++;
@@ -927,6 +947,7 @@ async function processComposeTab(tabId) {
 browser.tabs.onCreated.addListener(tab => {
   debug(`tabs.onCreated: tab.id=${tab?.id}, type=${tab?.type}, url=${tab?.url}`);
   if (tab && tab.type === "messageCompose") {
+    closedTabIds.delete(tab.id);
     debug(`tabs.onCreated: messageCompose detected, calling processComposeTab(${tab.id})`);
     processComposeTab(tab.id);
   }

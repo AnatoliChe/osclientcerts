@@ -44,6 +44,19 @@
         "parameters": []
       },
       {
+        "name": "waitForRedirectedComposeReady",
+        "type": "function",
+        "description": "Wait until Thunderbird reports ComposeBodyReady for the reply window created by the redirected Forward. Returns ready, closed, timeout, or unavailable.",
+        "async": true,
+        "parameters": [
+          {
+            "name": "timeoutMs",
+            "type": "integer",
+            "minimum": 0
+          }
+        ]
+      },
+      {
         "name": "extractDecryptedAttachments",
         "type": "function",
         "description": "Parent-scope extraction of the standalone (non-inline, non-envelope) file attachments of a decrypted message, using Thunderbird's own gloda MsgHdrToMimeMessage engine with {examineEncryptedParts:true}. This descends into embedded message/rfc822 S/MIME containers that the WebExtension messages API cannot reach. Returns {rows: [{name, contentType, size, dataBase64}], log: [notes]}.",

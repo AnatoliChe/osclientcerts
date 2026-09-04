@@ -71,6 +71,28 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
      * its recipients cleared and subject retitled Re:->Fwd:. */
     let redirectPending = false;
 
+    /* Readiness of the compose window created by the most recent redirected
+     * Forward. Thunderbird exposes the exact point at which quoted reply body
+     * construction is complete through nsIMsgComposeStateListener. Keeping the
+     * resolved promise also covers fast machines where BodyReady fires before
+     * the WebExtension background reaches its wait call. */
+    let redirectComposeReady = null;
+
+    function newRedirectComposeReady() {
+      let finish;
+      const state = {
+        settled: false,
+        window: null,
+        promise: new Promise(resolve => { finish = resolve; }),
+        resolve(result) {
+          if (state.settled) return;
+          state.settled = true;
+          finish(result);
+        },
+      };
+      return state;
+    }
+
     function uriOf(arg) {
       try {
         if (arg && arg.folder && typeof arg.folder.getUriForMsg === "function") {
@@ -150,6 +172,7 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
 
             args[0] = COMPOSE_TYPE.ReplyToSender;
             redirectPending = true;
+            redirectComposeReady = newRedirectComposeReady();
           }
         } catch (e) {
           Services.console.logStringMessage(
@@ -225,6 +248,43 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
         if (!win) {
           return;
         }
+
+        /* compose-window-init is dispatched after gMsgCompose exists but
+         * before the asynchronous quote/body builder completes. Registering
+         * here guarantees that NotifyComposeBodyReady cannot be missed. */
+        try {
+          const ready = redirectComposeReady;
+          if (ready && !ready.settled && !ready.window) {
+            win.addEventListener("compose-window-init", () => {
+              try {
+                if (ready.window || ready.settled) return;
+                ready.window = win;
+                win.addEventListener("unload", () => ready.resolve("closed"), { once: true });
+                const compose = win.gMsgCompose;
+                if (!compose || win.closed) {
+                  ready.resolve("closed");
+                  return;
+                }
+                const stateListener = {
+                  NotifyComposeFieldsReady() {},
+                  NotifyComposeBodyReady() {
+                    ready.resolve("ready");
+                    try { compose.UnregisterStateListener(stateListener); } catch (_) {}
+                  },
+                  ComposeProcessDone() {},
+                  SaveInFolderDone() {},
+                  QueryInterface: ChromeUtils.generateQI(["nsIMsgComposeStateListener"]),
+                };
+                compose.RegisterStateListener(stateListener);
+              } catch (e) {
+                Services.console.logStringMessage(
+                  `[ForwardIntercept] compose readiness listener failed: ${e}`
+                );
+                ready.resolve("unavailable");
+              }
+            }, { once: true });
+          }
+        } catch (_) {}
 
         win.addEventListener(
           "load",
@@ -699,6 +759,15 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
 
         async getLastForwardUri() {
           return lastForwardUri;
+        },
+
+        async waitForRedirectedComposeReady(timeoutMs) {
+          const ready = redirectComposeReady;
+          if (!ready) return "unavailable";
+          const timeout = new Promise(resolve => {
+            setTimeout(() => resolve("timeout"), Math.max(0, timeoutMs));
+          });
+          return Promise.race([ready.promise, timeout]);
         },
 
         async extractDecryptedAttachments(messageUri) {

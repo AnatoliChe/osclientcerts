@@ -47,4 +47,22 @@ describe("ForwardIntercept experiment API contract", () => {
     expect(implementation).not.toContain('typeof btoa !== "function"');
     expect(implementation).toContain("size: p.body.length");
   });
+
+  test("waits for real compose body readiness instead of a fixed delay", () => {
+    const readinessFunction = schema[0].functions.find(
+      entry => entry.name === "waitForRedirectedComposeReady",
+    );
+    expect(readinessFunction).toEqual(
+      expect.objectContaining({ type: "function", async: true }),
+    );
+    expect(implementation).toContain("NotifyComposeBodyReady()");
+    expect(implementation).toContain('ready.resolve("closed")');
+    expect(background).toContain("waitForRedirectedComposeReady(30000)");
+    const handler = background.slice(
+      background.indexOf("async function handleExperimentReplyTab"),
+      background.indexOf("async function processComposeTab"),
+    );
+    expect(handler).not.toContain("await sleep(3000)");
+    expect(handler).toContain("closedTabIds.has(tabId)");
+  });
 });
