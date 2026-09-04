@@ -22,6 +22,19 @@
             "description": "True to intercept, false to pass through untouched."
           }
         ]
+      },
+      {
+        "name": "getComposeAttachments",
+        "type": "function",
+        "description": "Parent-scope read of the decrypted attachment model that Thunderbird built for a compose window. Thunderbird's reply compose carries the decrypted body + inline images, and (for an embedded message/rfc822 S/MIME container) may also carry standalone file attachments in nsIMsgCompFields.attachments — which the WebExtension messages API cannot reach. Returns an array of {name, size, contentType, isInline} for each non-envelope attachment part it can expose, or an empty array if none.",
+        "async": "true",
+        "parameters": [
+          {
+            "name": "tabId",
+            "type": "number",
+            "description": "The messageCompose tab id whose compose window's attachments to read."
+          }
+        ]
       }
     ]
   }

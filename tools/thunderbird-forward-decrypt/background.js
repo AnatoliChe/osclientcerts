@@ -337,6 +337,16 @@ async function dumpAttachmentSources(tabId, messageId) {
     out.replyWindow = "ERR " + e.message;
   }
 
+  /* The outgoing attachment list of the reply window itself — what Thunderbird
+   * would actually send. If a real standalone file shows up here, it forwards. */
+  try {
+    const list = await browser.compose.listAttachments(tabId);
+    out.replyOutgoing = list.map(a =>
+      `${a.name}(${a.size},${a.type || ''},disp=${a.contentDisposition || ''})`);
+  } catch (e) {
+    out.replyOutgoing = "ERR " + e.message;
+  }
+
   try {
     const list = await browser.messages.listAttachments(messageId);
     out.apiList = list.map(a => ({
@@ -685,9 +695,16 @@ async function handleExperimentReplyTab(tabId, messageId) {
 
   await Promise.all([clearRecipients(), retitleSubject()]);
 
-  /* 0.3.0 diagnostic: where do the decrypted attachments live? Debug-only. */
+  /* 0.3.x diagnostic: where do the decrypted attachments live? Debug-only. */
   if (debugEnabled) {
     try { await dumpAttachmentSources(tabId, messageId); } catch (e) { warn("[probe] failed:", e); }
+    /* Parent-scope read of Thunderbird's real CompFields attachment model. */
+    try {
+      const rows = await browser.ForwardIntercept.getComposeAttachments(tabId);
+      debug("[probe] parent gMsgComposeFields.attachments =>", rows);
+    } catch (e) {
+      debug("[probe] getComposeAttachments FAILED:", e.message);
+    }
   }
 
   log(`[experiment] DONE: reply-window-forward ${tabId} ready for new recipients`);

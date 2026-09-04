@@ -220,6 +220,71 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
       );
     }
 
+    /* Read the attachment model Thunderbird built for a compose window. When
+     * the user forwards an embedded message/rfc822 S/MIME container, we
+     * redirect it into a reply, and Thunderbird's compose (in the parent
+     * process) materializes the DECRYPTED message into its nsIMsgCompFields.
+     * The WebExtension messages API cannot reach those decrypted parts, but
+     * the compose window's gMsgComposeFields.attachments can. This reports
+     * what Thunderbird actually holds for the reply, so we know whether the
+     * standalone file (e.g. TEst.txt) is being carried and forwarded, or is
+     * dropped entirely (which would require parent-side extraction). */
+    function readComposeAttachments() {
+      const rows = [];
+      const wins = [...Services.wm.getEnumerator("msgcompose")];
+      Services.console.logStringMessage(
+        `[ForwardIntercept] getComposeAttachments: ${wins.length} compose window(s)`
+      );
+
+      for (const win of wins) {
+        /* Find the CompFields accessor that exists on this window global. */
+        let fields = null;
+        for (const k of ["gMsgComposeFields", "mMsgComposeFields", "msgComposeFields"]) {
+          try {
+            if (win?.[k]) { fields = win[k]; break; }
+          } catch (_) {}
+        }
+        if (!fields) {
+          Services.console.logStringMessage(
+            "[ForwardIntercept] getComposeAttachments: no CompFields accessor on a compose window"
+          );
+          continue;
+        }
+
+        let atts = null;
+        try { atts = fields.attachments; } catch (_) {}
+        if (!atts) {
+          Services.console.logStringMessage(
+            "[ForwardIntercept] getComposeAttachments: CompFields has no attachments array"
+          );
+          continue;
+        }
+
+        for (const att of atts) {
+          try {
+            const name = (att.name || "").toString();
+            const lower = name.toLowerCase();
+            if (lower.endsWith(".p7m") || lower.endsWith(".p7s")) continue;
+            let size = 0;
+            try { size = typeof att.getSize === "function" ? att.getSize() : (att.size || 0); } catch (_) {}
+            const disp = (att.contentDisposition || (typeof att.getContentDisposition === "function" ? att.getContentDisposition() : "")).toString();
+            rows.push({
+              name,
+              size,
+              contentType: (att.contentType || (typeof att.getContentType === "function" ? att.getContentType() : "") || "").toString(),
+              isInline: disp === "inline",
+            });
+          } catch (e) {
+            Services.console.logStringMessage(
+              `[ForwardIntercept] getComposeAttachments: skip attachment err: ${e}`
+            );
+          }
+        }
+      }
+
+      return rows;
+    }
+
     return {
       ForwardIntercept: {
         async getEnabled() {
@@ -243,6 +308,10 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
 
           enabled = value;
           return enabled;
+        },
+
+        async getComposeAttachments(tabId) {
+          return readComposeAttachments(tabId);
         },
       },
     };
