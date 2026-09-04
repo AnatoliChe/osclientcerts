@@ -66,6 +66,17 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
   }
 
   getAPI(context) {
+    /* getAPI() is called again whenever Thunderbird recreates the MV3
+     * background context. The privileged ComposeMessage wrapper outlives that
+     * context, so its marker/URI state must outlive it too. Reuse the original
+     * API closure instead of installing a second wrapper with fresh state. */
+    if (this._sharedAPI) {
+      Services.console.logStringMessage(
+        "[ForwardIntercept] getAPI: reusing shared state after background wake"
+      );
+      return { ForwardIntercept: this._sharedAPI };
+    }
+
     /* Tracks whether we are intercepting. Default OFF; the background script
      * enables it (mirrors the v0.2.x "experiments" option so the code path is
      * inert unless explicitly turned on). */
@@ -745,8 +756,7 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
       })();
     }
 
-    return {
-      ForwardIntercept: {
+    const sharedAPI = {
         async getEnabled() {
           return enabled;
         },
@@ -796,7 +806,20 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
           redirectPending = false;
           return pending;
         },
-      },
     };
+    this._sharedAPI = sharedAPI;
+    this._uninstallShared = uninstall;
+    return {
+      ForwardIntercept: sharedAPI,
+    };
+  }
+
+  onShutdown(isAppShutdown) {
+    try { this._uninstallShared?.(); } catch (_) {}
+    this._sharedAPI = null;
+    this._uninstallShared = null;
+    if (!isAppShutdown) {
+      Services.obs.notifyObservers(null, "startupcache-invalidate", null);
+    }
   }
 };
