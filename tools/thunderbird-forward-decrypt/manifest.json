@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- decrypt & re-encrypt S/MIME forward",
-  "version": "0.3.2",
-  "description": "When forwarding an S/MIME encrypted message, automatically decrypt the original, replace the raw smime.p7m blob with the decrypted content and attachments, and re-enable S/MIME encryption for the new recipients. Requires identity with S/MIME signing/encryption certificates. v0.3.2 (TEST): ForwardIntercept redirects forward->reply (clears recipients, Re: -> Fwd: at compose-open); debug-only probe now also reads the parent compose window's gMsgComposeFields.attachments to determine whether standalone files (e.g. of a decrypted embedded container) are carried into the reply or must be extracted.",
+  "version": "0.3.3",
+  "description": "When forwarding an S/MIME encrypted message, automatically decrypt the original, replace the raw smime.p7m blob with the decrypted content and attachments, and re-enable S/MIME encryption for the new recipients. Requires identity with S/MIME signing/encryption certificates. v0.3.3 (TEST): for an embedded message/rfc822 S/MIME container the forward is redirected into a reply (recipients cleared, Re: -> Fwd:); whether Thunderbird carries standalone files (e.g. TEst.txt) into the reply is verified via the parent CompFields probe, and standalone files are now DECRYPTED + re-attached from the parent scope with Thunderbird's own gloda MsgHdrToMimeMessage engine (which, unlike the messages API, descends into embedded rfc822 S/MIME).",
   "browser_specific_settings": {
     "gecko": {
       "id": "forward-decrypt@osclientcerts.dev",

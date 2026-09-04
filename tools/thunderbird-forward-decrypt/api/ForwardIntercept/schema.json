@@ -35,6 +35,26 @@
             "description": "The messageCompose tab id whose compose window's attachments to read."
           }
         ]
+      },
+      {
+        "name": "getLastForwardUri",
+        "type": "function",
+        "description": "Returns the message URI (e.g. imap-message://user@host/folder#uid) that the ComposeMessage hook last redirected a Forward from into a reply. Used to drive extractDecryptedAttachments with the real message. Returns null if none captured yet.",
+        "async": true,
+        "parameters": []
+      },
+      {
+        "name": "extractDecryptedAttachments",
+        "type": "function",
+        "description": "Parent-scope extraction of the standalone (non-inline, non-envelope) file attachments of a decrypted message, using Thunderbird's own gloda MsgHdrToMimeMessage engine with {examineEncryptedParts:true}. This descends into embedded message/rfc822 S/MIME containers that the WebExtension messages API cannot reach. Returns {rows: [{name, contentType, size, dataBase64}], log: [notes]}.",
+        "async": true,
+        "parameters": [
+          {
+            "name": "messageUri",
+            "type": "string",
+            "description": "The message URI (from getLastForwardUri) whose decryptable standalone attachments to read."
+          }
+        ]
       }
     ]
   }

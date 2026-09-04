@@ -26,12 +26,48 @@ var { ExtensionCommon } = ChromeUtils.importESModule(
   "resource://gre/modules/ExtensionCommon.sys.mjs"
 );
 
+/* Thunderbird's own attachment-extraction engine. MsgHdrToMimeMessage streams
+ * the (decrypted) message through gloda's jsmimeemitter and hands back a
+ * MimeMessage tree. With {examineEncryptedParts:true} the S/MIME parts are
+ * decrypted (S/MIME "is not that smart, and always decrypts data" when
+ * requested), producing the same decrypted MIME tree the message reader
+ * displays — including inside embedded message/rfc822 containers. This is the
+ * path Thunderbird itself uses to build attachment lists, unlike the
+ * WebExtension messages API whose getFull() is hardcoded to
+ * decodeSubMessages:false and therefore cannot descend into an embedded rfc822
+ * to reach a nested S/MIME envelope. */
+var { MsgHdrToMimeMessage } = ChromeUtils.importESModule(
+  "resource:///modules/gloda/MimeMessage.sys.mjs"
+);
+var { MailServices } = ChromeUtils.importESModule(
+  "resource:///modules/MailServices.sys.mjs"
+);
+
 var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
   getAPI(context) {
     /* Tracks whether we are intercepting. Default OFF; the background script
      * enables it (mirrors the v0.2.x "experiments" option so the code path is
      * inert unless explicitly turned on). */
     let enabled = false;
+
+    /* Most recent message URI that a forward was invoked on (when we redirect
+     * it into a reply). The background script pulls this with getLastForwardUri
+     * and feeds it to extractDecryptedAttachments() so the parent can run
+     * Thunderbird's own decryption/extraction on the real message. */
+    let lastForwardUri = null;
+
+    function uriOf(arg) {
+      try {
+        if (arg && arg.folder && typeof arg.folder.getUriForMsg === "function") {
+          return arg.folder.getUriForMsg(arg);
+        }
+      } catch (_) {}
+      try {
+        return String(arg);
+      } catch (_) {
+        return null;
+      }
+    }
 
     /* Compose-type constants (nsIMsgCompType). Only the ones we need. */
     const COMPOSE_TYPE = {
@@ -88,6 +124,13 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
           ) {
             Services.console.logStringMessage(
               `[ForwardIntercept] REDIRECT Forward -> ReplyToSender: ${messageArray[0]}`
+            );
+
+            /* Remember which message the forward was for. Used later by the
+             * background script to decrypt + re-attach standalone files. */
+            lastForwardUri = uriOf(messageArray[0]);
+            Services.console.logStringMessage(
+              `[ForwardIntercept] capture lastForwardUri=${lastForwardUri}`
             );
 
             args[0] = COMPOSE_TYPE.ReplyToSender;
@@ -285,6 +328,222 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
       return rows;
     }
 
+    /* ---- Decrypted-attachment extraction (Path B) ---- */
+
+    /* Read a MIME part URL (e.g. imap://…?part=1.1.1.1.2) via Thunderbird's
+     * message service. Once the message has been streamed+decrypted by
+     * MsgHdrToMimeMessage, Thunderbird's DecryptVerify cache serves subsequent
+     * part requests with the DECRYPTED bytes, so this yields the real file
+     * content for an S/MIME embedded container. Returns the raw bytes as a
+     * JS string (one char == one byte, Latin-1 safe). */
+    function streamUrlToString(url) {
+      return new Promise(resolve => {
+        const chunks = [];
+        let stream = null;
+        const listener = {
+          onStartRequest() {},
+          onDataAvailable(aRequest, aInputStream, aOffset, aCount) {
+            if (!stream) {
+              stream = Cc[
+                "@mozilla.org/scriptableinputstream;1"
+              ].createInstance(Ci.nsIScriptableInputStream);
+              stream.init(aInputStream);
+            }
+            chunks.push(stream.read(aCount));
+          },
+          onStopRequest(aRequest, status) {
+            resolve({
+              ok: Components.isSuccessCode(status),
+              data: chunks.join(""),
+            });
+          },
+          QueryInterface: ChromeUtils.generateQI([
+            "nsIStreamListener",
+            "nsIRequestObserver",
+          ]),
+        };
+        try {
+          const service = MailServices.messageServiceFromURI(url);
+          if (!service) {
+            Services.console.logStringMessage(
+              `[ForwardIntercept] no message service for ${url}`
+            );
+            resolve({ ok: false, data: "" });
+            return;
+          }
+          service.streamMessage(url, listener, null, null, false, "");
+        } catch (e) {
+          Services.console.logStringMessage(
+            `[ForwardIntercept] stream ${url} threw: ${e}`
+          );
+          resolve({ ok: false, data: "" });
+        }
+      });
+    }
+
+    async function streamUrlToBase64(url) {
+      try {
+        const { ok, data } = await streamUrlToString(url);
+        if (!ok || !data) {
+          Services.console.logStringMessage(
+            `[ForwardIntercept] stream ${url}: not ok (len=${(data || "").length})`
+          );
+          return "";
+        }
+        return typeof btoa === "function" ? btoa(data) : "";
+      } catch (e) {
+        Services.console.logStringMessage(
+          `[ForwardIntercept] streamUrlToBase64(${url}) err: ${e}`
+        );
+        return "";
+      }
+    }
+
+    function mimeHeader(node, name) {
+      try {
+        if (!node || !node.headers) return null;
+        if (typeof node.headers.get === "function") {
+          const v = node.headers.get(name);
+          return v == null ? null : String(v);
+        }
+        const v = node.headers[name] || node.headers[name.toLowerCase()];
+        if (Array.isArray(v)) return v.join(" ");
+        return v == null ? null : String(v);
+      } catch (_) {
+        return null;
+      }
+    }
+
+    /* Recursively gather the real (non-envelope, non-inline) file attachments
+     * Thunderbird exposed for the decrypted message. Handles leaves that gloda
+     * materialized either as a MimeMessageAttachment (streamable .url) or as a
+     * MimeBody (in-memory .body). */
+    function walkDecryptedParts(node, out) {
+      if (!node) return;
+      const ct = (node.contentType || "").toLowerCase();
+      const cd = (mimeHeader(node, "content-disposition") || "").toLowerCase();
+      const cid = mimeHeader(node, "content-id");
+      const isEnvelope =
+        ct.includes("pkcs7-mime") ||
+        ct.includes("enveloped-data") ||
+        (node.name || "").toLowerCase().endsWith(".p7m") ||
+        (node.name || "").toLowerCase().endsWith(".p7s");
+
+      if (node.url) {
+        if (!isEnvelope) {
+          const isInline =
+            cd.includes("inline") ||
+            (ct.startsWith("image/") && (cid || cd.includes("inline")));
+          out.push({
+            name: node.name || "attachment",
+            contentType: node.contentType || "",
+            url: node.url,
+            isInline: !!isInline,
+            body: null,
+          });
+        }
+      } else if (
+        typeof node.body === "string" &&
+        node.name &&
+        (node.parts ? node.parts.length : 0) === 0 &&
+        !isEnvelope
+      ) {
+        const isInline = cd.includes("inline");
+        out.push({
+          name: node.name,
+          contentType: node.contentType || "",
+          url: null,
+          isInline: !!isInline,
+          body: node.body,
+        });
+      }
+
+      for (const c of node.parts || []) {
+        walkDecryptedParts(c, out);
+      }
+    }
+
+    function runExtractDecryptedAttachments(messageUri) {
+      const empty = { rows: [], log: [] };
+      const logMsg = s => Services.console.logStringMessage(`[ForwardIntercept] extract: ${s}`);
+      if (!messageUri) {
+        logMsg("no messageUri");
+        return Promise.resolve(empty);
+      }
+
+      let msgHdr = null;
+      try {
+        const service = MailServices.messageServiceFromURI(messageUri);
+        if (!service) {
+          logMsg(`no message service for ${messageUri}`);
+          return Promise.resolve(empty);
+        }
+        msgHdr = service.messageURIToMsgHdr(messageUri);
+      } catch (e) {
+        logMsg(`messageURIToMsgHdr failed: ${e}`);
+        return Promise.resolve(empty);
+      }
+      if (!msgHdr) {
+        logMsg(`no msgHdr for ${messageUri}`);
+        return Promise.resolve(empty);
+      }
+
+      let resolveGot;
+      const got = new Promise(r => (resolveGot = r));
+
+      try {
+        MsgHdrToMimeMessage(
+          msgHdr,
+          null,
+          (_hdr, mimeMsg) => {
+            (async () => {
+              const rows = [];
+              const notes = [];
+              try {
+                const parts = [];
+                walkDecryptedParts(mimeMsg, parts);
+                notes.push(`${parts.length} exposed part(s)`);
+                for (const p of parts) {
+                  notes.push(
+                    `candidate ${p.name} | ${p.contentType} | inline=${p.isInline} | url=${p.url ? "yes" : "in-body"}`
+                  );
+                  if (p.isInline) continue;
+                  let b64 = "";
+                  if (p.url) {
+                    b64 = await streamUrlToBase64(p.url);
+                  } else if (p.body !== null && p.body !== undefined) {
+                    b64 = typeof btoa === "function" ? btoa(String(p.body)) : "";
+                  }
+                  if (b64) {
+                    rows.push({
+                      name: p.name,
+                      contentType: p.contentType,
+                      size: (b64.length * 3) / 4,
+                      dataBase64: b64,
+                    });
+                    notes.push(`-> GOT bytes for ${p.name} (${rows[rows.length - 1].size}b)`);
+                  } else {
+                    notes.push(`-> NO BYTES for ${p.name}`);
+                  }
+                }
+              } catch (e) {
+                notes.push(`walk failed: ${e}`);
+              }
+              logMsg(JSON.stringify(notes));
+              resolveGot({ rows, log: notes });
+            })();
+          },
+          true /* aAllowDownload: stream the real message, not just headers */,
+          { examineEncryptedParts: true, partsOnDemand: true }
+        );
+      } catch (e) {
+        logMsg(`MsgHdrToMimeMessage threw: ${e}`);
+        resolveGot(empty);
+      }
+
+      return got;
+    }
+
     return {
       ForwardIntercept: {
         async getEnabled() {
@@ -312,6 +571,14 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
 
         async getComposeAttachments(tabId) {
           return readComposeAttachments(tabId);
+        },
+
+        async getLastForwardUri() {
+          return lastForwardUri;
+        },
+
+        async extractDecryptedAttachments(messageUri) {
+          return runExtractDecryptedAttachments(messageUri);
         },
       },
     };

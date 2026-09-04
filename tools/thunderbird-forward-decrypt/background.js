@@ -707,6 +707,47 @@ async function handleExperimentReplyTab(tabId, messageId) {
     }
   }
 
+  /* v0.3.3 Path B: Thunderbird's CompFields carry NO standalone file for an
+   * embedded message/rfc822 S/MIME container (that's why the reply shows the
+   * body but drops TEst.txt). So we decrypt + extract via the parent-scope
+   * gloda engine and RE-ATTACH the standalone files to this compose window. */
+  try {
+    let fwdUri = null;
+    try {
+      fwdUri = await browser.ForwardIntercept.getLastForwardUri();
+      debug(`[experiment] lastForwardUri => ${fwdUri}`);
+    } catch (e3) {
+      warn("[experiment] getLastForwardUri FAILED:", e3);
+    }
+    if (fwdUri) {
+      const { rows, log: notes } =
+        await browser.ForwardIntercept.extractDecryptedAttachments(fwdUri);
+      debug(`[experiment] extractDecryptedAttachments ${fwdUri} =>`, notes, rows);
+      let added = 0;
+      for (const att of rows) {
+        const n = (att.name || "").toLowerCase();
+        if (n.endsWith(".p7m") || n.endsWith(".p7s")) continue;
+        if (att.contentType && att.contentType.startsWith("image/")) continue;
+        try {
+          const bytes = Uint8Array.from(atob(att.dataBase64), c => c.charCodeAt(0));
+          const file = new File([bytes], att.name || "attachment", {
+            type: att.contentType || "application/octet-stream",
+          });
+          await browser.compose.addAttachment(tabId, { file, name: att.name || file.name });
+          added++;
+          log(`[experiment] re-attached "${att.name}" (${bytes.length} bytes) to window ${tabId}`);
+        } catch (e5) {
+          warn(`[experiment] addAttachment FAILED for "${att.name}":`, e5);
+        }
+      }
+      log(`[experiment] re-attached ${added} standalone attachment(s) to window ${tabId}`);
+    } else {
+      debug("[experiment] no lastForwardUri captured — skipping Path B re-attach");
+    }
+  } catch (e6) {
+    warn("[experiment] Path B extract/re-attach FAILED:", e6);
+  }
+
   log(`[experiment] DONE: reply-window-forward ${tabId} ready for new recipients`);
   return true;
 }
