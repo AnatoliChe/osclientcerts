@@ -55,6 +55,14 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
      * Thunderbird's own decryption/extraction on the real message. */
     let lastForwardUri = null;
 
+    /* Set synchronously by the ComposeMessage wrapper the moment it redirects a
+     * Forward into a ReplyToSender. The background script consumes + clears it
+     * (getAndClearRedirectPending) when the resulting reply compose tab arrives,
+     * so we can tell the window WE redirected from a plain manual "Reply"
+     * clicked on the same (embedded S/MIME) message — only the former must have
+     * its recipients cleared and subject retitled Re:->Fwd:. */
+    let redirectPending = false;
+
     function uriOf(arg) {
       try {
         if (arg && arg.folder && typeof arg.folder.getUriForMsg === "function") {
@@ -133,6 +141,7 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
             );
 
             args[0] = COMPOSE_TYPE.ReplyToSender;
+            redirectPending = true;
           }
         } catch (e) {
           Services.console.logStringMessage(
@@ -571,6 +580,12 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
 
         async extractDecryptedAttachments(messageUri) {
           return runExtractDecryptedAttachments(messageUri);
+        },
+
+        async getAndClearRedirectPending() {
+          const pending = redirectPending;
+          redirectPending = false;
+          return pending;
         },
       },
     };

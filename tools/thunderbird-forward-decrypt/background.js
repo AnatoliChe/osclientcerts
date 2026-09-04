@@ -791,6 +791,18 @@ async function processComposeTab(tabId) {
     debug(`processComposeTab(${tabId}): type "reply" with experimentsEnabled — checking redirect case`);
     if (processedTabIds.has(tabId)) return;
     processedTabIds.add(tabId);
+    /* Only a reply window actually created by OUR Forward->Reply redirect gets
+     * cleaned (recipients cleared, Re:->Fwd:). A plain manual "Reply" clicked by
+     * the user on the same embedded S/MIME message must be left untouched — the
+     * ComposeMessage hook sets redirectPending synchronously when it redirects a
+     * Forward, and getAndClearRedirectPending consumes it for exactly one reply
+     * tab. If it is not pending, this is a genuine user-initiated reply: skip. */
+    const redirectedByUs = await browser.forwardIntercept.getAndClearRedirectPending();
+    debug(`processComposeTab(${tabId}): reply tab, redirectPending=${redirectedByUs}`);
+    if (!redirectedByUs) {
+      processedTabIds.delete(tabId);
+      return;
+    }
     const rct = await getRootContentType(relatedMessageId);
     const isEmbedded = (rct || "").toLowerCase() === "message/rfc822";
     if (!isEmbedded || !(await isSmimeEncrypted(relatedMessageId)) || !(await canDecrypt(relatedMessageId))) {

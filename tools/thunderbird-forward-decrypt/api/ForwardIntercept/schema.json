@@ -55,6 +55,12 @@
             "description": "The message URI (from getLastForwardUri) whose decryptable standalone attachments to read."
           }
         ]
+      },
+      {
+        "name": "getAndClearRedirectPending",
+        "type": "function",
+        "description": "Returns and then clears a boolean set synchronously by the ComposeMessage hook whenever it redirected a Forward into a ReplyToSender. The background script calls this for each incoming reply compose tab to tell whether that window is the one WE redirected (must clear recipients + retitle Re:->Fwd:) versus a plain manual Reply on the same message (must be left untouched).",
+        "parameters": []
       }
     ]
   }
