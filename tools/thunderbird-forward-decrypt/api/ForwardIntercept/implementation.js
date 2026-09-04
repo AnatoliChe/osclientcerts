@@ -49,43 +49,6 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
       );
     }
 
-    /* Best-effort detection of an embedded message/rfc822 container. The
-     * forwarded message's own root Content-Type is what the forward composes
-     * from; for an embedded S/MIME container that root is "message/rfc822".
-     *
-     * Signals inspected (any may be absent, so this is best-effort and we only
-     * convert when we are fairly sure):
-     *   o msgHdr.getStringProperty("Content-Type")
-     *   o msgHdr.getStringProperty("contentType") / "ContentType"
-     */
-    function rootLooksEmbeddedContainer(msgHdr) {
-      if (!msgHdr) {
-        return false;
-      }
-
-      for (const name of [
-        "Content-Type",
-        "ContentType",
-        "content-type",
-        "contentType",
-      ]) {
-        try {
-          const value = String(msgHdr.getStringProperty(name) || "")
-            .trim()
-            .toLowerCase();
-
-          if (
-            value === "message/rfc822" ||
-            value.startsWith("message/rfc822;")
-          ) {
-            return true;
-          }
-        } catch (_) {}
-      }
-
-      return false;
-    }
-
     function patchWindow(win) {
       if (!win || win.closed) {
         return;
@@ -109,32 +72,25 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
           `typeof ComposeMessage=${typeof win.ComposeMessage}`
       );
 
-      const wrapped = async function (...args) {
+      const wrapped = function (...args) {
         Services.console.logStringMessage(
           `[ForwardIntercept] ComposeMessage CALLED type=${args[0]}`
         );
-        const [type, format, folder, messageArray, selection, autodetectCharset] =
-          args;
+
         try {
+          const [type, format, folder, messageArray] = args;
+
           if (
             enabled &&
             isForwardType(type) &&
             messageArray &&
             messageArray.length === 1
           ) {
-            let hdr = null;
+            Services.console.logStringMessage(
+              `[ForwardIntercept] REDIRECT Forward -> ReplyToSender: ${messageArray[0]}`
+            );
 
-            try {
-              hdr = win.messenger.msgHdrFromURI(messageArray[0]);
-            } catch (_) {}
-
-            if (rootLooksEmbeddedContainer(hdr)) {
-              Services.console.logStringMessage(
-                `[ForwardIntercept] redirect Forward -> Reply BEFORE compose window: ${messageArray[0]}`
-              );
-
-              type = COMPOSE_TYPE.ReplyToSender;
-            }
+            args[0] = COMPOSE_TYPE.ReplyToSender;
           }
         } catch (e) {
           Services.console.logStringMessage(
