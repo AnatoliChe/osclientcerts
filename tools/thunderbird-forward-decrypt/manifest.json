@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- decrypt & re-encrypt S/MIME forward",
-  "version": "0.3.11",
-  "description": "When forwarding an S/MIME encrypted message, automatically decrypt the original, replace the raw smime.p7m blob with the decrypted content and attachments, and re-enable S/MIME encryption for the new recipients. Requires identity with S/MIME signing/encryption certificates. v0.3.11 (TEST): unwraps an opaque CMS SignedData layer found inside the decrypted envelope, exposing the final multipart MIME tree and its standalone attachments.",
+  "version": "0.3.12",
+  "description": "When forwarding an S/MIME encrypted message, automatically decrypt the original, replace the raw smime.p7m blob with the decrypted content and attachments, and re-enable S/MIME encryption for the new recipients. Requires identity with S/MIME signing/encryption certificates. v0.3.12 (TEST): preserves named text attachments such as TEst.txt instead of confusing their text/plain MIME type with the message body.",
   "browser_specific_settings": {
     "gecko": {
       "id": "forward-decrypt@osclientcerts.dev",

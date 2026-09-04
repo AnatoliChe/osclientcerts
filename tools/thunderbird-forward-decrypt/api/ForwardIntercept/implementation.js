@@ -349,6 +349,10 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
     function mimeHeader(node, name) {
       try {
         if (!node || !node.headers) return null;
+        if (typeof node.headers.getRawHeader === "function") {
+          const raw = node.headers.getRawHeader(name);
+          if (raw != null) return String(raw);
+        }
         if (typeof node.headers.get === "function") {
           const v = node.headers.get(name);
           return v == null ? null : String(v);
@@ -359,6 +363,22 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
       } catch (_) {
         return null;
       }
+    }
+
+    function mimeFilename(node) {
+      if (node?.name) return String(node.name);
+      for (const [header, parameter] of [
+        ["content-disposition", "filename"],
+        ["content-type", "name"],
+      ]) {
+        const value = mimeHeader(node, header) || "";
+        const match = new RegExp(
+          `(?:^|;)\\s*${parameter}\\s*=\\s*(?:"([^"]*)"|([^;\\s]*))`,
+          "i",
+        ).exec(value);
+        if (match) return match[1] || match[2] || "";
+      }
+      return "";
     }
 
     function mimeContentType(node) {
@@ -478,21 +498,23 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
       const ct = mimeContentType(node);
       const cd = (mimeHeader(node, "content-disposition") || "").toLowerCase();
       const cid = mimeHeader(node, "content-id");
+      const name = mimeFilename(node);
       const isEnvelope =
         ct.includes("pkcs7-mime") ||
         ct.includes("enveloped-data") ||
         ct.includes("application/x-pkcs7-mime") ||
-        (node.name || "").toLowerCase().endsWith(".p7m") ||
-        (node.name || "").toLowerCase().endsWith(".p7s");
+        name.toLowerCase().endsWith(".p7m") ||
+        name.toLowerCase().endsWith(".p7s");
 
-      if (!isEnvelope && typeof node.body === "string" && node.name &&
-          !(node.subParts && node.subParts.length) &&
-          !ct.includes("multipart/") && ct !== "text/plain" && ct !== "text/html") {
+      const isNamedAttachment =
+        !!name && (node.isAttachment || cd.includes("attachment"));
+      if (!isEnvelope && typeof node.body === "string" && isNamedAttachment &&
+          !(node.subParts && node.subParts.length) && !ct.includes("multipart/")) {
         const isInline =
           cd.includes("inline") ||
           (ct.startsWith("image/") && (cid || cd.includes("inline")));
         out.push({
-          name: node.name,
+          name,
           contentType: ct || "application/octet-stream",
           isInline: !!isInline,
           body: node.body,
