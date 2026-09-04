@@ -4,17 +4,20 @@
  *
  * ForwardIntercept — privileged (parent) implementation.
  *
- * Wraps nsIMsgComposeService so that when the user triggers a *forward* of an
- * embedded message/rfc822 S/MIME container, the compose type is redirected to
- * a Reply BEFORE the compose window is created. This gives the user a single
- * reply window (with the full decrypted content) and no empty Forward-window
- * flash.
+ * Intercepts the *Forward* action of an embedded message/rfc822 S/MIME
+ * container. The WebExtension compose API cannot intercept the Forward
+ * button/menu/command — those dispatch through the 3-pane window's
+ * ComposeMessage() function in the main process. An Experiment runs in that
+ * same privileged scope, so it can hook ComposeMessage() on every mail:3pane
+ * window and rewrite a forward of an embedded container into a reply BEFORE
+ * the compose window is created. This gives the user a single reply window
+ * (with the full decrypted content) and no empty Forward-window flash.
  *
- * Why a wrapper: the WebExtension compose API cannot intercept the Forward
- * button/menu/command — those dispatch through nsIMsgComposeService in the
- * main process. An Experiment runs in that same privileged scope, so it can
- * look at the actual forward request (the message being forwarded and its
- * type) and rewrite it to a reply.
+ * Why patch ComposeMessage() (a plain JS function on the window scope) instead
+ * of nsIMsgComposeService: the XPCOM service's interface methods are read-only
+ * from JS, so assigning a wrapper on the service instance silently does not
+ * take effect. Window-scope JS functions are reassignable, so this hook is
+ * reliable.
  */
 
 "use strict";
@@ -30,167 +33,235 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
      * inert unless explicitly turned on). */
     let enabled = false;
 
-    /* Compose-type constants (nsIMsgCompType). */
+    /* Compose-type constants (nsIMsgCompType). Only the ones we need. */
     const COMPOSE_TYPE = {
-      New: 0,
-      Reply: 1,
-      ReplyAll: 2,
       ForwardAsAttachment: 3,
       ForwardInline: 4,
-      NewsPost: 5,
       ReplyToSender: 6,
-      ReplyToGroup: 7,
-      ReplyToSenderAndGroup: 8,
-      Draft: 9,
-      Template: 10,
-      MailToUrl: 11,
-      ReplyWithTemplate: 12,
-      ReplyToList: 13,
-      Redirect: 14,
-      EditAsNew: 15,
-      EditTemplate: 16,
     };
 
-    function isForwardType(t) {
+    const patchedWindows = new WeakMap();
+
+    function isForwardType(type) {
       return (
-        t === COMPOSE_TYPE.ForwardAsAttachment ||
-        t === COMPOSE_TYPE.ForwardInline
+        type === COMPOSE_TYPE.ForwardInline ||
+        type === COMPOSE_TYPE.ForwardAsAttachment
       );
     }
 
     /* Best-effort detection of an embedded message/rfc822 container. The
      * forwarded message's own root Content-Type is what the forward composes
-     * from; for an S/MIME container that root is "message/rfc822".
+     * from; for an embedded S/MIME container that root is "message/rfc822".
      *
-     * Signals inspected (any may be absent, so this is best-effort; the
-     * wrapper stays conservative and only converts when we are fairly sure):
+     * Signals inspected (any may be absent, so this is best-effort and we only
+     * convert when we are fairly sure):
      *   o msgHdr.getStringProperty("Content-Type")
      *   o msgHdr.getStringProperty("contentType") / "ContentType"
      */
     function rootLooksEmbeddedContainer(msgHdr) {
-      try {
-        if (!msgHdr) return false;
-        const candidates = [
-          "Content-Type",
-          "ContentType",
-          "content-type",
-          "contentType",
-        ];
-        for (const k of candidates) {
-          let ct = "";
-          try {
-            ct = (msgHdr.getStringProperty(k) || "").trim().toLowerCase();
-          } catch (_) {
-            continue;
-          }
-          if (!ct) continue;
-          if (ct === "message/rfc822") return true;
-          if (ct.startsWith("message/rfc822;")) return true;
-        }
-      } catch (e) {
-        try { Services.console.logStringMessage(`[ForwardIntercept] detect error: ${e}`); } catch (_) {}
+      if (!msgHdr) {
+        return false;
       }
+
+      for (const name of [
+        "Content-Type",
+        "ContentType",
+        "content-type",
+        "contentType",
+      ]) {
+        try {
+          const value = String(msgHdr.getStringProperty(name) || "")
+            .trim()
+            .toLowerCase();
+
+          if (
+            value === "message/rfc822" ||
+            value.startsWith("message/rfc822;")
+          ) {
+            return true;
+          }
+        } catch (_) {}
+      }
+
       return false;
     }
 
-    /* Store the wrapped originals so QI/equality is preserved and we can
-     * restore them on disable. */
-    let origOpenComposeWindow = null;
-    let origOpenComposeWindowWithParams = null;
-
-    /* Wrap an OpenComposeWindow call with type-based redirection.
-     * Signature (from nsIMsgComposeService.idl):
-     *   OpenComposeWindow(msgComposeWindowURL, msgHdr, originalMsgURI, type,
-     *                     format, identity, from, aMsgWindow, [selectionHTML],
-     *                     [autodetectCharset])
-     */
-    function wrappedOpenComposeWindow() {
-      const args = Array.from(arguments);
-      const type = args[3];
-      const msgHdr = args[1];
-      const originalMsgURI = args[2];
-
-      if (enabled && isForwardType(type) && rootLooksEmbeddedContainer(msgHdr)) {
-        const newType = COMPOSE_TYPE.ReplyToSender;
-        args[3] = newType;
-        Services.console.logStringMessage(
-          `[ForwardIntercept] redirecting forward (type=${type}) -> reply (type=${newType}) for embedded container "${originalMsgURI}"`
-        );
-        return origOpenComposeWindow.apply(null, args);
+    function patchWindow(win) {
+      if (!win || win.closed) {
+        return;
       }
-      return origOpenComposeWindow.apply(null, args);
+
+      if (patchedWindows.has(win)) {
+        return;
+      }
+
+      const original = win.ComposeMessage;
+
+      if (typeof original !== "function") {
+        Services.console.logStringMessage(
+          "[ForwardIntercept] ComposeMessage not found"
+        );
+        return;
+      }
+
+      const wrapped = async function (
+        type,
+        format,
+        folder,
+        messageArray,
+        selection = null,
+        autodetectCharset = false
+      ) {
+        try {
+          if (
+            enabled &&
+            isForwardType(type) &&
+            messageArray &&
+            messageArray.length === 1
+          ) {
+            let hdr = null;
+
+            try {
+              hdr = win.messenger.msgHdrFromURI(messageArray[0]);
+            } catch (_) {}
+
+            if (rootLooksEmbeddedContainer(hdr)) {
+              Services.console.logStringMessage(
+                `[ForwardIntercept] redirect Forward -> Reply BEFORE compose window: ${messageArray[0]}`
+              );
+
+              type = COMPOSE_TYPE.ReplyToSender;
+            }
+          }
+        } catch (e) {
+          Services.console.logStringMessage(
+            `[ForwardIntercept] wrapper error: ${e}`
+          );
+        }
+
+        return original.call(
+          this,
+          type,
+          format,
+          folder,
+          messageArray,
+          selection,
+          autodetectCharset
+        );
+      };
+
+      win.ComposeMessage = wrapped;
+
+      patchedWindows.set(win, {
+        original,
+        wrapped,
+      });
+
+      Services.console.logStringMessage(
+        "[ForwardIntercept] ComposeMessage patched"
+      );
     }
 
-    /* Wrap OpenComposeWindowWithParams (the path compose commands commonly use
-     * via ComposeMessageInTabOrWindow). The type lives on the params object. */
-    function wrappedOpenComposeWindowWithParams() {
-      const args = Array.from(arguments);
-      const params = args[1];
-      if (enabled && params) {
-        let currentType = -1;
-        try { currentType = params.type; } catch (_) {}
-        if (isForwardType(currentType)) {
-          /* Try to inspect the message header for an embedded container. */
-          let msgHdr = null;
-          try { msgHdr = params.origMsgHdr; } catch (_) {}
-          if (!msgHdr) {
-            /* Fall back to compFields/originalMsgURI if header is not exposed. */
-          }
-          if (rootLooksEmbeddedContainer(msgHdr)) {
-            const newType = COMPOSE_TYPE.ReplyToSender;
-            try { params.type = newType; } catch (e) {
-              Services.console.logStringMessage(`[ForwardIntercept] could not set params.type: ${e}`);
-            }
-            Services.console.logStringMessage(
-              `[ForwardIntercept][params] redirecting forward (type=${currentType}) -> reply (type=${newType})`
-            );
-          }
+    function unpatchWindow(win) {
+      const state = patchedWindows.get(win);
+
+      if (!state) {
+        return;
+      }
+
+      try {
+        if (win.ComposeMessage === state.wrapped) {
+          win.ComposeMessage = state.original;
+        }
+      } catch (_) {}
+
+      patchedWindows.delete(win);
+    }
+
+    function patchAllWindows() {
+      const enumerator = Services.wm.getEnumerator("mail:3pane");
+
+      while (enumerator.hasMoreElements()) {
+        try {
+          patchWindow(enumerator.getNext());
+        } catch (e) {
+          Services.console.logStringMessage(
+            `[ForwardIntercept] patchWindow failed: ${e}`
+          );
         }
       }
-      return origOpenComposeWindowWithParams.apply(this, args);
     }
 
-    /* Install / remove the wrappers on the compose service singleton. */
-    function install() {
-      const composeService = Cc["@mozilla.org/messengercompose;1"]
-        .createInstance(Ci.nsIMsgComposeService);
-      if (!composeService) {
-        Services.console.logStringMessage("[ForwardIntercept] compose service not available");
+    function isPatchableWindow(win) {
+      try {
+        const href = win.location?.href || "";
+        return (
+          href.includes("messenger.xhtml") || href.includes("about:3pane")
+        );
+      } catch (_) {
         return false;
       }
-      if (origOpenComposeWindow == null) {
-        origOpenComposeWindow = composeService.OpenComposeWindow.bind(composeService);
-      }
-      if (origOpenComposeWindowWithParams == null) {
-        origOpenComposeWindowWithParams = composeService.OpenComposeWindowWithParams.bind(composeService);
-      }
-      /* Reassignment on the XPCOM instance is honored for scriptable methods;
-       * we store the wrapped bound functions so `this` stays the service.
-       * TEST: confirm the assignment actually took effect (on some build the
-       * methods are read-only on the interface object). */
-      const before = composeService.OpenComposeWindow;
-      composeService.OpenComposeWindow = wrappedOpenComposeWindow;
-      composeService.OpenComposeWindowWithParams = wrappedOpenComposeWindowWithParams;
-      const patched =
-        composeService.OpenComposeWindow === wrappedOpenComposeWindow &&
-        composeService.OpenComposeWindowWithParams === wrappedOpenComposeWindowWithParams;
+    }
+
+    const windowListener = {
+      onOpenWindow(xulWindow) {
+        const win = xulWindow.docShell?.domWindow;
+
+        if (!win) {
+          return;
+        }
+
+        win.addEventListener(
+          "load",
+          () => {
+            try {
+              if (isPatchableWindow(win)) {
+                patchWindow(win);
+              }
+            } catch (_) {}
+          },
+          { once: true }
+        );
+      },
+
+      onCloseWindow(xulWindow) {
+        const win = xulWindow.docShell?.domWindow;
+
+        try {
+          unpatchWindow(win);
+        } catch (_) {}
+      },
+
+      onWindowTitleChange() {},
+    };
+
+    function install() {
+      Services.wm.addListener(windowListener);
+      patchAllWindows();
+
       Services.console.logStringMessage(
-        `[ForwardIntercept] compose service wrapped; patch APPLIED=${patched}` +
-          (patched ? "" : ` (before identity preserved: ${composeService.OpenComposeWindow === before})`)
+        "[ForwardIntercept] installed"
       );
+
       return true;
     }
 
     function uninstall() {
       try {
-        const composeService = Cc["@mozilla.org/messengercompose;1"]
-          .createInstance(Ci.nsIMsgComposeService);
-        if (origOpenComposeWindow) composeService.OpenComposeWindow = origOpenComposeWindow;
-        if (origOpenComposeWindowWithParams) composeService.OpenComposeWindowWithParams = origOpenComposeWindowWithParams;
-        Services.console.logStringMessage("[ForwardIntercept] compose service unwrapped");
-      } catch (e) {
-        Services.console.logStringMessage(`[ForwardIntercept] uninstall error: ${e}`);
+        Services.wm.removeListener(windowListener);
+      } catch (_) {}
+
+      const enumerator = Services.wm.getEnumerator("mail:3pane");
+
+      while (enumerator.hasMoreElements()) {
+        try {
+          unpatchWindow(enumerator.getNext());
+        } catch (_) {}
       }
+
+      Services.console.logStringMessage(
+        "[ForwardIntercept] uninstalled"
+      );
     }
 
     return {
@@ -198,12 +269,23 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
         async getEnabled() {
           return enabled;
         },
-        async setEnabled(newEnabled) {
-          if (!!newEnabled !== enabled) {
-            const ok = !!newEnabled ? install() : uninstall();
-            if (!!newEnabled && !ok) return false;
-            enabled = !!newEnabled;
+
+        async setEnabled(value) {
+          value = !!value;
+
+          if (value === enabled) {
+            return enabled;
           }
+
+          if (value) {
+            if (!install()) {
+              return false;
+            }
+          } else {
+            uninstall();
+          }
+
+          enabled = value;
           return enabled;
         },
       },

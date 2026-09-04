@@ -108,11 +108,7 @@ If the Experiment is unavailable or disabled, the classic unprivileged fallback 
 5. **Closes the original (empty) forward window** and leaves the reply window open
    for the user to add new recipients and hit Send.
 
-This keeps text, inline images, and attachments intact. The `experiments` checkbox in the
-add-on options (Off by default) also runs a diagnostic probe that opens and inspects
-forward/reply windows. This is only for debugging and is safe — the add-on's own guard sets
-(`selfOpenedTabIds`, `handledEmbeddedMessageIds`, `embeddedExperimentRunning`) prevent the
-re-entrancy cascade that once caused thousands of compose windows to open.
+This keeps text, inline images, and attachments intact.
 
 Two delayed sweeps (3 s and 8 s) handle the case where TB adds the `smime.p7m` attachment
 asynchronously after the initial pass. The `smime.p7m` envelope attachment is also removed

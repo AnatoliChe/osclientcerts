@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- decrypt & re-encrypt S/MIME forward",
-  "version": "0.2.2",
-  "description": "When forwarding an S/MIME encrypted message, automatically decrypt the original, replace the raw smime.p7m blob with the decrypted content and attachments, and re-enable S/MIME encryption for the new recipients. Requires identity with S/MIME signing/encryption certificates. v0.2.2 (TEST): privileged ForwardIntercept Experiment redirects an embedded message/rfc822 forward directly to a reply at compose-open time, so a single reply window opens with the full decrypted content (no empty Forward-window flash).",
+  "version": "0.2.3",
+  "description": "When forwarding an S/MIME encrypted message, automatically decrypt the original, replace the raw smime.p7m blob with the decrypted content and attachments, and re-enable S/MIME encryption for the new recipients. Requires identity with S/MIME signing/encryption certificates. v0.2.3 (TEST): privileged ForwardIntercept Experiment patches the mail window's ComposeMessage to redirect an embedded message/rfc822 forward directly to a reply at compose-open time, so a single reply window opens with the full decrypted content (no empty Forward-window flash).",
   "browser_specific_settings": {
     "gecko": {
       "id": "forward-decrypt@osclientcerts.dev",

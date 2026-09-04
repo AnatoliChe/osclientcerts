@@ -57,15 +57,10 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 /* ---- Tab bookkeeping ---- */
 const processedTabIds   = new Set();
 const pendingTabPollers = new Set();
-/* Tabs opened by THIS plugin (e.g. beginForward / beginReply) — these must
- * NEVER be re-processed, otherwise the experimental embedded-handler would
+/* Tabs opened by THIS plugin (e.g. the reply window rebuilt for an embedded
+ * container) — these must NEVER be re-processed, otherwise the plugin would
  * cascade and spawn unbounded compose windows. */
 const selfOpenedTabIds  = new Set();
-/* messageIds for which the embedded experiment has already run — prevent
- * re-running it for the same container (even from user-opened windows). */
-const handledEmbeddedMessageIds = new Set();
-/* Global re-entrancy lock for the embedded experiment. */
-let embeddedExperimentRunning = false;
 
 /* Clean up on tab close */
 browser.tabs.onRemoved.addListener(tabId => {
@@ -435,8 +430,6 @@ async function rebuildForwardCompose(tabId, messageId, composeDetails) {
 }
 
 /* ======================================================================
- * experimentalHandleEmbedded
-/* ======================================================================
  * handleEmbeddedForward
  * Final logic for a message/rfc822 container that is an S/MIME forward.
  *
@@ -596,140 +589,6 @@ async function handleExperimentReplyTab(tabId, messageId) {
 }
 
 /* ======================================================================
- * EXPERIMENTAL (debug build): for a message/rfc822 container whose S/MIME
- * envelope cannot be reached via the messages API (getFull/listInlineTextParts
- * /listAttachments do not surface the decrypted inner content), open
- * compose.beginForward(...) and compose.beginReply(...) on the container and
- * log what getComposeDetails returns (body, plainTextBody, attachments).
- * The opened windows are intentionally LEFT OPEN for visual inspection.
- * This collects facts so we can decide the final implementation.
- * ====================================================================== */
-async function experimentalHandleEmbedded(tabId, messageId) {
-  debug(`[experiment] rootType=message/rfc822 for messageId ${messageId}, tab ${tabId} — entering embedded experiment`);
-
-  /* Re-entrancy guard: never run the experiment twice at once and never
-   * re-run it for the same container. Prevents the infinite cascade of
-   * compose windows caused by the plugin opening windows that itself then
-   * processes. */
-  if (embeddedExperimentRunning) {
-    debug(`[experiment] already running, aborting re-entrant call for messageId ${messageId}`);
-    return;
-  }
-  if (handledEmbeddedMessageIds.has(messageId)) {
-    debug(`[experiment] messageId ${messageId} already handled, skipping`);
-    return;
-  }
-  handledEmbeddedMessageIds.add(messageId);
-  embeddedExperimentRunning = true;
-
-  async function listAtts(tabId) {
-    try {
-      const list = await browser.compose.listAttachments(tabId);
-      return (list || []).map(a => ({ id: a.id, name: a.name, size: a.size, type: a.type }));
-    } catch (e) {
-      warn(`[experiment] ${name}: listAttachments failed:`, e.message || e);
-      return null;
-    }
-  }
-
-  async function inspectTab(name, openFn, delayMs) {
-    const winTab = await openFn();
-    debug(`[experiment] ${name}: compose window opened, tabId=${winTab?.id}`);
-    /* Mark the window we opened so processComposeTab skips it — this is the
-     * key guard against the infinite window cascade. */
-    if (winTab && winTab.id) selfOpenedTabIds.add(winTab.id);
-    const tabId = winTab && winTab.id;
-    const d = await waitForComposeDetails(tabId);
-    if (!d) {
-      debug(`[experiment] ${name}: could not read compose details`);
-      return null;
-    }
-    const atts = (d.attachments || []).map(a => ({ name: a.name, size: a.size, type: a.type }));
-    debug(`[experiment] ${name}: getComposeDetails (t0) =>`,
-      { type: d.type,
-        subject: d.subject,
-        bodyLen: d.body ? d.body.length : undefined,
-        plainTextBodyLen: d.plainTextBody ? d.plainTextBody.length : undefined,
-        to: (d.toRecipients || []), cc: (d.ccRecipients || []),
-        attachments: atts, encryption: d.encryption });
-
-    /* Real file attachments may arrive LATER than the visible body (like the
-     * smime envelope does). Re-read the attachment list after a delay to see
-     * whether e.g. the forwarded txt file is materialized. */
-    if (delayMs) {
-      await sleep(delayMs);
-      const later = await listAtts(tabId);
-      debug(`[experiment] ${name}: attachments after +${delayMs}ms =>`, later);
-    }
-    return d;
-  }
-
-  try {
-    const fwd = await inspectTab("beginForward(container)", () =>
-      browser.compose.beginForward(messageId, "forwardInline"), 4000);
-
-    const rep = await inspectTab("beginReply(container)", () =>
-      browser.compose.beginReply(messageId, "replyToSender"), 8000);
-
-    const fwdBody = fwd && (fwd.body || fwd.plainTextBody) ? fwd.body && fwd.body.length || (fwd.plainTextBody && fwd.plainTextBody.length) : 0;
-    const repBody = rep && (rep.body || rep.plainTextBody) ? rep.body && rep.body.length || (rep.plainTextBody && rep.plainTextBody.length) : 0;
-    const fwdAtts = fwd ? (fwd.attachments || []).filter(a => !/\.p7[ms]$/i.test(a.name || "")).length : 0;
-    const repAtts = rep ? (rep.attachments || []).filter(a => !/\.p7[ms]$/i.test(a.name || "")).length : 0;
-
-    debug(`[experiment] CONCLUSION: forward => bodyLen=${fwdBody}, realAttachments=${fwdAtts}; reply => bodyLen=${repBody}, realAttachments=${repAtts}. Windows left open for inspection.`);
-
-    /* ---- DEEP PROBE: can we see the decrypted inner parts at all? ---- */
-    try {
-      const full = await browser.messages.getFull(messageId, { decrypt: true });
-      debug(`[experiment][deep] getFull(decrypt:true) root:`,
-        { contentType: full?.contentType, decryptionStatus: full?.decryptionStatus, partCount: (full?.parts || []).length });
-      walkParts(full, (p, pathName) => {
-        debug(`[experiment][deep:decrypt] part ${pathName || "(root)"}:`,
-          { contentType: p.contentType, disposition: p.contentDisposition, name: p.name, partName: p.partName,
-            size: p.size, bodyLen: (p.body != null) ? p.body.length : undefined,
-            subParts: (p.parts || []).length });
-      });
-    } catch (e) {
-      warn(`[experiment][deep] getFull(decrypt:true) FAILED:`, e.message || e);
-    }
-
-    /* Try messages.listAttachments (decryption-aware) and pull each file. */
-    try {
-      const atts = await browser.messages.listAttachments(messageId);
-      debug(`[experiment][deep] messages.listAttachments(${messageId}) =>`, (atts || []).map(a =>
-        ({ name: a.name, size: a.size, partName: a.partName, contentType: a.contentType })));
-      for (const a of (atts || [])) {
-        for (const pn of [a.partName].filter(Boolean)) {
-          try {
-            const f = await browser.messages.getAttachmentFile(messageId, pn);
-            debug(`[experiment][deep] getAttachmentFile(${messageId}, "${pn}") OK: size=${f && f.size} type=${f && f.type}`);
-          } catch (e2) {
-            warn(`[experiment][deep] getAttachmentFile(${messageId}, "${pn}") FAILED:`, e2.message || e2);
-          }
-        }
-      }
-    } catch (e) {
-      warn(`[experiment][deep] messages.listAttachments FAILED:`, e.message || e);
-    }
-
-    /* Try retrieving the decrypted inner parts directly by their partName.
-     * The inline image src / txt are at part 1.x inside the smime.p7m CMS;
-     * if getAttachmentFile can address them from the decrypted message, we
-     * can recover the images/attachments for the forward. */
-    for (const pn of ["1", "1.1", "1.1.1", "1.1.1.1", "1.1.1.1.2", "1.1.1.1.3", "1.1.2", "1.2"]) {
-      try {
-        const f = await browser.messages.getAttachmentFile(messageId, pn);
-        debug(`[experiment][deep] getAttachmentFile(${messageId}, "${pn}") OK: size=${f && f.size} type=${f && f.type}`);
-      } catch (e3) {
-        debug(`[experiment][deep] getAttachmentFile(${messageId}, "${pn}") ->`, (e3 && e3.message) || e3);
-      }
-    }
-  } finally {
-    embeddedExperimentRunning = false;
-  }
-}
-
-/* ======================================================================
  * processComposeTab
  * ====================================================================== */
 async function processComposeTab(tabId) {
@@ -820,20 +679,13 @@ async function processComposeTab(tabId) {
     /* message/rfc822 container: the full decrypted content (body, inline
      * images, attachments) is only reachable through a reply window, which
      * handleEmbeddedForward rebuilds and leaves for the user (original forward
-     * window is closed). The diagnostic experiment only runs if that fails. */
+     * window is closed). */
     log(`processComposeTab(${tabId}): embedded message/rfc822 container — rebuilding as reply`);
     let ok = false;
     try {
       ok = await handleEmbeddedForward(tabId, relatedMessageId, details);
     } catch (e) {
       warn("handleEmbeddedForward failed", e);
-    }
-    if (experimentsEnabled && !ok) {
-      try {
-        await experimentalHandleEmbedded(tabId, relatedMessageId);
-      } catch (e) {
-        warn("experimentalHandleEmbedded failed", e);
-      }
     }
     /* Successful reply-forward closes the original forward tab — no sweeps on
      * it. On failure the tab may still be open; sweep it anyway. */
