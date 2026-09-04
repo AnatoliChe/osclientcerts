@@ -466,11 +466,29 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
           const decrypter = new MimeTreeDecrypter({ disablePrompts: true });
           await decrypter.decrypt(root);
 
+          // Diagnostic: log the full tree after decryption so we can see how
+          // jsmime structured the embedded rfc822 and where the decrypted body
+          // actually landed.
+          const treeSummary = [];
+          (function dump(n, depth) {
+            if (!n) return;
+            treeSummary.push(
+              " ".repeat(depth * 2) +
+                (n.contentType || "?") +
+                " | name=" + (n.name || "-") +
+                " | body=" + (typeof n.body === "string" ? n.body.length : "none") +
+                " | subs=" + ((n.subParts || []).length)
+            );
+            for (const c of n.subParts || []) dump(c, depth + 1);
+          })(root, 0);
+          notes.push("postDecryptTree=[" + treeSummary.join("; ") + "]");
+          notes.push("decryptFailure=" + decrypter.decryptFailure + ", cryptoChanged=" + decrypter.cryptoChanged);
+
           let inner = null;
           (function findDecrypted(node) {
             if (inner || !node) return;
             if ((node.contentType || "").toLowerCase().includes("pkcs7-mime") &&
-                typeof node.body === "string") {
+                typeof node.body === "string" && node.body.length) {
               inner = node.body;
               return;
             }
