@@ -38,8 +38,16 @@ var { ExtensionCommon } = ChromeUtils.importESModule(
 var { MailServices } = ChromeUtils.importESModule(
   "resource:///modules/MailServices.sys.mjs"
 );
-var { MimeTreeDecrypter, getMimeTree } = ChromeUtils.importESModule(
+var {
+  MimeTreeDecrypter,
+  MimeTreeEmitter,
+  getMimeTree,
+  mimeTreeToString,
+} = ChromeUtils.importESModule(
   "chrome://openpgp/content/modules/MimeTree.sys.mjs"
+);
+var { jsmime } = ChromeUtils.importESModule(
+  "resource:///modules/jsmime.sys.mjs"
 );
 
 var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
@@ -353,6 +361,18 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
       }
     }
 
+    function mimeContentType(node) {
+      try {
+        const structured = node?.headers?.contentType ||
+          node?.headers?.get?.("content-type");
+        if (structured?.type) return String(structured.type).toLowerCase();
+      } catch (_) {}
+      return String(node?.fullContentType || node?.contentType || "")
+        .split(";", 1)[0]
+        .trim()
+        .toLowerCase();
+    }
+
     /* Stream a whole-message URI (e.g. imap-message://…#204) into a string
      * holding the RAW message bytes (one char == one byte). This is the same
      * streaming Thunderbird's message APIs use for full messages; it only fails
@@ -411,10 +431,33 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
       return btoa(clean);
     }
 
+    /* Parse a decrypted MIME entity while asking MimeTreeEmitter to identify
+     * attachments and retain their decoded bodies. getMimeTree() deliberately
+     * uses the emitter's compatibility mode, which does not populate `name` or
+     * `isAttachment`; those fields are required by walkDecryptedParts(). */
+    function getAttachmentMimeTree(mimeString, notes) {
+      const emitter = new MimeTreeEmitter({
+        enableFilterMode: true,
+        checkForAttachments: true,
+      });
+      try {
+        const parser = new jsmime.MimeParser(emitter, {
+          strformat: "unicode",
+          bodyformat: "decode",
+          stripcontinuations: false,
+        });
+        parser.deliverData(mimeString);
+        return emitter.mimeTree.subParts[0] || null;
+      } catch (e) {
+        notes?.push(`attachment MIME parse failed: ${e}`);
+        return null;
+      }
+    }
+
     /* Recursively gather the decrypted file attachments from a MimeTreePart. */
     function walkDecryptedParts(node, out) {
       if (!node) return;
-      const ct = (node.contentType || "").toLowerCase();
+      const ct = mimeContentType(node);
       const cd = (mimeHeader(node, "content-disposition") || "").toLowerCase();
       const cid = mimeHeader(node, "content-id");
       const isEnvelope =
@@ -432,7 +475,7 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
           (ct.startsWith("image/") && (cid || cd.includes("inline")));
         out.push({
           name: node.name,
-          contentType: node.contentType || ct,
+          contentType: ct || "application/octet-stream",
           isInline: !!isInline,
           body: node.body,
         });
@@ -493,38 +536,38 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
           notes.push("postDecryptTree=[" + treeSummary.join("; ") + "]");
           notes.push("decryptFailure=" + decrypter.decryptFailure + ", cryptoChanged=" + decrypter.cryptoChanged);
 
-          let inner = null;
-          /* jsmime flattens the embedded message/rfc822 into a single leaf: the
-           * whole pkcs7 part lands in root.body (post-decrypt = the decrypted
-           * message body), with no subParts and no contentType set. So take
-           * root.body directly when the decrypter actually decrypted (it
-           * replaces that body in-place); fall back to scanning subParts in
-           * case a future shape nests deeper. */
+          let innerNode = null;
+          /* decryptSMIME() splits the decrypted entity into headers and body:
+           * it installs the inner Content-* headers on the encrypted tree node
+           * and leaves only the payload in node.body. Reconstruct both pieces
+           * before parsing again, otherwise a multipart body has no Content-Type
+           * or boundary and getMimeTree() returns null. */
           if (decrypter.cryptoChanged && typeof root.body === "string" && root.body.length) {
-            inner = root.body;
+            innerNode = root;
           } else {
             (function findDecrypted(node) {
-              if (inner || !node) return;
-              if ((node.contentType || "").toLowerCase().includes("pkcs7-mime") &&
+              if (innerNode || !node) return;
+              if ((node.fullContentType || "").toLowerCase().includes("pkcs7-mime") &&
                   typeof node.body === "string" && node.body.length) {
-                inner = node.body;
+                innerNode = node;
                 return;
               }
               for (const c of node.subParts || []) findDecrypted(c);
             })(root);
           }
 
-          if (!inner) {
+          if (!innerNode) {
             notes.push("no decrypted body found (decryptFailure=" + decrypter.decryptFailure + ")");
             logMsg(JSON.stringify(notes));
             return { rows, log: notes };
           }
-          notes.push(`decrypted ${inner.length} bytes`);
+          const inner = mimeTreeToString(innerNode, true);
+          notes.push(`decrypted entity ${inner.length} bytes (body=${innerNode.body.length})`);
 
           // 3) Re-parse the decrypted message and read attachment bodies.
-          const decryptedTree = getMimeTree(inner, true);
+          const decryptedTree = getAttachmentMimeTree(inner, notes);
           if (!decryptedTree) {
-            notes.push("getMimeTree(decrypted) returned null");
+            notes.push("getAttachmentMimeTree(decrypted) returned null");
             logMsg(JSON.stringify(notes));
             return { rows, log: notes };
           }
