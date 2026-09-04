@@ -42,6 +42,9 @@ var { MsgHdrToMimeMessage } = ChromeUtils.importESModule(
 var { MailServices } = ChromeUtils.importESModule(
   "resource:///modules/MailServices.sys.mjs"
 );
+var { NetUtil } = ChromeUtils.importESModule(
+  "resource://gre/modules/NetUtil.sys.mjs"
+);
 
 var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
   getAPI(context) {
@@ -330,67 +333,54 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
 
     /* ---- Decrypted-attachment extraction (Path B) ---- */
 
-    /* Read a MIME part URL (e.g. imap://…?part=1.1.1.1.2) via Thunderbird's
-     * message service. Once the message has been streamed+decrypted by
-     * MsgHdrToMimeMessage, Thunderbird's DecryptVerify cache serves subsequent
-     * part requests with the DECRYPTED bytes, so this yields the real file
-     * content for an S/MIME embedded container. Returns the raw bytes as a
-     * JS string (one char == one byte, Latin-1 safe). */
-    function streamUrlToString(url) {
-      return new Promise(resolve => {
-        const chunks = [];
-        let stream = null;
-        const listener = {
-          onStartRequest() {},
-          onDataAvailable(aRequest, aInputStream, aOffset, aCount) {
-            if (!stream) {
-              stream = Cc[
-                "@mozilla.org/scriptableinputstream;1"
-              ].createInstance(Ci.nsIScriptableInputStream);
-              stream.init(aInputStream);
-            }
-            chunks.push(stream.read(aCount));
-          },
-          onStopRequest(aRequest, status) {
-            resolve({
-              ok: Components.isSuccessCode(status),
-              data: chunks.join(""),
-            });
-          },
-          QueryInterface: ChromeUtils.generateQI([
-            "nsIStreamListener",
-            "nsIRequestObserver",
-          ]),
-        };
-        try {
-          const service = MailServices.messageServiceFromURI(url);
-          if (!service) {
-            Services.console.logStringMessage(
-              `[ForwardIntercept] no message service for ${url}`
-            );
-            resolve({ ok: false, data: "" });
-            return;
-          }
-          service.streamMessage(url, listener, null, null, false, "");
-        } catch (e) {
-          Services.console.logStringMessage(
-            `[ForwardIntercept] stream ${url} threw: ${e}`
-          );
-          resolve({ ok: false, data: "" });
-        }
-      });
-    }
-
+    /* Read a MIME part URL (e.g. imap://…?part=1.1.1.1.2) into a base64 string.
+     * The correct Thunderbird primitive for a part URL is NetUtil.asyncFetch
+     * (NOT messageServiceFromURI().streamMessage, which needs a whole-message
+     * URI and fails with NS_MSG_ERROR_FOLDER_MISSING). Thunderbird's main-process
+     * URL handler serves the DECRYPTED part content, and loadUsingSystemPrincipal
+     * bypasses the nullprincipal security block the reader hits when it tries to
+     * fetch these same URLs. */
     async function streamUrlToBase64(url) {
       try {
-        const { ok, data } = await streamUrlToString(url);
-        if (!ok || !data) {
-          Services.console.logStringMessage(
-            `[ForwardIntercept] stream ${url}: not ok (len=${(data || "").length})`
+        const sourceURI = Services.io.newURI(url);
+        const buffer = await new Promise((resolve, reject) => {
+          NetUtil.asyncFetch(
+            {
+              uri: sourceURI,
+              loadUsingSystemPrincipal: true,
+            },
+            (inputStream, status) => {
+              if (Components.isSuccessCode(status)) {
+                try {
+                  resolve(NetUtil.readInputStream(inputStream));
+                } catch (e) {
+                  reject(e);
+                }
+              } else {
+                reject(
+                  new Components.Exception(
+                    `Failed to fetch ${url} (${status})`,
+                    status
+                  )
+                );
+              }
+            }
           );
-          return "";
+        });
+        if (!buffer) return "";
+        if (typeof btoa !== "function") return "";
+        /* readInputStream historically returned a Latin-1 string; newer
+         * Thunderbird returns an ArrayBuffer. Handle both. */
+        if (typeof buffer === "string") {
+          return btoa(buffer);
         }
-        return typeof btoa === "function" ? btoa(data) : "";
+        const u8 =
+          buffer instanceof Uint8Array
+            ? buffer
+            : new Uint8Array(buffer || 0);
+        let s = "";
+        for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+        return btoa(s);
       } catch (e) {
         Services.console.logStringMessage(
           `[ForwardIntercept] streamUrlToBase64(${url}) err: ${e}`
