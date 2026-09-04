@@ -326,7 +326,6 @@ async function fetchFirstDecryptedAttachment(messageId, part, path = "") {
 }
 
 async function dumpAttachmentSources(tabId, messageId) {
-  await sleep(3000); /* let the decrypted content / attachments materialize */
   const out = {};
 
   try {
@@ -695,6 +694,11 @@ async function handleExperimentReplyTab(tabId, messageId) {
 
   await Promise.all([clearRecipients(), retitleSubject()]);
 
+  /* A redirected reply can become writable before Thunderbird finishes
+   * replacing its compose model. Adding a file during that window may emit
+   * onAttachmentAdded and still be discarded by the later refresh. */
+  await sleep(3000);
+
   /* 0.3.x diagnostic: where do the decrypted attachments live? Debug-only. */
   if (debugEnabled) {
     try { await dumpAttachmentSources(tabId, messageId); } catch (e) { warn("[probe] failed:", e); }
@@ -730,12 +734,34 @@ async function handleExperimentReplyTab(tabId, messageId) {
         if (att.contentType && att.contentType.startsWith("image/")) continue;
         try {
           const bytes = Uint8Array.from(atob(att.dataBase64), c => c.charCodeAt(0));
-          const file = new File([bytes], att.name || "attachment", {
-            type: att.contentType || "application/octet-stream",
-          });
-          await browser.compose.addAttachment(tabId, { file, name: att.name || file.name });
-          added++;
-          log(`[experiment] re-attached "${att.name}" (${bytes.length} bytes) to window ${tabId}`);
+          const name = att.name || "attachment";
+          let persistent = false;
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            const current = await browser.compose.listAttachments(tabId);
+            const found = current.some(item => item.name === name);
+            debug(`[experiment] attachment persistence check ${attempt} for "${name}": found=${found}; current=${current.map(item => item.name).join(",")}`);
+            if (found) {
+              await sleep(2000);
+              const stable = await browser.compose.listAttachments(tabId);
+              if (stable.some(item => item.name === name)) {
+                persistent = true;
+                break;
+              }
+              warn(`[experiment] attachment "${name}" disappeared after add; retrying`);
+            }
+            const file = new File([bytes], name, {
+              type: att.contentType || "application/octet-stream",
+            });
+            await browser.compose.addAttachment(tabId, { file, name });
+            log(`[experiment] add attempt ${attempt} for "${name}" (${bytes.length} bytes) on window ${tabId}`);
+            await sleep(1000);
+          }
+          if (persistent) {
+            added++;
+            log(`[experiment] re-attached and verified "${name}" (${bytes.length} bytes) on window ${tabId}`);
+          } else {
+            warn(`[experiment] attachment "${name}" was not persistent after retries`);
+          }
         } catch (e5) {
           warn(`[experiment] addAttachment FAILED for "${att.name}":`, e5);
         }

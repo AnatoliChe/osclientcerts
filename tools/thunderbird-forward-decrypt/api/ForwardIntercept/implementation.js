@@ -652,7 +652,7 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
               rows.push({
                 name: p.name,
                 contentType: p.contentType,
-                size: (b64.length * 3) / 4,
+                size: p.body.length,
                 dataBase64: b64,
               });
               notes.push(`-> GOT bytes for ${p.name} (${rows[rows.length - 1].size}b)`);
