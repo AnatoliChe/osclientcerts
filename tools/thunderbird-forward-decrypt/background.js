@@ -288,19 +288,43 @@ function retitleReplyToForward(subject) {
 
 /* ======================================================================
  * dumpAttachmentSources
- * 0.3.0 diagnostic probe: for an embedded message/rfc822 S/MIME container,
- * report where the decrypted attachment bytes actually live. The WebExtension
- * messages API only surfaces the smime envelope for such nested containers, so
- * we probe three candidate sources on the real (attachment-bearing) message:
+ * Diagnostic probe for the embedded message/rfc822 S/MIME container: report
+ * where the decrypted body + standalone attachment bytes actually live. We
+ * probe four candidate sources:
  *   1. replyWindow  - getComposeDetails(tabId).attachments (what TB put in the
  *                     materialized reply CompFields)
  *   2. apiList      - browser.messages.listAttachments(messageId)
- *   3. apiGetFirst  - try browser.messages.getAttachmentFile(messageId, part)
- *                     on the first non-inline, non-envelope part
- * Debug-only. This determines whether the attachment re-add in
- * handleExperimentReplyTab can source bytes from the messages API (Path A) or
- * needs a new privileged ForwardIntercept extraction (Path B).
+ *   3. decrypted    - getFull(messageId) with decrypt:true — dump the full part
+ *                     tree AND the leaf parts that look like real attachments,
+ *                     then try getAttachmentFile on a nested part (Path A test)
+ *   4. inlineParts  - browser.messages.listInlineTextParts(messageId)
+ * Debug-only. Decides whether the attachment re-add in handleExperimentReplyTab
+ * can source bytes from the messages API (Path A) or needs a new privileged
+ * ForwardIntercept extraction (Path B).
  * ====================================================================== */
+async function fetchFirstDecryptedAttachment(messageId, part, path = "") {
+  if (!part) return;
+  const fileName = p => (p.name || p.partName || "").toString().toLowerCase();
+  /* Try this node if it looks like a real (non-envelope, non-inline) part. */
+  const n = fileName(part);
+  const disp = part.contentDisposition;
+  if (!(n.endsWith(".p7m") || n.endsWith(".p7s")) && disp !== "inline") {
+    const partName = part.partName || path || "";
+    if (partName) {
+      try {
+        const f = await browser.messages.getAttachmentFile(messageId, partName);
+        debug(`[probe] getAttachmentFile OK part=${partName} name=${part.name} ct=${part.contentType} size=${f && f.size}`);
+      } catch (e) {
+        debug(`[probe] getAttachmentFile FAIL part=${partName} name=${part.name}:`, e.message);
+      }
+    }
+  }
+  const subs = part.parts || [];
+  for (let i = 0; i < subs.length; i++) {
+    await fetchFirstDecryptedAttachment(messageId, subs[i], path ? `${path}.${i + 1}` : `${i + 1}`);
+  }
+}
+
 async function dumpAttachmentSources(tabId, messageId) {
   await sleep(3000); /* let the decrypted content / attachments materialize */
   const out = {};
@@ -325,26 +349,32 @@ async function dumpAttachmentSources(tabId, messageId) {
     out.apiList = "ERR " + e.message;
   }
 
-  out.apiGetFirst = null;
+  /* The key Path-A test: does getFull(decrypt:true) surface the decrypted
+   * body + attachment parts (as nested sub-parts)? canDecrypt reported
+   * decryptionStatus=success, so the engine CAN decrypt — the question is
+   * whether the resulting tree exposes the inner parts via the WE API. */
   try {
-    const list = await browser.messages.listAttachments(messageId);
-    for (const a of list) {
-      const n = (a.name || "").toLowerCase();
-      if (a.contentDisposition === "inline") continue;
-      if (n.endsWith(".p7m") || n.endsWith(".p7s")) continue;
-      try {
-        const f = await browser.messages.getAttachmentFile(messageId, a.partName);
-        out.apiGetFirst = { name: a.name, part: a.partName, size: f && f.size };
-        break;
-      } catch (e) {
-        out.apiGetFirst = "GETERR " + e.message;
-      }
-    }
+    const full = await browser.messages.getFull(messageId);
+    debug(`[probe] getFull(decrypt:true) root:`, full && {
+      contentType: full.contentType,
+      decryptionStatus: full.decryptionStatus,
+      subParts: (full.parts || []).length,
+    });
+    dumpPartTree("full(decrypt:true)", full, messageId);
+    await fetchFirstDecryptedAttachment(messageId, full);
   } catch (e) {
-    out.apiGetFirst = "LISTERR " + e.message;
+    warn("[probe] getFull(decrypt:true) FAILED:", e);
   }
 
-  debug("[probe] attachment sources =>", out);
+  try {
+    const parts = await browser.messages.listInlineTextParts(messageId);
+    debug("[probe] listInlineTextParts count:", parts.length,
+      parts.map(p => `${p.contentType}(${p.content ? p.content.length : 0})`));
+  } catch (e) {
+    debug("[probe] listInlineTextParts FAILED:", e.message);
+  }
+
+  debug("[probe] summary =>", out);
 }
 
 /* ======================================================================
