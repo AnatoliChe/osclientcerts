@@ -82,33 +82,16 @@ inside a `message/rfc822` envelope before delivery. In that case the root Conten
 (`messages.getFull`, `listInlineTextParts`, `listAttachments`) do not surface the decrypted
 inner content at all.
 
-**v0.2.2 (TEST): privileged `ForwardIntercept` Experiment.** The add-on now ships an
-Experiment API (`experiment_apis`, supported in Manifest V3). When enabled via the
-`experiments` option, it wraps `nsIMsgComposeService` and, at the moment a *forward* of an
+The add-on ships a privileged `ForwardIntercept` Experiment API
+(`experiment_apis`, supported in Manifest V3). It is always enabled and, at the moment a *forward* of an
 embedded container is initiated, **redirects the compose type to a Reply before the compose
 window is created**. The result is a single reply window with the full decrypted content and
 **no empty Forward-window flash**. The reply window still gets its recipients cleared and its
 `Re:` → `Fwd:` subject retitled by the background script, exactly as below.
 
-This test build verifies whether the `nsIMsgComposeService.OpenComposeWindow(WithParams)`
-methods are reassignable from an Experiment in current Thunderbird — look for the
-`[ForwardIntercept] compose service wrapped; patch APPLIED=...` line in the Error Console.
-
-If the Experiment is unavailable or disabled, the classic unprivileged fallback is used:
-1. Opens a **reply** window on the container (`beginReply`). A reply is the one
-   path where Thunderbird materializes the *entire* decrypted content — text body,
-   inline images, and real file attachments — because it decrypts on the fly while
-   constructing the compose window.
-2. Waits (≈3 s) for the decrypted body and attachments to settle in.
-3. **Clears the recipient fields** (`toRecipients`, `ccRecipients`, `bccRecipients`)
-   so the reply is not sent back to the original sender — it effectively becomes a
-   forward.
-4. **Retitles the subject**: a leading `Re:` is rewritten to `Fwd:` (nested
-   `Re: Re: ...` becomes `Fwd: Re: ...`), so the window reads like a forward.
-5. **Closes the original (empty) forward window** and leaves the reply window open
-   for the user to add new recipients and hit Send.
-
-This keeps text, inline images, and attachments intact.
+The redirected compose waits for Thunderbird's `ComposeBodyReady` notification, then
+extracts and adds the decrypted standalone attachments. This adapts to fast and slow
+machines without a fixed startup delay.
 
 Two delayed sweeps (3 s and 8 s) handle the case where TB adds the `smime.p7m` attachment
 asynchronously after the initial pass. The `smime.p7m` envelope attachment is also removed
@@ -121,12 +104,13 @@ asynchronously after the initial pass. The `smime.p7m` envelope attachment is al
 | `compose`       | Read/write compose window content, attachments, and encryption settings.    |
 | `messagesRead`  | Read the original message's headers, decrypted body, and attachments.       |
 | `tabs`          | Detect compose windows (`tab.type === "messageCompose"`).                   |
-| `storage`       | Store the debug and experiment toggles (options page).                      |
+| `storage`       | Store the debug logging toggle (options page).                              |
 
 **v0.2.2 adds an Experiment API** (`ForwardIntercept`, declared under `experiment_apis`).
 Including an Experiment replaces Thunderbird's per-permission prompt with a single
 "full, unrestricted access" install prompt, and it runs with access to the main process.
-The Experiment is inert unless the `experiments` option is enabled.
+The Experiment is the supported implementation for embedded S/MIME containers and is
+enabled automatically.
 
 ## Limitations
 
@@ -140,10 +124,7 @@ The Experiment is inert unless the `experiments` option is enabled.
   the reply attribution header still differs slightly from a true forward. This is the only
   way to preserve the full decrypted content (text + inline images + attachments) of such a
   container — the WebExtension `messages`/`compose` APIs do not address the inner CMS parts.
-  v0.2.2 redirects the forward at compose-open time via the `ForwardIntercept` Experiment
-  (single window, no flash); otherwise the unprivileged two-window fallback is used.
-  **Note:** the Experiment path is a test — it depends on whether `nsIMsgComposeService`
-  methods are reassignable from an Experiment in your Thunderbird build.
+  `ForwardIntercept` redirects the forward at compose-open time (single window, no flash).
 - **Forward as attachment** (`.eml` mode) is not handled — the add-on only operates on
   inline forwards (the default).
 - The forwarded message does not include the original's cryptographic signature envelope.
