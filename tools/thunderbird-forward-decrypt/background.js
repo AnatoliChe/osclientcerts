@@ -797,7 +797,11 @@ async function processComposeTab(tabId) {
      * ComposeMessage hook sets redirectPending synchronously when it redirects a
      * Forward, and getAndClearRedirectPending consumes it for exactly one reply
      * tab. If it is not pending, this is a genuine user-initiated reply: skip. */
-    const redirectedByUs = await browser.forwardIntercept.getAndClearRedirectPending();
+    let redirectedByUs = false;
+    const fi = browser.ForwardIntercept;
+    if (fi && typeof fi.getAndClearRedirectPending === "function") {
+      redirectedByUs = await fi.getAndClearRedirectPending();
+    }
     debug(`processComposeTab(${tabId}): reply tab, redirectPending=${redirectedByUs}`);
     if (!redirectedByUs) {
       processedTabIds.delete(tabId);
