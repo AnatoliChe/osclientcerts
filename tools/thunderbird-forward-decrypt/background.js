@@ -550,39 +550,49 @@ async function handleEmbeddedForward(tabId, messageId, composeDetails) {
 async function handleExperimentReplyTab(tabId, messageId) {
   log(`[experiment] reply window (tab ${tabId}) from redirected forward on messageId ${messageId}: clearing recipients + retitling`);
 
-  /* Give real file attachments / inline images time to materialize (mirrors
-   * handleEmbeddedForward). */
-  await sleep(3000);
+  /* Clear the recipient fields and retitle the subject ASAP so the window does
+   * NOT visibly show the original recipients / "Re:" first (TB fills the reply
+   * recipients from the message header at open time, so we must clear right
+   * after the tab is created). No fixed sleep here — poll the compose window
+   * until it accepts the write (it becomes writable within a few hundred ms). */
   const d = await waitForComposeDetails(tabId);
   if (!d) {
     warn(`[experiment] reply window ${tabId}: could not read compose details`);
     return false;
   }
 
-  try {
-    await browser.compose.setComposeDetails(tabId, {
-      to: [],
-      cc: [],
-      bcc: [],
-    });
-    log(`[experiment] recipients cleared on reply window ${tabId}`);
-  } catch (e2) {
-    warn("[experiment] clearing recipients FAILED:", e2);
-  }
-
-  try {
-    const cur = await waitForComposeDetails(tabId);
-    const subject = (cur && cur.subject) || "";
-    const fwdSubject = retitleReplyToForward(subject);
-    if (fwdSubject) {
-      await browser.compose.setComposeDetails(tabId, { subject: fwdSubject });
-      log(`[experiment] subject retitled: "${subject}" -> "${fwdSubject}"`);
-    } else {
-      debug(`[experiment] subject unchanged (no "Re:" prefix): "${subject}"`);
+  const clearRecipients = async () => {
+    for (let tries = 0; tries < 15; tries++) {
+      try {
+        await browser.compose.setComposeDetails(tabId, { to: [], cc: [], bcc: [] });
+        log(`[experiment] recipients cleared on reply window ${tabId}`);
+        return true;
+      } catch (e2) {
+        /* Window not ready yet — wait briefly and retry. */
+        await sleep(200);
+      }
     }
-  } catch (e4) {
-    warn("[experiment] retitling subject FAILED:", e4);
-  }
+    warn("[experiment] clearing recipients FAILED (still not writable)");
+    return false;
+  };
+
+  const retitleSubject = async () => {
+    try {
+      const cur = await waitForComposeDetails(tabId);
+      const subject = (cur && cur.subject) || "";
+      const fwdSubject = retitleReplyToForward(subject);
+      if (fwdSubject) {
+        await browser.compose.setComposeDetails(tabId, { subject: fwdSubject });
+        log(`[experiment] subject retitled: "${subject}" -> "${fwdSubject}"`);
+      } else {
+        debug(`[experiment] subject unchanged (no "Re:" prefix): "${subject}"`);
+      }
+    } catch (e4) {
+      warn("[experiment] retitling subject FAILED:", e4);
+    }
+  };
+
+  await Promise.all([clearRecipients(), retitleSubject()]);
 
   log(`[experiment] DONE: reply-window-forward ${tabId} ready for new recipients`);
   return true;
