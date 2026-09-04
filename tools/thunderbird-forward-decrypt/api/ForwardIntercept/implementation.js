@@ -25,6 +25,9 @@
 var { ExtensionCommon } = ChromeUtils.importESModule(
   "resource://gre/modules/ExtensionCommon.sys.mjs"
 );
+var { setTimeout } = ChromeUtils.importESModule(
+  "resource://gre/modules/Timer.sys.mjs"
+);
 
 /* Attachment extraction (Path B). The parts of an embedded message/rfc822
  * S/MIME container are NOT reachable through the WebExtension messages API:
