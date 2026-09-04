@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- decrypt & re-encrypt S/MIME forward",
-  "version": "0.3.19",
-  "description": "When forwarding an S/MIME encrypted message, automatically decrypt the original, replace the raw smime.p7m blob with the decrypted content and attachments, and re-enable S/MIME encryption for the new recipients. Requires identity with S/MIME signing/encryption certificates. v0.3.19 (TEST): prevents duplicate processing during add-on startup, stops polling closed compose tabs, and suppresses duplicate S/MIME envelope removal.",
+  "version": "0.3.20",
+  "description": "When forwarding an S/MIME encrypted message, automatically decrypt the original, replace the raw smime.p7m blob with the decrypted content and attachments, and re-enable S/MIME encryption for the new recipients. Requires identity with S/MIME signing/encryption certificates. v0.3.20 (TEST): eagerly wakes the MV3 background from the Experiment startup lifecycle so the first Forward after launching Thunderbird is intercepted.",
   "browser_specific_settings": {
     "gecko": {
       "id": "forward-decrypt@osclientcerts.dev",
@@ -30,7 +30,8 @@
       "parent": {
         "scopes": ["addon_parent"],
         "paths": [["ForwardIntercept"]],
-        "script": "api/ForwardIntercept/implementation.js"
+        "script": "api/ForwardIntercept/implementation.js",
+        "events": ["startup"]
       }
     }
   }

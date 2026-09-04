@@ -54,6 +54,17 @@ var { jsmime } = ChromeUtils.importESModule(
 );
 
 var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
+  onStartup() {
+    /* MV3 background scripts are event pages and may otherwise stay asleep
+     * until the first compose tab is created, which is already too late to
+     * intercept the command that created it. Loading this Experiment for the
+     * startup lifecycle event lets us wake the background before user input. */
+    Services.console.logStringMessage(
+      "[ForwardIntercept] startup: waking extension background"
+    );
+    return this.extension.wakeupBackground();
+  }
+
   getAPI(context) {
     /* Tracks whether we are intercepting. Default OFF; the background script
      * enables it (mirrors the v0.2.x "experiments" option so the code path is

@@ -87,4 +87,10 @@ describe("ForwardIntercept experiment API contract", () => {
     expect(background).toContain("if (closedTabIds.has(tabId))");
     expect(background).toContain("removingAttachmentKeys.has(key)");
   });
+
+  test("loads the intercept before the first compose command", () => {
+    expect(manifest.experiment_apis.ForwardIntercept.parent.events).toContain("startup");
+    expect(implementation).toContain("onStartup()");
+    expect(implementation).toContain("this.extension.wakeupBackground()");
+  });
 });
