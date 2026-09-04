@@ -67,4 +67,14 @@ describe("ForwardIntercept experiment API contract", () => {
     expect(handler).not.toContain("await sleep(3000)");
     expect(handler).toContain("closedTabIds.has(tabId)");
   });
+
+  test("always enables the supported intercept path and exposes no experiment toggle", () => {
+    const optionsHtml = fs.readFileSync(path.join(addonDir, "options.html"), "utf8");
+    const optionsJs = fs.readFileSync(path.join(addonDir, "options.js"), "utf8");
+    expect(background).toContain("browser.ForwardIntercept.setEnabled(true)");
+    expect(background).not.toContain("experimentsEnabled");
+    expect(optionsHtml).not.toContain('id="experiments"');
+    expect(optionsJs).not.toContain("experiments");
+    expect(background).not.toContain("handleEmbeddedForward(tabId, relatedMessageId");
+  });
 });

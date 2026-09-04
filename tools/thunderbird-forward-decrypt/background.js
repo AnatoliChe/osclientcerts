@@ -12,17 +12,12 @@ const VERSION = (() => {
 
 /* ---- Debug logging ---- */
 let debugEnabled = false;
-/* Embedded-container experiment (opens forward/reply windows) is OFF by
- * default. It must be explicitly enabled in storage to run — it is unsafe
- * to auto-run (caused an unbounded window cascade). */
-let experimentsEnabled = false;
 
 async function loadDebugFlag() {
   try {
-    const { debug, experiments } = await browser.storage.local.get(["debug", "experiments"]);
+    const { debug } = await browser.storage.local.get(["debug"]);
     debugEnabled = !!debug;
-    experimentsEnabled = !!experiments;
-  } catch (_) { debugEnabled = false; experimentsEnabled = false; }
+  } catch (_) { debugEnabled = false; }
 }
 
 // Listen for storage changes (real-time toggle without restart)
@@ -31,19 +26,6 @@ browser.storage.onChanged.addListener(async (changes, area) => {
     if (changes.debug) {
       debugEnabled = !!changes.debug.newValue;
       log(`debug mode ${debugEnabled ? "ENABLED" : "DISABLED"}`);
-    }
-    if (changes.experiments) {
-      experimentsEnabled = !!changes.experiments.newValue;
-      log(`embedded experiment ${experimentsEnabled ? "ENABLED" : "DISABLED"}`);
-      /* Reflect the toggle into the privileged ForwardIntercept experiment. */
-      try {
-        if (browser.ForwardIntercept) {
-          const ok = await browser.ForwardIntercept.setEnabled(experimentsEnabled);
-          log(`ForwardIntercept runtime ${experimentsEnabled ? "ENABLED" : "DISABLED"} (${ok})`);
-        }
-      } catch (e) {
-        warn("ForwardIntercept runtime toggle failed:", e);
-      }
     }
   }
 });
@@ -833,8 +815,8 @@ async function processComposeTab(tabId) {
    * through), but when the experiment is enabled and the related message is an
    * embedded smime container, that reply was produced by OUR redirect — clean
    * it (clear recipients, retitle Re:->Fwd:) instead of skipping it. */
-  if (details.type === "reply" && experimentsEnabled) {
-    debug(`processComposeTab(${tabId}): type "reply" with experimentsEnabled — checking redirect case`);
+  if (details.type === "reply") {
+    debug(`processComposeTab(${tabId}): type "reply" — checking redirected-forward marker`);
     if (processedTabIds.has(tabId)) return;
     processedTabIds.add(tabId);
     /* Only a reply window actually created by OUR Forward->Reply redirect gets
@@ -902,20 +884,10 @@ async function processComposeTab(tabId) {
   const isEmbeddedContainer = (rootType || "").toLowerCase() === "message/rfc822";
 
   if (isEmbeddedContainer) {
-    /* message/rfc822 container: the full decrypted content (body, inline
-     * images, attachments) is only reachable through a reply window, which
-     * handleEmbeddedForward rebuilds and leaves for the user (original forward
-     * window is closed). */
-    log(`processComposeTab(${tabId}): embedded message/rfc822 container — rebuilding as reply`);
-    let ok = false;
-    try {
-      ok = await handleEmbeddedForward(tabId, relatedMessageId, details);
-    } catch (e) {
-      warn("handleEmbeddedForward failed", e);
-    }
-    /* Successful reply-forward closes the original forward tab — no sweeps on
-     * it. On failure the tab may still be open; sweep it anyway. */
-    if (ok) return;
+    /* ForwardIntercept normally redirects this before a forward tab exists.
+     * Do not resurrect the obsolete two-window fallback if interception failed. */
+    warn(`processComposeTab(${tabId}): embedded forward was not intercepted; leaving it unchanged`);
+    return;
   } else {
     try {
       await rebuildForwardCompose(tabId, relatedMessageId, details);
@@ -979,20 +951,13 @@ browser.compose.onAttachmentAdded.addListener((tab, attachment) => {
   log("background loaded, listening for compose windows");
   if (debugEnabled) log("DEBUG MODE ACTIVE — verbose logging enabled");
 
-  /* Enable the ForwardIntercept experiment if the experiments option is on.
-   * This requires the privileged experiment_apis (0.2.2); it redirects an
-   * embedded message/rfc822 forward into a reply at compose-open time. If the
-   * API is unavailable (e.g. plain build), this no-ops and the classic
-   * handleEmbeddedForward two-window fallback is used instead. */
-  if (experimentsEnabled) {
-    try {
-      const ok = await browser.ForwardIntercept.setEnabled(true);
-      log(`ForwardIntercept experiment ${ok ? "ENABLED" : "enable FAILED"}`);
-    } catch (e) {
-      warn("ForwardIntercept.setEnabled failed (experiment_apis unavailable?):", e);
-    }
-  } else {
-    log("ForwardIntercept experiment disabled (experiments option off)");
+  /* ForwardIntercept is the supported embedded-message implementation and is
+   * always active. */
+  try {
+    const ok = await browser.ForwardIntercept.setEnabled(true);
+    log(`ForwardIntercept ${ok ? "ENABLED" : "enable FAILED"}`);
+  } catch (e) {
+    warn("ForwardIntercept.setEnabled failed:", e);
   }
 
   /* Process any already-open compose windows (e.g. after reload) */
