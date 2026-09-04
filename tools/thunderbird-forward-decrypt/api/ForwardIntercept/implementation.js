@@ -494,15 +494,25 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
           notes.push("decryptFailure=" + decrypter.decryptFailure + ", cryptoChanged=" + decrypter.cryptoChanged);
 
           let inner = null;
-          (function findDecrypted(node) {
-            if (inner || !node) return;
-            if ((node.contentType || "").toLowerCase().includes("pkcs7-mime") &&
-                typeof node.body === "string" && node.body.length) {
-              inner = node.body;
-              return;
-            }
-            for (const c of node.subParts || []) findDecrypted(c);
-          })(root);
+          /* jsmime flattens the embedded message/rfc822 into a single leaf: the
+           * whole pkcs7 part lands in root.body (post-decrypt = the decrypted
+           * message body), with no subParts and no contentType set. So take
+           * root.body directly when the decrypter actually decrypted (it
+           * replaces that body in-place); fall back to scanning subParts in
+           * case a future shape nests deeper. */
+          if (decrypter.cryptoChanged && typeof root.body === "string" && root.body.length) {
+            inner = root.body;
+          } else {
+            (function findDecrypted(node) {
+              if (inner || !node) return;
+              if ((node.contentType || "").toLowerCase().includes("pkcs7-mime") &&
+                  typeof node.body === "string" && node.body.length) {
+                inner = node.body;
+                return;
+              }
+              for (const c of node.subParts || []) findDecrypted(c);
+            })(root);
+          }
 
           if (!inner) {
             notes.push("no decrypted body found (decryptFailure=" + decrypter.decryptFailure + ")");
