@@ -431,6 +431,24 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
       return btoa(clean);
     }
 
+    function byteArrayToString(data) {
+      let value = "";
+      for (const byte of data || []) value += String.fromCharCode(byte);
+      return value;
+    }
+
+    /* nsCMSDecoderJS uses NSS_CMSDecoder with a content callback. Despite the
+     * method name `decrypt`, the decoder also unwraps opaque CMS SignedData and
+     * returns its encapsulated MIME entity (signature verification remains a
+     * separate concern handled by Thunderbird's normal message reader). */
+    function unwrapCmsContent(body) {
+      const input = Uint8Array.from(body, c => c.charCodeAt(0) & 0xff);
+      const decoder = Cc[
+        "@mozilla.org/nsCMSDecoderJS;1"
+      ].createInstance(Ci.nsICMSDecoderJS);
+      return byteArrayToString(decoder.decrypt(input));
+    }
+
     /* Parse a decrypted MIME entity while asking MimeTreeEmitter to identify
      * attachments and retain their decoded bodies. getMimeTree() deliberately
      * uses the emitter's compatibility mode, which does not populate `name` or
@@ -565,9 +583,28 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
           notes.push(`decrypted entity ${inner.length} bytes (body=${innerNode.body.length})`);
 
           // 3) Re-parse the decrypted message and read attachment bodies.
-          const decryptedTree = getAttachmentMimeTree(inner, notes);
+          let decryptedTree = getAttachmentMimeTree(inner, notes);
           if (!decryptedTree) {
             notes.push("getAttachmentMimeTree(decrypted) returned null");
+            logMsg(JSON.stringify(notes));
+            return { rows, log: notes };
+          }
+
+          /* Encrypted-and-signed messages commonly contain an opaque
+           * application/(x-)pkcs7-mime SignedData entity after the outer
+           * EnvelopedData is decrypted. Descend through those CMS wrappers so
+           * the final multipart/mixed tree (and its files) becomes visible. */
+          for (let depth = 0; depth < 3; depth++) {
+            const ct = mimeContentType(decryptedTree);
+            if (!ct.includes("pkcs7-mime") || !decryptedTree.body) break;
+            const unwrapped = unwrapCmsContent(decryptedTree.body);
+            notes.push(`unwrapped CMS ${ct}: ${decryptedTree.body.length} -> ${unwrapped.length} bytes`);
+            if (!unwrapped) break;
+            decryptedTree = getAttachmentMimeTree(unwrapped, notes);
+            if (!decryptedTree) break;
+          }
+          if (!decryptedTree) {
+            notes.push("CMS payload MIME parse returned null");
             logMsg(JSON.stringify(notes));
             return { rows, log: notes };
           }

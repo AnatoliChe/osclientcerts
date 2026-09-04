@@ -41,5 +41,6 @@ describe("ForwardIntercept experiment API contract", () => {
     expect(implementation).toContain("mimeTreeToString(innerNode, true)");
     expect(implementation).toContain("enableFilterMode: true");
     expect(implementation).toContain("checkForAttachments: true");
+    expect(implementation).toContain("unwrapCmsContent(decryptedTree.body)");
   });
 });
