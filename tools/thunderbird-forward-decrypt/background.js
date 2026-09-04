@@ -40,6 +40,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const processedTabIds   = new Set();
 const pendingTabPollers = new Set();
 const closedTabIds      = new Set();
+const removingAttachmentKeys = new Set();
 /* Tabs opened by THIS plugin (e.g. the reply window rebuilt for an embedded
  * container) — these must NEVER be re-processed, otherwise the plugin would
  * cascade and spawn unbounded compose windows. */
@@ -62,6 +63,10 @@ async function waitForComposeDetails(tabId, { timeoutMs = 15000, pollMs = 200 } 
   const deadline = Date.now() + timeoutMs;
   let attempts = 0;
   while (Date.now() < deadline) {
+    if (closedTabIds.has(tabId)) {
+      debug(`waitForComposeDetails tab ${tabId}: tab closed, stopping`);
+      return null;
+    }
     attempts++;
     try {
       const d = await browser.compose.getComposeDetails(tabId);
@@ -786,6 +791,9 @@ async function handleExperimentReplyTab(tabId, messageId) {
 async function processComposeTab(tabId) {
   debug(`processComposeTab(${tabId}): checking processedTabIds.has(${tabId}) = ${processedTabIds.has(tabId)}`);
   if (processedTabIds.has(tabId)) return;
+  /* Claim synchronously before the first await. tabs.onCreated and the startup
+   * scan can discover the same compose tab concurrently after an add-on update. */
+  processedTabIds.add(tabId);
 
   /* NEVER process compose windows that THIS plugin opened (e.g. from the
    * embedded experiment's beginForward/beginReply). Processing them is what
@@ -817,8 +825,6 @@ async function processComposeTab(tabId) {
    * it (clear recipients, retitle Re:->Fwd:) instead of skipping it. */
   if (details.type === "reply") {
     debug(`processComposeTab(${tabId}): type "reply" — checking redirected-forward marker`);
-    if (processedTabIds.has(tabId)) return;
-    processedTabIds.add(tabId);
     /* Only a reply window actually created by OUR Forward->Reply redirect gets
      * cleaned (recipients cleared, Re:->Fwd:). A plain manual "Reply" clicked by
      * the user on the same embedded S/MIME message must be left untouched — the
@@ -832,13 +838,11 @@ async function processComposeTab(tabId) {
     }
     debug(`processComposeTab(${tabId}): reply tab, redirectPending=${redirectedByUs}`);
     if (!redirectedByUs) {
-      processedTabIds.delete(tabId);
       return;
     }
     const rct = await getRootContentType(relatedMessageId);
     const isEmbedded = (rct || "").toLowerCase() === "message/rfc822";
     if (!isEmbedded || !(await isSmimeEncrypted(relatedMessageId)) || !(await canDecrypt(relatedMessageId))) {
-      processedTabIds.delete(tabId);
       return;
     }
     let ok = false;
@@ -871,7 +875,6 @@ async function processComposeTab(tabId) {
     return;
   }
 
-  processedTabIds.add(tabId);
   log(`processing forward compose tab ${tabId} for messageId ${relatedMessageId}`);
 
   /* Branch on the root content type. A message/rfc822 root means the S/MIME
@@ -937,8 +940,16 @@ browser.compose.onAttachmentAdded.addListener((tab, attachment) => {
   const tabId = tab.id;
   const n = (attachment && attachment.name || "").toLowerCase();
   if (n === "smime.p7m" || n === "smime.p7s" || n.endsWith(".p7m") || n.endsWith(".p7s")) {
+    const key = `${tabId}:${attachment.id}`;
+    if (removingAttachmentKeys.has(key)) {
+      debug(`duplicate smime removal ignored for ${key}`);
+      return;
+    }
+    removingAttachmentKeys.add(key);
     log(`removing smime envelope attachment "${attachment.name}" on tab ${tabId}`);
-    browser.compose.removeAttachment(tabId, attachment.id).catch(e => warn("late remove failed", e));
+    browser.compose.removeAttachment(tabId, attachment.id)
+      .catch(e => warn("late remove failed", e))
+      .finally(() => removingAttachmentKeys.delete(key));
   }
 });
 
