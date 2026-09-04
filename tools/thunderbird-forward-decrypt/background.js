@@ -287,6 +287,67 @@ function retitleReplyToForward(subject) {
 }
 
 /* ======================================================================
+ * dumpAttachmentSources
+ * 0.3.0 diagnostic probe: for an embedded message/rfc822 S/MIME container,
+ * report where the decrypted attachment bytes actually live. The WebExtension
+ * messages API only surfaces the smime envelope for such nested containers, so
+ * we probe three candidate sources on the real (attachment-bearing) message:
+ *   1. replyWindow  - getComposeDetails(tabId).attachments (what TB put in the
+ *                     materialized reply CompFields)
+ *   2. apiList      - browser.messages.listAttachments(messageId)
+ *   3. apiGetFirst  - try browser.messages.getAttachmentFile(messageId, part)
+ *                     on the first non-inline, non-envelope part
+ * Debug-only. This determines whether the attachment re-add in
+ * handleExperimentReplyTab can source bytes from the messages API (Path A) or
+ * needs a new privileged ForwardIntercept extraction (Path B).
+ * ====================================================================== */
+async function dumpAttachmentSources(tabId, messageId) {
+  await sleep(3000); /* let the decrypted content / attachments materialize */
+  const out = {};
+
+  try {
+    const d = await browser.compose.getComposeDetails(tabId);
+    out.replyWindow = (d && d.attachments || []).map(a =>
+      `${a.name}(${a.size},${a.type || ''},${a.partName || ''})`);
+  } catch (e) {
+    out.replyWindow = "ERR " + e.message;
+  }
+
+  try {
+    const list = await browser.messages.listAttachments(messageId);
+    out.apiList = list.map(a => ({
+      name: a.name,
+      ct: a.contentType,
+      disp: a.contentDisposition,
+      part: a.partName,
+    }));
+  } catch (e) {
+    out.apiList = "ERR " + e.message;
+  }
+
+  out.apiGetFirst = null;
+  try {
+    const list = await browser.messages.listAttachments(messageId);
+    for (const a of list) {
+      const n = (a.name || "").toLowerCase();
+      if (a.contentDisposition === "inline") continue;
+      if (n.endsWith(".p7m") || n.endsWith(".p7s")) continue;
+      try {
+        const f = await browser.messages.getAttachmentFile(messageId, a.partName);
+        out.apiGetFirst = { name: a.name, part: a.partName, size: f && f.size };
+        break;
+      } catch (e) {
+        out.apiGetFirst = "GETERR " + e.message;
+      }
+    }
+  } catch (e) {
+    out.apiGetFirst = "LISTERR " + e.message;
+  }
+
+  debug("[probe] attachment sources =>", out);
+}
+
+/* ======================================================================
  * rebuildForwardCompose
  * ====================================================================== */
 async function rebuildForwardCompose(tabId, messageId, composeDetails) {
@@ -593,6 +654,11 @@ async function handleExperimentReplyTab(tabId, messageId) {
   };
 
   await Promise.all([clearRecipients(), retitleSubject()]);
+
+  /* 0.3.0 diagnostic: where do the decrypted attachments live? Debug-only. */
+  if (debugEnabled) {
+    try { await dumpAttachmentSources(tabId, messageId); } catch (e) { warn("[probe] failed:", e); }
+  }
 
   log(`[experiment] DONE: reply-window-forward ${tabId} ready for new recipients`);
   return true;
