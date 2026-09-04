@@ -44,5 +44,6 @@ describe("ForwardIntercept experiment API contract", () => {
     expect(implementation).toContain("unwrapCmsContent(decryptedTree.body)");
     expect(implementation).toContain("const isNamedAttachment =");
     expect(implementation).not.toContain('ct !== "text/plain"');
+    expect(implementation).not.toContain('typeof btoa !== "function"');
   });
 });

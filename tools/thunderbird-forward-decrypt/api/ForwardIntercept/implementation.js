@@ -445,10 +445,21 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
     /* Convert a JS string of raw bytes into base64 (Latin-1 safe). */
     function bytesToBase64(data) {
       if (!data) return "";
-      if (typeof btoa !== "function") return "";
-      let clean = "";
-      for (let i = 0; i < data.length; i++) clean += String.fromCharCode(data.charCodeAt(i) & 0xff);
-      return btoa(clean);
+      const alphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+      let encoded = "";
+      for (let i = 0; i < data.length; i += 3) {
+        const a = data.charCodeAt(i) & 0xff;
+        const hasB = i + 1 < data.length;
+        const hasC = i + 2 < data.length;
+        const b = hasB ? data.charCodeAt(i + 1) & 0xff : 0;
+        const c = hasC ? data.charCodeAt(i + 2) & 0xff : 0;
+        encoded += alphabet[a >> 2];
+        encoded += alphabet[((a & 3) << 4) | (b >> 4)];
+        encoded += hasB ? alphabet[((b & 15) << 2) | (c >> 6)] : "=";
+        encoded += hasC ? alphabet[c & 63] : "=";
+      }
+      return encoded;
     }
 
     function byteArrayToString(data) {
