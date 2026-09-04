@@ -38,8 +38,16 @@ var { ExtensionCommon } = ChromeUtils.importESModule(
 var { MailServices } = ChromeUtils.importESModule(
   "resource:///modules/MailServices.sys.mjs"
 );
-var { MimeTreeDecrypter, getMimeTree } = ChromeUtils.importESModule(
+var {
+  MimeTreeDecrypter,
+  MimeTreeEmitter,
+  getMimeTree,
+  mimeTreeToString,
+} = ChromeUtils.importESModule(
   "chrome://openpgp/content/modules/MimeTree.sys.mjs"
+);
+var { jsmime } = ChromeUtils.importESModule(
+  "resource:///modules/jsmime.sys.mjs"
 );
 
 var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
@@ -341,6 +349,10 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
     function mimeHeader(node, name) {
       try {
         if (!node || !node.headers) return null;
+        if (typeof node.headers.getRawHeader === "function") {
+          const raw = node.headers.getRawHeader(name);
+          if (raw != null) return String(raw);
+        }
         if (typeof node.headers.get === "function") {
           const v = node.headers.get(name);
           return v == null ? null : String(v);
@@ -351,6 +363,34 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
       } catch (_) {
         return null;
       }
+    }
+
+    function mimeFilename(node) {
+      if (node?.name) return String(node.name);
+      for (const [header, parameter] of [
+        ["content-disposition", "filename"],
+        ["content-type", "name"],
+      ]) {
+        const value = mimeHeader(node, header) || "";
+        const match = new RegExp(
+          `(?:^|;)\\s*${parameter}\\s*=\\s*(?:"([^"]*)"|([^;\\s]*))`,
+          "i",
+        ).exec(value);
+        if (match) return match[1] || match[2] || "";
+      }
+      return "";
+    }
+
+    function mimeContentType(node) {
+      try {
+        const structured = node?.headers?.contentType ||
+          node?.headers?.get?.("content-type");
+        if (structured?.type) return String(structured.type).toLowerCase();
+      } catch (_) {}
+      return String(node?.fullContentType || node?.contentType || "")
+        .split(";", 1)[0]
+        .trim()
+        .toLowerCase();
     }
 
     /* Stream a whole-message URI (e.g. imap-message://…#204) into a string
@@ -405,34 +445,88 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
     /* Convert a JS string of raw bytes into base64 (Latin-1 safe). */
     function bytesToBase64(data) {
       if (!data) return "";
-      if (typeof btoa !== "function") return "";
-      let clean = "";
-      for (let i = 0; i < data.length; i++) clean += String.fromCharCode(data.charCodeAt(i) & 0xff);
-      return btoa(clean);
+      const alphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+      let encoded = "";
+      for (let i = 0; i < data.length; i += 3) {
+        const a = data.charCodeAt(i) & 0xff;
+        const hasB = i + 1 < data.length;
+        const hasC = i + 2 < data.length;
+        const b = hasB ? data.charCodeAt(i + 1) & 0xff : 0;
+        const c = hasC ? data.charCodeAt(i + 2) & 0xff : 0;
+        encoded += alphabet[a >> 2];
+        encoded += alphabet[((a & 3) << 4) | (b >> 4)];
+        encoded += hasB ? alphabet[((b & 15) << 2) | (c >> 6)] : "=";
+        encoded += hasC ? alphabet[c & 63] : "=";
+      }
+      return encoded;
+    }
+
+    function byteArrayToString(data) {
+      let value = "";
+      for (const byte of data || []) value += String.fromCharCode(byte);
+      return value;
+    }
+
+    /* nsCMSDecoderJS uses NSS_CMSDecoder with a content callback. Despite the
+     * method name `decrypt`, the decoder also unwraps opaque CMS SignedData and
+     * returns its encapsulated MIME entity (signature verification remains a
+     * separate concern handled by Thunderbird's normal message reader). */
+    function unwrapCmsContent(body) {
+      const input = Uint8Array.from(body, c => c.charCodeAt(0) & 0xff);
+      const decoder = Cc[
+        "@mozilla.org/nsCMSDecoderJS;1"
+      ].createInstance(Ci.nsICMSDecoderJS);
+      return byteArrayToString(decoder.decrypt(input));
+    }
+
+    /* Parse a decrypted MIME entity while asking MimeTreeEmitter to identify
+     * attachments and retain their decoded bodies. getMimeTree() deliberately
+     * uses the emitter's compatibility mode, which does not populate `name` or
+     * `isAttachment`; those fields are required by walkDecryptedParts(). */
+    function getAttachmentMimeTree(mimeString, notes) {
+      const emitter = new MimeTreeEmitter({
+        enableFilterMode: true,
+        checkForAttachments: true,
+      });
+      try {
+        const parser = new jsmime.MimeParser(emitter, {
+          strformat: "unicode",
+          bodyformat: "decode",
+          stripcontinuations: false,
+        });
+        parser.deliverData(mimeString);
+        return emitter.mimeTree.subParts[0] || null;
+      } catch (e) {
+        notes?.push(`attachment MIME parse failed: ${e}`);
+        return null;
+      }
     }
 
     /* Recursively gather the decrypted file attachments from a MimeTreePart. */
     function walkDecryptedParts(node, out) {
       if (!node) return;
-      const ct = (node.contentType || "").toLowerCase();
+      const ct = mimeContentType(node);
       const cd = (mimeHeader(node, "content-disposition") || "").toLowerCase();
       const cid = mimeHeader(node, "content-id");
+      const name = mimeFilename(node);
       const isEnvelope =
         ct.includes("pkcs7-mime") ||
         ct.includes("enveloped-data") ||
         ct.includes("application/x-pkcs7-mime") ||
-        (node.name || "").toLowerCase().endsWith(".p7m") ||
-        (node.name || "").toLowerCase().endsWith(".p7s");
+        name.toLowerCase().endsWith(".p7m") ||
+        name.toLowerCase().endsWith(".p7s");
 
-      if (!isEnvelope && typeof node.body === "string" && node.name &&
-          !(node.subParts && node.subParts.length) &&
-          !ct.includes("multipart/") && ct !== "text/plain" && ct !== "text/html") {
+      const isNamedAttachment =
+        !!name && (node.isAttachment || cd.includes("attachment"));
+      if (!isEnvelope && typeof node.body === "string" && isNamedAttachment &&
+          !(node.subParts && node.subParts.length) && !ct.includes("multipart/")) {
         const isInline =
           cd.includes("inline") ||
           (ct.startsWith("image/") && (cid || cd.includes("inline")));
         out.push({
-          name: node.name,
-          contentType: node.contentType || ct,
+          name,
+          contentType: ct || "application/octet-stream",
           isInline: !!isInline,
           body: node.body,
         });
@@ -493,38 +587,57 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
           notes.push("postDecryptTree=[" + treeSummary.join("; ") + "]");
           notes.push("decryptFailure=" + decrypter.decryptFailure + ", cryptoChanged=" + decrypter.cryptoChanged);
 
-          let inner = null;
-          /* jsmime flattens the embedded message/rfc822 into a single leaf: the
-           * whole pkcs7 part lands in root.body (post-decrypt = the decrypted
-           * message body), with no subParts and no contentType set. So take
-           * root.body directly when the decrypter actually decrypted (it
-           * replaces that body in-place); fall back to scanning subParts in
-           * case a future shape nests deeper. */
+          let innerNode = null;
+          /* decryptSMIME() splits the decrypted entity into headers and body:
+           * it installs the inner Content-* headers on the encrypted tree node
+           * and leaves only the payload in node.body. Reconstruct both pieces
+           * before parsing again, otherwise a multipart body has no Content-Type
+           * or boundary and getMimeTree() returns null. */
           if (decrypter.cryptoChanged && typeof root.body === "string" && root.body.length) {
-            inner = root.body;
+            innerNode = root;
           } else {
             (function findDecrypted(node) {
-              if (inner || !node) return;
-              if ((node.contentType || "").toLowerCase().includes("pkcs7-mime") &&
+              if (innerNode || !node) return;
+              if ((node.fullContentType || "").toLowerCase().includes("pkcs7-mime") &&
                   typeof node.body === "string" && node.body.length) {
-                inner = node.body;
+                innerNode = node;
                 return;
               }
               for (const c of node.subParts || []) findDecrypted(c);
             })(root);
           }
 
-          if (!inner) {
+          if (!innerNode) {
             notes.push("no decrypted body found (decryptFailure=" + decrypter.decryptFailure + ")");
             logMsg(JSON.stringify(notes));
             return { rows, log: notes };
           }
-          notes.push(`decrypted ${inner.length} bytes`);
+          const inner = mimeTreeToString(innerNode, true);
+          notes.push(`decrypted entity ${inner.length} bytes (body=${innerNode.body.length})`);
 
           // 3) Re-parse the decrypted message and read attachment bodies.
-          const decryptedTree = getMimeTree(inner, true);
+          let decryptedTree = getAttachmentMimeTree(inner, notes);
           if (!decryptedTree) {
-            notes.push("getMimeTree(decrypted) returned null");
+            notes.push("getAttachmentMimeTree(decrypted) returned null");
+            logMsg(JSON.stringify(notes));
+            return { rows, log: notes };
+          }
+
+          /* Encrypted-and-signed messages commonly contain an opaque
+           * application/(x-)pkcs7-mime SignedData entity after the outer
+           * EnvelopedData is decrypted. Descend through those CMS wrappers so
+           * the final multipart/mixed tree (and its files) becomes visible. */
+          for (let depth = 0; depth < 3; depth++) {
+            const ct = mimeContentType(decryptedTree);
+            if (!ct.includes("pkcs7-mime") || !decryptedTree.body) break;
+            const unwrapped = unwrapCmsContent(decryptedTree.body);
+            notes.push(`unwrapped CMS ${ct}: ${decryptedTree.body.length} -> ${unwrapped.length} bytes`);
+            if (!unwrapped) break;
+            decryptedTree = getAttachmentMimeTree(unwrapped, notes);
+            if (!decryptedTree) break;
+          }
+          if (!decryptedTree) {
+            notes.push("CMS payload MIME parse returned null");
             logMsg(JSON.stringify(notes));
             return { rows, log: notes };
           }
@@ -539,7 +652,7 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
               rows.push({
                 name: p.name,
                 contentType: p.contentType,
-                size: (b64.length * 3) / 4,
+                size: p.body.length,
                 dataBase64: b64,
               });
               notes.push(`-> GOT bytes for ${p.name} (${rows[rows.length - 1].size}b)`);

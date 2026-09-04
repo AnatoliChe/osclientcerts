@@ -16,6 +16,10 @@ describe("ForwardIntercept experiment API contract", () => {
     path.join(addonDir, "background.js"),
     "utf8",
   );
+  const implementation = fs.readFileSync(
+    path.join(addonDir, "api", "ForwardIntercept", "implementation.js"),
+    "utf8",
+  );
 
   test("redirect marker is exposed asynchronously under the registered namespace", () => {
     const namespace = schema[0].namespace;
@@ -31,5 +35,16 @@ describe("ForwardIntercept experiment API contract", () => {
     expect(background).toContain(`const fi = browser.${namespace}`);
     expect(background).toContain("fi.getAndClearRedirectPending()");
     expect(background).not.toContain("browser.forwardIntercept");
+  });
+
+  test("reconstructs decrypted MIME headers and enables attachment discovery", () => {
+    expect(implementation).toContain("mimeTreeToString(innerNode, true)");
+    expect(implementation).toContain("enableFilterMode: true");
+    expect(implementation).toContain("checkForAttachments: true");
+    expect(implementation).toContain("unwrapCmsContent(decryptedTree.body)");
+    expect(implementation).toContain("const isNamedAttachment =");
+    expect(implementation).not.toContain('ct !== "text/plain"');
+    expect(implementation).not.toContain('typeof btoa !== "function"');
+    expect(implementation).toContain("size: p.body.length");
   });
 });
