@@ -701,7 +701,7 @@ async function handleExperimentReplyTab(tabId, messageId) {
    * quote construction to finish. A closed window cancels the operation. */
   let composeReady = "unavailable";
   try {
-    composeReady = await browser.ForwardIntercept.waitForRedirectedComposeReady(30000);
+    composeReady = await browser.ForwardIntercept.waitForRedirectedComposeReady(8000);
   } catch (e) {
     warn(`[experiment] compose readiness wait failed: ${e.message || e}`);
   }

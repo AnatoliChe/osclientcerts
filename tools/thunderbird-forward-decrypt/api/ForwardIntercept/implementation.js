@@ -271,6 +271,9 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
                 const stateListener = {
                   NotifyComposeFieldsReady() {},
                   NotifyComposeBodyReady() {
+                    Services.console.logStringMessage(
+                      "[ForwardIntercept] redirected compose body ready"
+                    );
                     ready.resolve("ready");
                     try { compose.UnregisterStateListener(stateListener); } catch (_) {}
                   },
@@ -285,7 +288,7 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
                 );
                 ready.resolve("unavailable");
               }
-            }, { once: true });
+            }, { capture: true, once: true });
           }
         } catch (_) {}
 

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- decrypt & re-encrypt S/MIME forward",
-  "version": "0.3.16",
-  "description": "When forwarding an S/MIME encrypted message, automatically decrypt the original, replace the raw smime.p7m blob with the decrypted content and attachments, and re-enable S/MIME encryption for the new recipients. Requires identity with S/MIME signing/encryption certificates. v0.3.16 (TEST): fixes the privileged timeout used while waiting for Thunderbird's ComposeBodyReady notification, stops if the compose window closes, and verifies re-attached files with short adaptive retries.",
+  "version": "0.3.17",
+  "description": "When forwarding an S/MIME encrypted message, automatically decrypt the original, replace the raw smime.p7m blob with the decrypted content and attachments, and re-enable S/MIME encryption for the new recipients. Requires identity with S/MIME signing/encryption certificates. v0.3.17 (TEST): captures Thunderbird's non-bubbling compose-window-init event so ComposeBodyReady is observed reliably, with a shorter compatibility fallback timeout.",
   "browser_specific_settings": {
     "gecko": {
       "id": "forward-decrypt@osclientcerts.dev",

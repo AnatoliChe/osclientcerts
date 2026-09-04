@@ -58,7 +58,8 @@ describe("ForwardIntercept experiment API contract", () => {
     expect(implementation).toContain("NotifyComposeBodyReady()");
     expect(implementation).toContain('ready.resolve("closed")');
     expect(implementation).toContain('"resource://gre/modules/Timer.sys.mjs"');
-    expect(background).toContain("waitForRedirectedComposeReady(30000)");
+    expect(background).toContain("waitForRedirectedComposeReady(8000)");
+    expect(implementation).toContain("{ capture: true, once: true }");
     const handler = background.slice(
       background.indexOf("async function handleExperimentReplyTab"),
       background.indexOf("async function processComposeTab"),
