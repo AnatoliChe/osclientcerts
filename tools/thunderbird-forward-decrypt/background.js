@@ -485,9 +485,9 @@ async function handleEmbeddedForward(tabId, messageId, composeDetails) {
     const replyDetails = await waitForComposeDetails(replyTabId);
 
     const clear = {
-      toRecipients: [],
-      ccRecipients: [],
-      bccRecipients: [],
+      to: [],
+      cc: [],
+      bcc: [],
     };
     /* replyToRecipients not part of setComposeDetails in MV3 — omit it. */
     try {
@@ -561,9 +561,9 @@ async function handleExperimentReplyTab(tabId, messageId) {
 
   try {
     await browser.compose.setComposeDetails(tabId, {
-      toRecipients: [],
-      ccRecipients: [],
-      bccRecipients: [],
+      to: [],
+      cc: [],
+      bcc: [],
     });
     log(`[experiment] recipients cleared on reply window ${tabId}`);
   } catch (e2) {
