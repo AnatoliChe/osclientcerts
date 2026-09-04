@@ -77,4 +77,20 @@ describe("ForwardIntercept experiment API contract", () => {
     expect(optionsJs).not.toContain("experiments");
     expect(background).not.toContain("handleEmbeddedForward(tabId, relatedMessageId");
   });
+
+  test("claims compose tabs before awaiting and suppresses duplicate envelope removal", () => {
+    const processStart = background.slice(
+      background.indexOf("async function processComposeTab"),
+      background.indexOf("const details = await waitForComposeDetails", background.indexOf("async function processComposeTab")),
+    );
+    expect(processStart).toContain("processedTabIds.add(tabId)");
+    expect(background).toContain("if (closedTabIds.has(tabId))");
+    expect(background).toContain("removingAttachmentKeys.has(key)");
+  });
+
+  test("loads the intercept before the first compose command", () => {
+    expect(manifest.experiment_apis.ForwardIntercept.parent.events).toContain("startup");
+    expect(implementation).toContain("onStartup()");
+    expect(implementation).toContain("this.extension.wakeupBackground()");
+  });
 });
