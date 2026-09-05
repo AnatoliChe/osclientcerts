@@ -93,4 +93,11 @@ describe("ForwardIntercept experiment API contract", () => {
     expect(implementation).toContain("onStartup()");
     expect(implementation).toContain("this.extension.wakeupBackground()");
   });
+
+  test("reuses privileged redirect state after an MV3 background wake", () => {
+    expect(implementation).toContain("if (this._sharedAPI)");
+    expect(implementation).toContain("return { ForwardIntercept: this._sharedAPI }");
+    expect(implementation).toContain("this._sharedAPI = sharedAPI");
+    expect(implementation).toContain("onShutdown(isAppShutdown)");
+  });
 });

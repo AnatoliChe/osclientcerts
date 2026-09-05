@@ -207,6 +207,16 @@ Thunderbird add-on (0.8.0, version-synced with the DLL) that removes the same du
 proactive schedule without touching NSS on the send path. The DLL's native cleanup and the plugin
 are independent ways to solve the same underlying problem; choose whichever fits your deployment.
 
+### Forwarding encrypted messages
+
+The companion [forward-decrypt Thunderbird add-on](tools/thunderbird-forward-decrypt) fixes
+forwarding of S/MIME messages that Thunderbird otherwise represents as an empty compose body
+with a raw `smime.p7m` attachment. Stable version 0.4.1 intercepts the Forward command,
+waits for Thunderbird's real compose-body readiness notification, preserves decrypted content
+and standalone attachments, clears the old recipients, and changes the leading `Re:` to
+`Fwd:`. Its privileged intercept is activated at Thunderbird startup and keeps its state when
+the Manifest V3 background page sleeps and wakes.
+
 ### Certificate trust: Windows vs. Thunderbird
 
 Windows and Thunderbird each keep their own, independent certificate trust store, and NSS's S/MIME

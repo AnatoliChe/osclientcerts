@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "OS Client Certs -- decrypt & re-encrypt S/MIME forward",
-  "version": "0.4.0",
-  "description": "When forwarding an S/MIME encrypted message, automatically decrypt the original, preserve its content and standalone attachments, clear the original recipients, change Re: to Fwd:, and prepare the message for new recipients. The supported ForwardIntercept path is enabled automatically and handles the first Forward after Thunderbird startup.",
+  "version": "0.4.1",
+  "description": "When forwarding an S/MIME encrypted message, automatically decrypt the original, preserve its content and standalone attachments, clear the original recipients, change Re: to Fwd:, and prepare the message for new recipients. v0.4.1 (TEST) preserves ForwardIntercept redirect state when Thunderbird suspends and later recreates the MV3 background context.",
   "browser_specific_settings": {
     "gecko": {
       "id": "forward-decrypt@osclientcerts.dev",

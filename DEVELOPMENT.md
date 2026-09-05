@@ -327,6 +327,15 @@ documented in [DEBUGGING.md](DEBUGGING.md#signing-works-then-silently-stops-afte
 Deliberately kept separate from the Rust crate: it needs its own build/release flow (an `.xpi`, not
 a DLL) and has nothing to do with the PKCS #11 surface.
 
+[`tools/thunderbird-forward-decrypt/`](tools/thunderbird-forward-decrypt) -- a separate
+Thunderbird add-on for forwarding encrypted S/MIME messages after decryption. Its stable 0.4.1
+flow uses the privileged `ForwardIntercept` API to redirect Forward into Thunderbird's
+decryption-aware Reply compose path, waits for `ComposeBodyReady`, clears recipients, retitles
+the subject, and extracts/re-attaches standalone files. The Experiment is startup-loaded and
+shares redirect state across MV3 background suspension. See its own
+[`README.md`](tools/thunderbird-forward-decrypt/README.md) for build, deployment, limitations,
+and release details.
+
 ## Continuous integration
 
 GitHub Actions run on every push to `trunk` and on pull requests:
