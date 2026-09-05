@@ -157,6 +157,28 @@ node --check api/ForwardIntercept/implementation.js
 unzip -t dist/forward-decrypt.xpi
 ```
 
+### Automated regression tests
+
+The Jest suite contains both API-flow tests and a behavioural Thunderbird
+Experiment harness. The harness executes `implementation.js` with mocked
+Thunderbird parent-process services and covers lifecycle failures which are not
+visible to ordinary WebExtension mocks:
+
+- startup wakes the MV3 background before the first Forward command;
+- repeated `getAPI()` calls reuse state after background suspension;
+- a mail window is patched only once, so duplicate initialization cannot open
+  multiple compose windows;
+- Reply is left unchanged while Forward is redirected exactly once;
+- `ComposeBodyReady` and compose-window closure finish the readiness wait;
+- add-on shutdown restores the original `ComposeMessage` function and
+  invalidates Thunderbird's startup cache.
+
+`.github/workflows/tools-forward-decrypt-test.yml` runs these tests, syntax
+checks, XPI assembly, and archive validation for pull requests, `trunk`, and all
+`tools-forward-decrypt-*` development branches. The release workflow repeats
+the same checks before it is allowed to upload an XPI, so a failing regression
+test blocks publication.
+
 Release tags use `tools-forward-decrypt-vX.Y.Z`. GitHub Actions builds and attaches
 `forward-decrypt.xpi`; `updates.json` is the Enterprise Policy auto-update feed.
 

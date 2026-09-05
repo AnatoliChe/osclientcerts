@@ -358,7 +358,8 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
 
       while (enumerator.hasMoreElements()) {
         try {
-          unpatchWindow(enumerator.getNext());
+          const xulWindow = enumerator.getNext();
+          unpatchWindow(xulWindow.docShell?.domWindow || xulWindow);
         } catch (_) {}
       }
 
