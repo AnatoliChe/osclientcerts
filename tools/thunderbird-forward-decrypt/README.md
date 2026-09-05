@@ -46,7 +46,7 @@ branch, and new releases are tagged and uploaded as GitHub Releases.
 
 ## How it works
 
-The stable release is **0.4.1**. The add-on registers its privileged intercept during
+The stable release is **0.4.2**. The add-on registers its privileged intercept during
 Thunderbird startup and uses these WebExtension listeners:
 
 | Event                  | Purpose                                                              |
