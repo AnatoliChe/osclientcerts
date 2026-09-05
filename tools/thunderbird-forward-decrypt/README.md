@@ -15,15 +15,14 @@ This add-on automatically:
    your compose format).
 4. **Re-adds** the real attachments from the original message (skipping inline images that
    rely on `cid:` references, which cannot be preserved).
- 5. **Enables S/MIME encryption** on the forward, so the new recipients also receive the
+5. **Enables S/MIME encryption** on the forward, so the new recipients also receive the
     message encrypted (and signed, if your identity supports it).
- 6. For **embedded `message/rfc822` containers** (e.g. messages forwarded via another system
+6. For **embedded `message/rfc822` containers** (e.g. messages forwarded via another system
     that wraps the S/MIME content inside an `rfc822` envelope): intercepts the forward and
     instead opens a **reply** on the container, clears the recipient fields, and leaves that
     reply as the compose window. A reply is the only way Thunderbird materializes the *full*
     decrypted content of such a container (text + inline images + file attachments) that the
-    WebExtension `messages`/`compose` APIs cannot otherwise address. The original (empty)
-    forward window is closed automatically.
+    WebExtension `messages`/`compose` APIs cannot otherwise address.
 
 You then add your new recipients and hit Send — the message goes out encrypted with your
 identity's certificate, just like composing from scratch.
@@ -47,7 +46,8 @@ branch, and new releases are tagged and uploaded as GitHub Releases.
 
 ## How it works
 
-The add-on registers two event listeners:
+The stable release is **0.4.1**. The add-on registers its privileged intercept during
+Thunderbird startup and uses these WebExtension listeners:
 
 | Event                  | Purpose                                                              |
 | ---------------------- | -------------------------------------------------------------------- |
@@ -93,6 +93,13 @@ The redirected compose waits for Thunderbird's `ComposeBodyReady` notification, 
 extracts and adds the decrypted standalone attachments. This adapts to fast and slow
 machines without a fixed startup delay.
 
+The Experiment is loaded by its `startup` lifecycle event and wakes the MV3 background
+before the first Forward command. Thunderbird may later suspend and recreate that background
+page; the privileged API therefore keeps one shared redirect state across background contexts.
+This preserves the captured message URI, redirect marker, readiness promise, and installed
+`ComposeMessage` wrapper after long idle periods. Startup scanning and `tabs.onCreated`
+cannot process the same compose tab twice.
+
 Two delayed sweeps (3 s and 8 s) handle the case where TB adds the `smime.p7m` attachment
 asynchronously after the initial pass. The `smime.p7m` envelope attachment is also removed
 **immediately** when caught by `onAttachmentAdded`, regardless of the tab's processing state.
@@ -106,7 +113,7 @@ asynchronously after the initial pass. The `smime.p7m` envelope attachment is al
 | `tabs`          | Detect compose windows (`tab.type === "messageCompose"`).                   |
 | `storage`       | Store the debug logging toggle (options page).                              |
 
-**v0.2.2 adds an Experiment API** (`ForwardIntercept`, declared under `experiment_apis`).
+The `ForwardIntercept` Experiment API is declared under `experiment_apis`.
 Including an Experiment replaces Thunderbird's per-permission prompt with a single
 "full, unrestricted access" install prompt, and it runs with access to the main process.
 The Experiment is the supported implementation for embedded S/MIME containers and is
@@ -140,6 +147,18 @@ enabled automatically.
 ./build.sh
 # → dist/forward-decrypt.xpi
 ```
+
+Run the local checks before publishing:
+
+```bash
+node --check background.js
+node --check api/ForwardIntercept/implementation.js
+./node_modules/.bin/jest --runInBand
+unzip -t dist/forward-decrypt.xpi
+```
+
+Release tags use `tools-forward-decrypt-vX.Y.Z`. GitHub Actions builds and attaches
+`forward-decrypt.xpi`; `updates.json` is the Enterprise Policy auto-update feed.
 
 ## See also
 
