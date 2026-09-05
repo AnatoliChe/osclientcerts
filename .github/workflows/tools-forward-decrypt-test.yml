@@ -1,0 +1,33 @@
+name: forward-decrypt tests
+
+on:
+  push:
+    branches: [trunk, "tools-forward-decrypt-*"]
+    paths:
+      - "tools/thunderbird-forward-decrypt/**"
+      - ".github/workflows/tools-forward-decrypt-*.yml"
+  pull_request:
+    paths:
+      - "tools/thunderbird-forward-decrypt/**"
+      - ".github/workflows/tools-forward-decrypt-*.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/thunderbird-forward-decrypt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tools/thunderbird-forward-decrypt/package-lock.json
+      - run: npm ci
+      - run: npm test -- --runInBand
+      - run: node --check background.js
+      - run: node --check api/ForwardIntercept/implementation.js
+      - run: ./build.sh
+      - run: unzip -t dist/forward-decrypt.xpi

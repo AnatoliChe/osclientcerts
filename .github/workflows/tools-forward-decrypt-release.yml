@@ -17,8 +17,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tools/thunderbird-forward-decrypt/package-lock.json
+
+      - name: Install test dependencies
+        run: npm ci
+        working-directory: tools/thunderbird-forward-decrypt
+
+      - name: Test add-on and Experiment lifecycle
+        run: npm test -- --runInBand
+        working-directory: tools/thunderbird-forward-decrypt
+
+      - name: Check JavaScript syntax
+        run: |
+          node --check background.js
+          node --check api/ForwardIntercept/implementation.js
+        working-directory: tools/thunderbird-forward-decrypt
+
       - name: Build xpi
         run: ./build.sh
+        working-directory: tools/thunderbird-forward-decrypt
+
+      - name: Verify xpi
+        run: unzip -t dist/forward-decrypt.xpi
         working-directory: tools/thunderbird-forward-decrypt
 
       - name: Attach xpi to GitHub release
