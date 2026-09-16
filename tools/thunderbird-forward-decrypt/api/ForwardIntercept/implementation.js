@@ -167,6 +167,15 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
       try {
         const { ok, data } = await streamMessageToString(messageUri);
         if (!ok || !data) return false;
+        /* The WebExtension MessagePart root may be a synthetic message/rfc822
+         * wrapper even when the RAW message starts with pkcs7-mime. Never
+         * require the raw and WebExtension trees to have the same root type. */
+        const unfolded = data.replace(/\r?\n[ \t]+/g, " ");
+        const headers = unfolded.split(/\r?\n\r?\n/, 1)[0];
+        const rootContentType = /^content-type\s*:\s*([^\r\n]+)/im.exec(headers)?.[1] || "";
+        const encryptedType = /^application\/(?:x-)?pkcs7-mime\b[^\r\n]*\bsmime-type\s*=\s*"?enveloped-data\b/i;
+        if (encryptedType.test(rootContentType)) return true;
+
         const root = getMimeTree(data, true);
         if (!root || mimeContentType(root) !== "message/rfc822") return false;
 
@@ -174,7 +183,6 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
          * embedded RFC822 entity in node.body instead of exposing subParts.
          * Check the parsed tree first and then unfolded MIME header lines. */
         if (nodeLooksEncryptedSmime(root)) return true;
-        const unfolded = data.replace(/\r?\n[ \t]+/g, " ");
         return /^content-type\s*:\s*application\/(?:x-)?pkcs7-mime\b[^\r\n]*\bsmime-type\s*=\s*"?enveloped-data\b/im.test(unfolded);
       } catch (e) {
         Services.console.logStringMessage(

@@ -239,7 +239,7 @@ describe("ForwardIntercept real lifecycle behaviour", () => {
     expect(await api.getAndClearRedirectPending()).toBe(false);
   });
 
-  test("top-level S/MIME uses normal Forward and is left to the background flow", async () => {
+  test("raw pkcs7-mime is redirected even when its root is not message/rfc822", async () => {
     const main = createWindow();
     const uri = "mailbox://message/top-level-smime";
     const topLevelSmime = [
@@ -255,8 +255,25 @@ describe("ForwardIntercept real lifecycle behaviour", () => {
     main.win.ComposeMessage(4, 0, null, [uri]);
     await flushAsyncForwardCheck();
 
-    expect(main.originalComposeMessage.mock.calls[0][0]).toBe(4);
-    expect(await api.getAndClearRedirectPending()).toBe(false);
+    expect(main.originalComposeMessage.mock.calls[0][0]).toBe(6);
+    expect(await api.getAndClearRedirectPending()).toBe(true);
+  });
+
+  test("signed-only S/MIME and a p7m file attached to ordinary mail are not redirected", async () => {
+    for (const raw of [
+      'Content-Type: application/pkcs7-mime; smime-type=signed-data\r\n\r\nsigned',
+      'Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: application/pkcs7-mime; smime-type=enveloped-data\r\n\r\nattachment',
+    ]) {
+      const main = createWindow();
+      const uri = "mailbox://message/not-encrypted-message";
+      const { ForwardIntercept } = loadExperiment([main], { [uri]: raw });
+      const api = new ForwardIntercept().getAPI({}).ForwardIntercept;
+      await api.setEnabled(true);
+      main.win.ComposeMessage(4, 0, null, [uri]);
+      await flushAsyncForwardCheck();
+      expect(main.originalComposeMessage.mock.calls[0][0]).toBe(4);
+      expect(await api.getAndClearRedirectPending()).toBe(false);
+    }
   });
 
   test("shutdown restores ComposeMessage and invalidates caches on addon reload", async () => {
