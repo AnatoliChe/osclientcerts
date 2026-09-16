@@ -35,7 +35,7 @@ function createWindow(href = "chrome://messenger/content/messenger.xhtml") {
   };
 }
 
-function loadExperiment(initialWindows = []) {
+function loadExperiment(initialWindows = [], rawByUri = {}) {
   class ExtensionAPI {}
   const windowListener = { current: null };
   const logs = [];
@@ -50,6 +50,31 @@ function loadExperiment(initialWindows = []) {
       })))),
     },
   };
+  const defaultRaw = [
+    "Content-Type: message/rfc822",
+    "",
+    "Content-Type: application/pkcs7-mime; smime-type=enveloped-data",
+  ].join("\r\n");
+  const MailServices = {
+    messageServiceFromURI: jest.fn(uri => ({
+      streamMessage(_uri, listener) {
+        const data = Object.prototype.hasOwnProperty.call(rawByUri, uri)
+          ? rawByUri[uri]
+          : defaultRaw;
+        listener.onStartRequest();
+        listener.onDataAvailable(null, { data }, 0, data.length);
+        listener.onStopRequest(null, 0);
+      },
+    })),
+  };
+  const Cc = {
+    "@mozilla.org/scriptableinputstream;1": {
+      createInstance: () => ({
+        init(input) { this.input = input; },
+        read(count) { return this.input.data.slice(0, count); },
+      }),
+    },
+  };
   const sandbox = {
     console,
     Promise,
@@ -57,17 +82,32 @@ function loadExperiment(initialWindows = []) {
     Uint8Array,
     File: class File {},
     Services,
+    Cc,
+    Ci: { nsIScriptableInputStream: Symbol("nsIScriptableInputStream") },
+    Components: { isSuccessCode: status => status === 0 },
     ChromeUtils: {
       generateQI: jest.fn(() => jest.fn()),
       importESModule(uri) {
         if (uri.includes("ExtensionCommon")) return { ExtensionCommon: { ExtensionAPI } };
         if (uri.includes("Timer")) return { setTimeout };
-        if (uri.includes("MailServices")) return { MailServices: {} };
+        if (uri.includes("MailServices")) return { MailServices };
         if (uri.includes("MimeTree")) {
           return {
             MimeTreeDecrypter: class {},
             MimeTreeEmitter: class {},
-            getMimeTree: jest.fn(),
+            getMimeTree: jest.fn(data => {
+              const rootType = /^content-type:\s*([^;\r\n]+)/im.exec(data)?.[1]
+                ?.trim().toLowerCase() || "text/plain";
+              const root = { contentType: rootType, fullContentType: rootType, subParts: [] };
+              if (/application\/(?:x-)?pkcs7-mime[^\r\n]*enveloped-data/i.test(data)) {
+                root.subParts.push({
+                  contentType: "application/pkcs7-mime",
+                  fullContentType: "application/pkcs7-mime; smime-type=enveloped-data",
+                  subParts: [],
+                });
+              }
+              return root;
+            }),
             mimeTreeToString: jest.fn(),
           };
         }
@@ -85,6 +125,9 @@ function loadExperiment(initialWindows = []) {
 }
 
 describe("ForwardIntercept real lifecycle behaviour", () => {
+  const flushAsyncForwardCheck = async () => {
+    await new Promise(resolve => setImmediate(resolve));
+  };
   test("startup wakes the MV3 background before the first Forward", async () => {
     const { ForwardIntercept } = loadExperiment();
     const wakeupBackground = jest.fn().mockResolvedValue(undefined);
@@ -126,6 +169,7 @@ describe("ForwardIntercept real lifecycle behaviour", () => {
       folder: { getUriForMsg: jest.fn(() => "mailbox://message/42") },
     };
     main.win.ComposeMessage(4, 0, null, [header]);
+    await flushAsyncForwardCheck();
 
     expect(main.originalComposeMessage.mock.calls[0][0]).toBe(6);
     const secondContext = experiment.getAPI({}).ForwardIntercept;
@@ -148,6 +192,7 @@ describe("ForwardIntercept real lifecycle behaviour", () => {
     const api = experiment.getAPI({}).ForwardIntercept;
     await api.setEnabled(true);
     main.win.ComposeMessage(4, 0, null, ["mailbox://message/42"]);
+    await flushAsyncForwardCheck();
 
     windowListener.current.onOpenWindow({ docShell: { domWindow: compose.win } });
     expect(compose.listener("compose-window-init").options).toEqual(
@@ -158,12 +203,60 @@ describe("ForwardIntercept real lifecycle behaviour", () => {
     await expect(api.waitForRedirectedComposeReady(100)).resolves.toBe("ready");
 
     main.win.ComposeMessage(4, 0, null, ["mailbox://message/43"]);
+    await flushAsyncForwardCheck();
     const closedCompose = createWindow("chrome://messenger/content/messengercompose/messengercompose.xhtml");
     closedCompose.win.gMsgCompose = compose.win.gMsgCompose;
     windowListener.current.onOpenWindow({ docShell: { domWindow: closedCompose.win } });
     closedCompose.dispatch("compose-window-init");
     closedCompose.dispatch("unload");
     await expect(api.waitForRedirectedComposeReady(100)).resolves.toBe("closed");
+  });
+
+  test("ordinary message with an attachment keeps Thunderbird's normal Forward", async () => {
+    const main = createWindow();
+    const uri = "mailbox://message/plain-with-attachment";
+    const ordinaryMessage = [
+      "Content-Type: multipart/mixed; boundary=ordinary",
+      "",
+      "--ordinary",
+      "Content-Type: text/plain",
+      "",
+      "hello",
+      "--ordinary",
+      "Content-Type: application/pdf",
+      "Content-Disposition: attachment; filename=report.pdf",
+    ].join("\r\n");
+    const { ForwardIntercept } = loadExperiment([main], { [uri]: ordinaryMessage });
+    const experiment = new ForwardIntercept();
+    const api = experiment.getAPI({}).ForwardIntercept;
+    await api.setEnabled(true);
+
+    main.win.ComposeMessage(4, 0, null, [uri]);
+    await flushAsyncForwardCheck();
+
+    expect(main.originalComposeMessage).toHaveBeenCalledTimes(1);
+    expect(main.originalComposeMessage.mock.calls[0][0]).toBe(4);
+    expect(await api.getAndClearRedirectPending()).toBe(false);
+  });
+
+  test("top-level S/MIME uses normal Forward and is left to the background flow", async () => {
+    const main = createWindow();
+    const uri = "mailbox://message/top-level-smime";
+    const topLevelSmime = [
+      "Content-Type: application/pkcs7-mime; smime-type=enveloped-data",
+      "",
+      "encrypted payload",
+    ].join("\r\n");
+    const { ForwardIntercept } = loadExperiment([main], { [uri]: topLevelSmime });
+    const experiment = new ForwardIntercept();
+    const api = experiment.getAPI({}).ForwardIntercept;
+    await api.setEnabled(true);
+
+    main.win.ComposeMessage(4, 0, null, [uri]);
+    await flushAsyncForwardCheck();
+
+    expect(main.originalComposeMessage.mock.calls[0][0]).toBe(4);
+    expect(await api.getAndClearRedirectPending()).toBe(false);
   });
 
   test("shutdown restores ComposeMessage and invalidates caches on addon reload", async () => {
