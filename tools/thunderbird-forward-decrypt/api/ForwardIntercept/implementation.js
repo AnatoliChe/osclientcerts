@@ -147,6 +147,51 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
       );
     }
 
+    function nodeLooksEncryptedSmime(node) {
+      if (!node) return false;
+      const contentType = [
+        node.fullContentType,
+        mimeHeader(node, "content-type"),
+      ].filter(Boolean).join(" ").toLowerCase();
+      if (
+        contentType.includes("pkcs7-mime") &&
+        contentType.includes("enveloped-data")
+      ) {
+        return true;
+      }
+      return (node.subParts || []).some(nodeLooksEncryptedSmime);
+    }
+
+    async function isEmbeddedEncryptedSmime(messageUri) {
+      if (!messageUri) return false;
+      try {
+        const { ok, data } = await streamMessageToString(messageUri);
+        if (!ok || !data) return false;
+        /* The WebExtension MessagePart root may be a synthetic message/rfc822
+         * wrapper even when the RAW message starts with pkcs7-mime. Never
+         * require the raw and WebExtension trees to have the same root type. */
+        const unfolded = data.replace(/\r?\n[ \t]+/g, " ");
+        const headers = unfolded.split(/\r?\n\r?\n/, 1)[0];
+        const rootContentType = /^content-type\s*:\s*([^\r\n]+)/im.exec(headers)?.[1] || "";
+        const encryptedType = /^application\/(?:x-)?pkcs7-mime\b[^\r\n]*\bsmime-type\s*=\s*"?enveloped-data\b/i;
+        if (encryptedType.test(rootContentType)) return true;
+
+        const root = getMimeTree(data, true);
+        if (!root || mimeContentType(root) !== "message/rfc822") return false;
+
+        /* Depending on the Thunderbird version, getMimeTree() may leave the
+         * embedded RFC822 entity in node.body instead of exposing subParts.
+         * Check the parsed tree first and then unfolded MIME header lines. */
+        if (nodeLooksEncryptedSmime(root)) return true;
+        return /^content-type\s*:\s*application\/(?:x-)?pkcs7-mime\b[^\r\n]*\bsmime-type\s*=\s*"?enveloped-data\b/im.test(unfolded);
+      } catch (e) {
+        Services.console.logStringMessage(
+          `[ForwardIntercept] S/MIME eligibility check failed for ${messageUri}: ${e}`
+        );
+        return false;
+      }
+    }
+
     function patchWindow(win) {
       if (!win || win.closed) {
         return;
@@ -178,26 +223,34 @@ var ForwardIntercept = class extends ExtensionCommon.ExtensionAPI {
         try {
           const [type, format, folder, messageArray] = args;
 
-          if (
-            enabled &&
-            isForwardType(type) &&
-            messageArray &&
-            messageArray.length === 1
-          ) {
-            Services.console.logStringMessage(
-              `[ForwardIntercept] REDIRECT Forward -> ReplyToSender: ${messageArray[0]}`
-            );
-
-            /* Remember which message the forward was for. Used later by the
-             * background script to decrypt + re-attach standalone files. */
-            lastForwardUri = uriOf(messageArray[0]);
-            Services.console.logStringMessage(
-              `[ForwardIntercept] capture lastForwardUri=${lastForwardUri}`
-            );
-
-            args[0] = COMPOSE_TYPE.ReplyToSender;
-            redirectPending = true;
-            redirectComposeReady = newRedirectComposeReady();
+          if (enabled && isForwardType(type) && messageArray?.length === 1) {
+            const originalThis = this;
+            const messageUri = uriOf(messageArray[0]);
+            /* Eligibility cannot be delegated to the background: by the time
+             * its compose event fires, changing Forward into Reply is already
+             * too late. Delay opening the compose window until the raw MIME has
+             * been checked. Ordinary messages always retain Thunderbird's
+             * original Forward path, including all attachments. */
+            void isEmbeddedEncryptedSmime(messageUri).then(shouldRedirect => {
+              if (shouldRedirect) {
+                Services.console.logStringMessage(
+                  `[ForwardIntercept] REDIRECT Forward -> ReplyToSender: ${messageArray[0]}`
+                );
+                lastForwardUri = messageUri;
+                Services.console.logStringMessage(
+                  `[ForwardIntercept] capture lastForwardUri=${lastForwardUri}`
+                );
+                args[0] = COMPOSE_TYPE.ReplyToSender;
+                redirectPending = true;
+                redirectComposeReady = newRedirectComposeReady();
+              } else {
+                Services.console.logStringMessage(
+                  `[ForwardIntercept] normal Forward (not embedded encrypted S/MIME): ${messageUri}`
+                );
+              }
+              original.call(originalThis, ...args);
+            });
+            return;
           }
         } catch (e) {
           Services.console.logStringMessage(

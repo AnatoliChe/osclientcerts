@@ -89,6 +89,13 @@ window is created**. The result is a single reply window with the full decrypted
 **no empty Forward-window flash**. The reply window still gets its recipients cleared and its
 `Re:` → `Fwd:` subject retitled by the background script, exactly as below.
 
+Before redirecting, the Experiment reads the source MIME and requires an encrypted
+S/MIME (`pkcs7-mime`, `smime-type=enveloped-data`) root, or a `message/rfc822`
+container with such an entity. A raw pkcs7-mime message can appear as a synthetic
+message/rfc822 root in WebExtension APIs; these representations are not interchangeable.
+Ordinary messages, including messages with normal file
+attachments, remain on Thunderbird's native Forward path and are not modified by the add-on.
+
 The redirected compose waits for Thunderbird's `ComposeBodyReady` notification, then
 extracts and adds the decrypted standalone attachments. This adapts to fast and slow
 machines without a fixed startup delay.
